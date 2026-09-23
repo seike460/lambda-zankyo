@@ -13,8 +13,8 @@ Metadata:
       as replayable records in your own S3 bucket.
     Author: seike460
     SpdxLicenseId: MIT
-    LicenseUrl: ../../LICENSE
-    ReadmeUrl: ../../README.md
+    LicenseUrl: ../LICENSE
+    ReadmeUrl: ../README.md
     Labels: [lambda, observability, replay, debugging, incidents]
     HomePageUrl: https://github.com/seike460/lambda-zankyo
     SemanticVersion: 0.1.0

@@ -4,12 +4,8 @@
   "description": "CDK construct that wires the zankyo Lambda layer, records bucket, and IAM to a function",
   "type": "module",
   "license": "MIT",
-  "main": "./src/index.ts",
-  "types": "./src/index.ts",
-  "publishConfig": {
-    "main": "./dist/index.js",
-    "types": "./dist/index.d.ts"
-  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
   "files": [
     "dist"
   ],
