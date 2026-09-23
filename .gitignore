@@ -4,6 +4,7 @@ dist/
 *.tsbuildinfo
 target/
 target-*/
+sar/packaged.yaml
 cdk.out/
 .cdk.staging/
 
