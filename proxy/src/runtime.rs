@@ -9,7 +9,11 @@ pub const EX_OSERR: u8 = 71;
 
 /// zankyo を噛ませず子プロセスだけ起動する（fail-open 経路）。
 pub async fn passthrough(argv: &[OsString]) -> u8 {
-    match Command::new(&argv[0]).args(&argv[1..]).status().await {
+    let Some((cmd, args)) = argv.split_first() else {
+        warn!("passthrough called with empty argv");
+        return EX_OSERR;
+    };
+    match Command::new(cmd).args(args).status().await {
         Ok(s) => exit_code(Ok(s)),
         Err(e) => {
             warn!(error = %e, "failed to spawn child process");
@@ -21,8 +25,14 @@ pub async fn passthrough(argv: &[OsString]) -> u8 {
 /// proxy 経由で子を起動する。`AWS_LAMBDA_RUNTIME_API` をこちらの
 /// listen ポートに張り替えて渡す。
 pub fn spawn_via_proxy(argv: &[OsString], port: u16) -> std::io::Result<Child> {
-    Command::new(&argv[0])
-        .args(&argv[1..])
+    let Some((cmd, args)) = argv.split_first() else {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "empty argv",
+        ));
+    };
+    Command::new(cmd)
+        .args(args)
         .env("AWS_LAMBDA_RUNTIME_API", format!("127.0.0.1:{port}"))
         .spawn()
 }

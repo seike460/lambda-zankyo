@@ -10,7 +10,7 @@ use crate::record::{
     error_context_from_body, init_request_id, response_error_context, FailureType,
 };
 use crate::store::Recorder;
-use crate::upstream::{collect_bounded, forward, plain, CollectError};
+use crate::upstream::{collect_bounded, forward, plain, CollectError, FORWARD_TIMEOUT};
 use bytes::Bytes;
 use http::{HeaderMap, Method, Request, Response, StatusCode};
 use http_body_util::{BodyExt, Full};
@@ -145,6 +145,7 @@ async fn handle(req: Request<Incoming>, st: &ProxyState) -> Response<BoxedBody> 
                 &path_and_query,
                 &parts.headers,
                 body_bytes,
+                Some(FORWARD_TIMEOUT),
             )
             .await
             {
@@ -167,7 +168,7 @@ async fn handle_next(
     headers: &HeaderMap,
     body: Bytes,
 ) -> Response<BoxedBody> {
-    let resp = match forward(st, method, pq, headers, body).await {
+    let resp = match forward(st, method, pq, headers, body, None).await {
         Ok(r) => r,
         Err(e) => {
             warn!(error = %e, "invocation/next forward failed");
@@ -226,7 +227,7 @@ async fn handle_completion(
     } else {
         response_error_context(&body)
     };
-    let resp = match forward(st, method, pq, headers, body.clone()).await {
+    let resp = match forward(st, method, pq, headers, body.clone(), Some(FORWARD_TIMEOUT)).await {
         Ok(r) => r,
         Err(e) => {
             warn!(error = %e, rid, "completion forward failed");
@@ -281,7 +282,7 @@ async fn handle_init_error(
         .and_then(|v| v.to_str().ok())
         .map(String::from);
     let ctx = error_context_from_body(&body, header_type);
-    let resp = match forward(st, method, pq, headers, body.clone()).await {
+    let resp = match forward(st, method, pq, headers, body.clone(), Some(FORWARD_TIMEOUT)).await {
         Ok(r) => r,
         Err(e) => {
             warn!(error = %e, "init/error forward failed");

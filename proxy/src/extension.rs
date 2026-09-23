@@ -18,6 +18,10 @@ const EXT_BASE: &str = "/2020-01-01/extension";
 const REGISTER_TIMEOUT: Duration = Duration::from_secs(10);
 /// event/next が切れたときの再ポーリング間隔
 const RETRY_DELAY: Duration = Duration::from_millis(500);
+/// ポーリング連続失敗の上限（500ms × 120 ≒ 60 秒）。これだけ失敗が
+/// 続く実行環境は Extensions API 自体が死んでいるとみなし、
+/// ループを抜ける（fail-open: timeout 捕捉だけを諦める）。
+const MAX_POLL_FAILURES: u32 = 120;
 
 #[derive(Debug, Deserialize)]
 pub struct ExtensionEvent {
@@ -93,6 +97,7 @@ pub async fn run_event_loop(
     inflight: Arc<InFlight>,
     recorder: Arc<Recorder>,
 ) {
+    let mut failures: u32 = 0;
     loop {
         match next_event(&client, &upstream_api, &ext_id).await {
             Ok(ev) if ev.event_type == "SHUTDOWN" => {
@@ -118,11 +123,21 @@ pub async fn run_event_loop(
                 }
                 return;
             }
-            Ok(_) => continue,
+            Ok(_) => {
+                failures = 0;
+                continue;
+            }
             Err(e) => {
                 // ネットワーク断・ボディ破損など。ポーリングを諦めると
                 // timeout 捕捉を失うので、短い待機を挟んで再試行する。
-                warn!(error = %e, "extension event poll failed; retrying");
+                // ただし連続失敗が上限を超えたら Extensions API の障害と
+                // みなしてループを抜ける（無限リトライで zombie 化しない）。
+                failures += 1;
+                if failures >= MAX_POLL_FAILURES {
+                    warn!(failures, "extension event poll keeps failing; giving up");
+                    return;
+                }
+                warn!(error = %e, failures, "extension event poll failed; retrying");
                 tokio::time::sleep(RETRY_DELAY).await;
             }
         }
