@@ -63,6 +63,27 @@ zankyo バイナリを起動し、zankyo が実際の runtime を子プロセス
   のフェイクを差し込む（ポートを直接実装するため cast 不要）。
   AWS 非依存。
 
+## 品質・保守性の不変条件
+
+このプロジェクトは次の不変条件を守る。レビュー・生成コードも同じ基準。
+
+- **設定はすべて env → SSM overlay → 既定値の順で解決する**。動作ノブ
+  （上限・タイムアウト・間隔）をコードへ埋め込まない。新しい数値設定は
+  `config.rs` の env 読み取り + `ssm_overlay.rs` の `SSM_NUM_FIELDS`
+  に 1 行で済む。
+- **拡張はデータの 1 エントリ追加で完結させる**。scrub パターンは
+  `scrub_data.rs`、CLI コマンドは `bin.ts` のディスパッチ、
+  SSM キーは `SSM_NUM_FIELDS`、build arch は `TARGETS`。
+- **エラーは握り潰さない**。失敗は `ZankyoError` または `Option` の
+  戻り値でモデル化し、捨てる経路はすべて文脈付きの warn で残す。
+- **rerun は冪等**。spill は atomic 書き込み → 数・鮮度上限 → 起動時・
+  定期回収 → 全件回収で dir 自体削除、とライフサイクルが閉じており、
+  再実行で残滓が増えない。
+- **型は緩めない**。TS は strict + noUncheckedIndexedAccess、`as`
+  キャストは使わない（AWS 境界は `ports.ts` の構造的ポート）。
+  Rust は `#![forbid(unsafe_code)]` + clippy -D warnings。
+  書式は biome / rustfmt で CI 強制する。
+
 ## データフロー
 
 1. `/next` 応答を中継しつつ requestId とイベントを `InFlight` に保持。
