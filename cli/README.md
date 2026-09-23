@@ -25,6 +25,14 @@ zankyo redrive <requestId> --confirm              # 既定は dry-run
 
 全コマンド共通: `--bucket` / `--region` / `--profile` / `--json`。
 
+AWS API 呼び出しのタイムアウトは env で調整できます
+（既定: 接続 5s・応答 30s。CI のハング防止）。
+
+| env | 既定 |
+|---|---|
+| `ZANKYO_CONNECT_TIMEOUT_MS` | `5000` |
+| `ZANKYO_REQUEST_TIMEOUT_MS` | `30000` |
+
 ## exit codes
 
 | code | 意味 |

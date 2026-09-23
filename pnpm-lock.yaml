@@ -18,14 +18,17 @@ importers:
   cli:
     dependencies:
       '@aws-sdk/client-lambda':
-        specifier: ^3.0.0
+        specifier: 3.1138.0
         version: 3.1138.0
       '@aws-sdk/client-s3':
-        specifier: ^3.0.0
+        specifier: 3.1138.0
         version: 3.1138.0
+      '@smithy/node-http-handler':
+        specifier: 4.12.1
+        version: 4.12.1
     devDependencies:
       '@types/node':
-        specifier: ^24.0.0
+        specifier: 24.13.6
         version: 24.13.6
       typescript:
         specifier: 5.9.2
@@ -34,13 +37,13 @@ importers:
   construct:
     devDependencies:
       '@types/node':
-        specifier: ^24.0.0
+        specifier: 24.13.6
         version: 24.13.6
       aws-cdk-lib:
-        specifier: ^2.200.0
+        specifier: 2.270.0
         version: 2.270.0(constructs@10.8.1)
       constructs:
-        specifier: ^10.4.0
+        specifier: 10.8.1
         version: 10.8.1
       typescript:
         specifier: 5.9.2
@@ -49,20 +52,20 @@ importers:
   examples:
     dependencies:
       aws-cdk-lib:
-        specifier: ^2.200.0
+        specifier: 2.270.0
         version: 2.270.0(constructs@10.8.1)
       constructs:
-        specifier: ^10.4.0
+        specifier: 10.8.1
         version: 10.8.1
       zankyo-cdk:
         specifier: workspace:*
         version: link:../construct
     devDependencies:
       '@types/node':
-        specifier: ^24.0.0
+        specifier: 24.13.6
         version: 24.13.6
       aws-cdk:
-        specifier: ^2.1000.0
+        specifier: 2.1142.0
         version: 2.1142.0
       typescript:
         specifier: 5.9.2

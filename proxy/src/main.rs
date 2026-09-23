@@ -3,31 +3,22 @@
 //! `AWS_LAMBDA_EXEC_WRAPPER` から起動され、argv に渡された本来の
 //! ランタイム起動コマンドを子プロセスとして実行する。
 //! 失敗時は原則 fail-open: zankyo 側の問題で関数本体を止めない。
+//! このファイルは配線と分岐だけを担い、各処理はライブラリモジュールへ委譲する。
 
-mod config;
-mod error;
-mod extension;
-mod inflight;
-mod proxy;
-mod record;
-mod scrub;
-mod store;
-
-use crate::config::Config;
-use crate::error::Result;
-use crate::proxy::{new_client, HttpClient, ProxyState};
-use crate::store::Recorder;
 use aws_config::BehaviorVersion;
 use std::collections::HashMap;
 use std::ffi::OsString;
 use std::process::ExitCode;
 use std::sync::Arc;
 use tokio::net::TcpListener;
-use tokio::process::Command;
 use tracing::{info, warn};
+use zankyo::config::Config;
+use zankyo::inflight::InFlight;
+use zankyo::proxy::{new_client, HttpClient, ProxyState};
+use zankyo::runtime::{exit_code, passthrough, spawn_via_proxy};
+use zankyo::store::Recorder;
 
 const EX_USAGE: u8 = 64;
-const EX_OSERR: u8 = 71;
 
 fn init_tracing() {
     // ログは stderr へ。Lambda は wrapper の stdout/stderr を関数ログに混ぜる。
@@ -85,7 +76,7 @@ async fn run(argv: Vec<OsString>) -> u8 {
 
     let shared = aws_config::defaults(BehaviorVersion::latest()).load().await;
     if let Some(param) = cfg.ssm_param.clone() {
-        match load_ssm(&shared, &param).await {
+        match zankyo::ssm::load_config_json(&shared, &param).await {
             Ok(json) => {
                 if let Err(e) = cfg.overlay_ssm_json(&json) {
                     warn!(error = %e, param, "invalid SSM config JSON; using env config");
@@ -119,11 +110,7 @@ async fn run(argv: Vec<OsString>) -> u8 {
         }
     };
 
-    let mut child = match Command::new(&argv[0])
-        .args(&argv[1..])
-        .env("AWS_LAMBDA_RUNTIME_API", format!("127.0.0.1:{port}"))
-        .spawn()
-    {
+    let mut child = match spawn_via_proxy(&argv, port) {
         Ok(c) => c,
         Err(e) => {
             warn!(error = %e, "failed to spawn runtime via proxy; passthrough");
@@ -143,12 +130,19 @@ async fn run(argv: Vec<OsString>) -> u8 {
             .cloned()
             .unwrap_or_else(|| "$LATEST".to_string()),
     ));
-    let inflight = Arc::new(crate::inflight::InFlight::new());
+    let inflight = Arc::new(InFlight::new());
     let client: HttpClient = new_client();
+
+    // 前回の実行で残った spill があれば再送する。非同期・ベストエフォートで、
+    // 起動経路を遅らせない。
+    {
+        let rec = recorder.clone();
+        tokio::spawn(async move { rec.recover_spills().await });
+    }
 
     // extension 登録はベストエフォート: 失敗しても proxy 経由の
     // /error・/response 捕捉は残る（timeout 捕捉だけが失われる）
-    let ext_handle = match extension::register(&client, &upstream).await {
+    let ext_handle = match zankyo::extension::register(&client, &upstream).await {
         Ok(ext_id) => {
             info!("registered as external extension");
             let (c, api, inf, rec) = (
@@ -158,7 +152,7 @@ async fn run(argv: Vec<OsString>) -> u8 {
                 recorder.clone(),
             );
             Some(tokio::spawn(async move {
-                extension::run_event_loop(c, api, ext_id, inf, rec).await;
+                zankyo::extension::run_event_loop(c, api, ext_id, inf, rec).await;
             }))
         }
         Err(e) => {
@@ -173,7 +167,7 @@ async fn run(argv: Vec<OsString>) -> u8 {
         inflight,
         recorder,
     });
-    tokio::spawn(proxy::serve(listener, state));
+    tokio::spawn(zankyo::proxy::serve(listener, state));
 
     // 子の終了コードをそのまま返す。SHUTDOWN フラッシュ後に extension 側が
     // 先に終わる場合は正常終了（0）として抜ける。
@@ -184,36 +178,4 @@ async fn run(argv: Vec<OsString>) -> u8 {
         },
         None => exit_code(child.wait().await),
     }
-}
-
-fn exit_code(status: std::io::Result<std::process::ExitStatus>) -> u8 {
-    match status {
-        Ok(s) => s.code().map(|c| c as u8).unwrap_or(1),
-        Err(_) => 1,
-    }
-}
-
-/// zankyo を噛ませず子プロセスだけ起動する（fail-open 経路）。
-async fn passthrough(argv: &[OsString]) -> u8 {
-    match Command::new(&argv[0]).args(&argv[1..]).status().await {
-        Ok(s) => s.code().map(|c| c as u8).unwrap_or(1),
-        Err(e) => {
-            warn!(error = %e, "failed to spawn child process");
-            EX_OSERR
-        }
-    }
-}
-
-async fn load_ssm(shared: &aws_config::SdkConfig, name: &str) -> Result<String> {
-    let ssm = aws_sdk_ssm::Client::new(shared);
-    let out = ssm
-        .get_parameter()
-        .name(name)
-        .with_decryption(true)
-        .send()
-        .await
-        .map_err(|e| crate::error::ZankyoError::Aws(e.to_string()))?;
-    out.parameter()
-        .and_then(|p| p.value().map(String::from))
-        .ok_or_else(|| crate::error::ZankyoError::Aws(format!("SSM parameter {name} has no value")))
 }

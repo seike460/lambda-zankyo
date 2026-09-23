@@ -1,1 +1,1 @@
-{ "threshold": 9.0, "samples": 1 }
+{ "threshold": 9.0, "samples": 1, "maxChars": 160000, "maxFileChars": 6000, "maxFiles": 400 }

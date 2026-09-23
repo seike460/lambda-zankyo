@@ -11,7 +11,7 @@ import { diffJson, formatDiffs } from '../diff.ts';
 import { CliError } from '../errors.ts';
 import { invokeFunction, qualifiedName } from '../invoke.ts';
 import { jsonOut } from '../output.ts';
-import { fetchRecord, resolveRecordKey } from '../store.ts';
+import { loadRecord } from '../store.ts';
 
 const USAGE = `zankyo diff — invoke the recorded event on two aliases and compare responses
 
@@ -37,11 +37,10 @@ export async function run(argv: string[]): Promise<number> {
   }
   const bucket = resolveBucket(values);
   const { s3, lambda } = makeClients(values);
-  const key = await resolveRecordKey(s3, bucket, {
+  const rec = await loadRecord(s3, bucket, {
     requestId,
     functionName: strVal(values.function),
   });
-  const rec = await fetchRecord(s3, bucket, key);
   const [ra, rb] = await Promise.all([
     invokeFunction(lambda, qualifiedName(rec.functionName, a), rec.event),
     invokeFunction(lambda, qualifiedName(rec.functionName, b), rec.event),

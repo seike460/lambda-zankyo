@@ -105,6 +105,8 @@ env を部分上書きします。複数関数で設定を一元管理するた�
 | `ZANKYO_SCRUB_MODE` | `mask` | `mask` / `hash`（HMAC 擬似名化）/ `off` |
 | `ZANKYO_MAX_EVENT_KB` | `256` | イベント保存の上限（超過は先頭のみ + `truncated`） |
 | `ZANKYO_FLUSH_BUDGET_MS` | `1200` | SHUTDOWN フラッシュの予算上限 |
+| `ZANKYO_PUT_TIMEOUT_MS` | `5000` | 通常経路の PutObject 上限時間 |
+| `ZANKYO_SPILL_DIR` | `/tmp/zankyo` | S3 失敗時・SHUTDOWN 時のローカル退避先 |
 | `ZANKYO_DISABLED` | `false` | 緊急停止スイッチ（passthrough） |
 
 ※「必須」は記録を有効にする条件です。未設定でも関数は正常に動きます。

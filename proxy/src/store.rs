@@ -18,11 +18,6 @@ use std::time::Duration;
 use time::OffsetDateTime;
 use tracing::{info, warn};
 
-/// PutObject の上限時間。呼び出し経路を遅らせないため短めに切る。
-const PUT_TIMEOUT: Duration = Duration::from_secs(5);
-/// SHUTDOWN 時・S3 失敗時の退避先。次の init で回収する拡張余地のため固定パス。
-const SPILL_DIR: &str = "/tmp/zankyo";
-
 pub struct Recorder {
     s3: aws_sdk_s3::Client,
     cfg: Config,
@@ -56,6 +51,10 @@ impl Recorder {
         Duration::from_millis(self.cfg.flush_budget_ms)
     }
 
+    fn put_timeout(&self) -> Duration {
+        Duration::from_millis(self.cfg.put_timeout_ms)
+    }
+
     /// レコードを組み立てて保存する。scrub はここで一括適用し、
     /// event/response 両方のレポートを集約する。
     pub async fn save(
@@ -75,7 +74,7 @@ impl Recorder {
                 return;
             }
         };
-        match tokio::time::timeout(PUT_TIMEOUT, self.put(&key, body.clone())).await {
+        match tokio::time::timeout(self.put_timeout(), self.put(&key, body.clone())).await {
             Ok(Ok(())) => info!(request_id, key, "failure record saved"),
             Ok(Err(e)) => {
                 warn!(request_id, error = %e, "s3 put failed; spilling to /tmp");
@@ -178,12 +177,78 @@ impl Recorder {
             .map_err(|e| ZankyoError::Aws(e.to_string()))
     }
 
+    /// 起動時に前回残った spill を再送する。spill ファイルは record JSON
+    /// 本体なので、そこから functionName/invokedAt/requestId を読み
+    /// 元の S3 キーを再構成する。送れたものだけ削除するため冪等に再実行できる。
+    pub async fn recover_spills(&self) {
+        let dir = Path::new(&self.cfg.spill_dir);
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return; // ディレクトリ自体が無い = 退避なし
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("json") {
+                continue;
+            }
+            let Ok(body) = std::fs::read(&path) else {
+                continue;
+            };
+            let Some(key) = key_for_spilled(&body) else {
+                continue;
+            };
+            match tokio::time::timeout(self.put_timeout(), self.put(&key, body)).await {
+                Ok(Ok(())) => {
+                    let _ = std::fs::remove_file(&path);
+                    info!(path = %path.display(), key, "recovered spilled record");
+                }
+                // S3 が届かない状態なら残りも同じ。次の init に持ち越す
+                _ => break,
+            }
+        }
+    }
+
     fn spill(&self, request_id: &str, body: &[u8]) {
-        let path = Path::new(SPILL_DIR).join(format!("{request_id}.json"));
-        let result = std::fs::create_dir_all(SPILL_DIR).and_then(|_| std::fs::write(&path, body));
+        let dir = &self.cfg.spill_dir;
+        let path = Path::new(dir).join(format!("{request_id}.json"));
+        let result = std::fs::create_dir_all(dir).and_then(|_| std::fs::write(&path, body));
         match result {
             Ok(()) => info!(request_id, path = %path.display(), "record spilled to /tmp"),
             Err(e) => warn!(request_id, error = %e, "failed to spill record"),
         }
+    }
+}
+
+/// spill した record JSON から S3 キーを再構成する。
+/// invokedAt は `yyyy-mm-ddTHH:MM:SSZ` 固定長なので日付部分だけ切り出す。
+fn key_for_spilled(body: &[u8]) -> Option<String> {
+    let v: Value = serde_json::from_slice(body).ok()?;
+    let function = v.get("functionName")?.as_str()?;
+    let request_id = v.get("requestId")?.as_str()?;
+    let invoked_at = v.get("invokedAt")?.as_str()?;
+    let (y, m, d) = (
+        invoked_at.get(0..4)?,
+        invoked_at.get(5..7)?,
+        invoked_at.get(8..10)?,
+    );
+    Some(format!("zankyo/{function}/{y}/{m}/{d}/{request_id}.json"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn key_for_spilled_rebuilds_layout() {
+        let body = br#"{"functionName":"fn","requestId":"r1","invokedAt":"2026-09-22T01:02:03Z"}"#;
+        assert_eq!(
+            key_for_spilled(body),
+            Some("zankyo/fn/2026/09/22/r1.json".to_string())
+        );
+    }
+
+    #[test]
+    fn key_for_spilled_rejects_malformed() {
+        assert_eq!(key_for_spilled(b"not json"), None);
+        assert_eq!(key_for_spilled(br#"{"functionName":"fn"}"#), None);
     }
 }

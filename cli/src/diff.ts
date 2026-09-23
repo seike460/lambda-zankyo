@@ -13,7 +13,7 @@ export interface JsonDiff {
 export function diffJson(a: unknown, b: unknown, path = '$'): JsonDiff[] {
   if (Object.is(a, b)) return [];
   if (isPlainObject(a) && isPlainObject(b)) {
-    return diffObjects(a as Record<string, unknown>, b as Record<string, unknown>, path);
+    return diffObjects(a, b, path);
   }
   if (Array.isArray(a) && Array.isArray(b)) {
     return diffArrays(a, b, path);

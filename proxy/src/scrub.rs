@@ -8,27 +8,12 @@
 //! - 純粋関数として実装し、IO（S3/時刻）に触れない。テストはこのファイル内。
 
 use crate::config::ScrubMode;
+use crate::scrub_data::{DEFAULT_DENYLIST, PATTERNS};
 use hmac::{Hmac, Mac};
 use regex::Regex;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
-
-/// 既定のフィールド名 denylist（正規化後の形）。
-/// セパレータ（`_` `-` `.` 空白）と大文字小文字は正規化で潰して照合する。
-const DEFAULT_DENYLIST: &[&str] = &[
-    "password",
-    "secret",
-    "token",
-    "apikey",
-    "authorization",
-    "privatekey",
-    "sessionid",
-    "ssn",
-    "creditcard",
-    "cvv",
-    "pin",
-];
 
 /// フィールド名の正規化: 英数字以外を落として小文字化。
 /// `api-key`/`apiKey`/`API_KEY` がすべて `apikey` になる。
@@ -38,90 +23,6 @@ pub fn normalize_field(name: &str) -> String {
         .map(|c| c.to_ascii_lowercase())
         .collect()
 }
-
-fn luhn_ok(text: &str) -> bool {
-    let digits: Vec<u32> = text
-        .chars()
-        .filter(|c| c.is_ascii_digit())
-        .filter_map(|c| c.to_digit(10))
-        .collect();
-    if !(13..=19).contains(&digits.len()) {
-        return false;
-    }
-    let mut sum = 0u32;
-    let mut double = false;
-    for d in digits.iter().rev() {
-        let mut x = *d;
-        if double {
-            x *= 2;
-            if x > 9 {
-                x -= 9;
-            }
-        }
-        sum += x;
-        double = !double;
-    }
-    sum % 10 == 0
-}
-
-fn ipv4_ok(text: &str) -> bool {
-    text.split('.').all(|o| o.parse::<u8>().is_ok())
-}
-
-fn phone_ok(text: &str) -> bool {
-    let n = text.chars().filter(|c| c.is_ascii_digit()).count();
-    (9..=15).contains(&n)
-}
-
-fn always(_: &str) -> bool {
-    true
-}
-
-struct PatternRule {
-    name: &'static str,
-    re: &'static str,
-    /// 誤検出を減らすための後検証（Luhn・桁数・オクテット範囲）。
-    validate: fn(&str) -> bool,
-}
-
-const PATTERNS: &[PatternRule] = &[
-    PatternRule {
-        name: "email",
-        re: r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}",
-        validate: always,
-    },
-    PatternRule {
-        name: "jwt",
-        // JWT は header が必ず "eyJ" (base64 of `{"`) で始まる
-        re: r"eyJ[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]{4,}",
-        validate: always,
-    },
-    PatternRule {
-        name: "credit_card",
-        re: r"(?:\d[ -]?){12,18}\d",
-        validate: luhn_ok,
-    },
-    PatternRule {
-        name: "aws_access_key",
-        re: r"\b(?:AKIA|ASIA|ABIA|ACCA)[0-9A-Z]{16}\b",
-        validate: always,
-    },
-    PatternRule {
-        name: "bearer_token",
-        re: r"(?i)bearer\s+[A-Za-z0-9._~+/=-]{10,}",
-        validate: always,
-    },
-    PatternRule {
-        name: "phone",
-        re: r"\+\d[\d .()-]{7,17}\d|\b\d{3}[-.]\d{3}[-.]\d{4}\b",
-        validate: phone_ok,
-    },
-    PatternRule {
-        name: "ipv4",
-        re: r"\b\d{1,3}(?:\.\d{1,3}){3}\b",
-        validate: ipv4_ok,
-    },
-];
 
 struct Compiled {
     name: &'static str,

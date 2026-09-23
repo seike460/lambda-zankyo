@@ -4,7 +4,20 @@
  */
 import { LambdaClient } from '@aws-sdk/client-lambda';
 import { S3Client } from '@aws-sdk/client-s3';
+import { NodeHttpHandler } from '@smithy/node-http-handler';
 import { strVal } from './args.ts';
+
+/**
+ * 外部呼び出しに黙って掛かるタイムアウト。
+ * CLI がハングして CI を止めないよう、接続 5s・応答 30s で打ち切る。
+ * ZANKYO_CONNECT_TIMEOUT_MS / ZANKYO_REQUEST_TIMEOUT_MS で調整可能。
+ */
+export const envTimeout = (name: string, fallback: number): number => {
+  const v = process.env[name];
+  if (v === undefined || v === '') return fallback;
+  const n = Number(v);
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : fallback;
+};
 
 export interface AwsClients {
   s3: S3Client;
@@ -20,7 +33,11 @@ export function makeClients(values: Record<string, unknown>): AwsClients {
     process.env.AWS_PROFILE = profile;
   }
   const region = strVal(values.region);
-  const cfg = region ? { region } : {};
+  const requestHandler = new NodeHttpHandler({
+    connectionTimeout: envTimeout('ZANKYO_CONNECT_TIMEOUT_MS', 5_000),
+    requestTimeout: envTimeout('ZANKYO_REQUEST_TIMEOUT_MS', 30_000),
+  });
+  const cfg = { requestHandler, ...(region ? { region } : {}) };
   return {
     s3: new S3Client(cfg),
     lambda: new LambdaClient(cfg),

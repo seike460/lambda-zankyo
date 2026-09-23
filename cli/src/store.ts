@@ -2,12 +2,7 @@
  * S3 上の失敗レコードへのアクセス（薄い IO 層）。
  * キー規約の解釈は record.ts の純粋関数に寄せ、ここは取得だけを担う。
  */
-import {
-  GetObjectCommand,
-  ListObjectsV2Command,
-  type ListObjectsV2CommandOutput,
-  type S3Client,
-} from '@aws-sdk/client-s3';
+import { GetObjectCommand, ListObjectsV2Command, type S3Client } from '@aws-sdk/client-s3';
 import { CliError } from './errors.ts';
 import { keyMatchesRequestId, parseRecord, type ZankyoRecord } from './record.ts';
 
@@ -35,7 +30,7 @@ export async function listRecordKeys(
   const refs: RecordRef[] = [];
   let token: string | undefined;
   do {
-    const out: ListObjectsV2CommandOutput = await s3.send(
+    const out = await s3.send(
       new ListObjectsV2Command({ Bucket: bucket, Prefix: prefix, ContinuationToken: token }),
     );
     for (const o of out.Contents ?? []) {
@@ -105,4 +100,13 @@ export async function resolveRecordKey(s3: S3Client, bucket: string, q: KeyQuery
     4,
     'check `zankyo list` for available requestIds',
   );
+}
+
+/**
+ * キー解決と本体取得をまとめる共通経路。requestId/--last どちらの
+ * 指定形でも呼び出し側が分岐を持たなくて済むようにする。
+ */
+export async function loadRecord(s3: S3Client, bucket: string, q: KeyQuery): Promise<ZankyoRecord> {
+  const key = await resolveRecordKey(s3, bucket, q);
+  return fetchRecord(s3, bucket, key);
 }

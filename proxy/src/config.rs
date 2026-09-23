@@ -11,6 +11,8 @@ use std::collections::{BTreeSet, HashMap};
 
 pub const DEFAULT_MAX_EVENT_KB: usize = 256;
 pub const DEFAULT_FLUSH_BUDGET_MS: u64 = 1_200;
+pub const DEFAULT_PUT_TIMEOUT_MS: u64 = 5_000;
+pub const DEFAULT_SPILL_DIR: &str = "/tmp/zankyo";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ScrubMode {
@@ -35,6 +37,10 @@ pub struct Config {
     pub max_event_kb: usize,
     /// SHUTDOWN 検知後に S3 フラッシュへ使える時間の上限。
     pub flush_budget_ms: u64,
+    /// 通常経路の PutObject 上限時間。呼び出し経路を遅らせないため短め。
+    pub put_timeout_ms: u64,
+    /// S3 失敗時・SHUTDOWN 時のローカル退避先。
+    pub spill_dir: String,
     pub disabled: bool,
 }
 
@@ -83,6 +89,8 @@ impl Config {
             scrub_mode: ScrubMode::Mask,
             max_event_kb: DEFAULT_MAX_EVENT_KB,
             flush_budget_ms: DEFAULT_FLUSH_BUDGET_MS,
+            put_timeout_ms: DEFAULT_PUT_TIMEOUT_MS,
+            spill_dir: DEFAULT_SPILL_DIR.to_string(),
             disabled: false,
         };
         if let Some(v) = get("ZANKYO_SCRUB_FIELDS") {
@@ -96,6 +104,12 @@ impl Config {
         }
         if let Some(v) = get("ZANKYO_FLUSH_BUDGET_MS") {
             cfg.flush_budget_ms = parse_u64("ZANKYO_FLUSH_BUDGET_MS", v)?;
+        }
+        if let Some(v) = get("ZANKYO_PUT_TIMEOUT_MS") {
+            cfg.put_timeout_ms = parse_u64("ZANKYO_PUT_TIMEOUT_MS", v)?;
+        }
+        if let Some(v) = get("ZANKYO_SPILL_DIR") {
+            cfg.spill_dir = v.to_string();
         }
         if let Some(v) = get("ZANKYO_DISABLED") {
             cfg.disabled = parse_bool(v);
@@ -127,6 +141,12 @@ impl Config {
         if let Some(v) = p.flush_budget_ms {
             self.flush_budget_ms = v;
         }
+        if let Some(v) = p.put_timeout_ms {
+            self.put_timeout_ms = v;
+        }
+        if let Some(v) = p.spill_dir {
+            self.spill_dir = v;
+        }
         if let Some(v) = p.disabled {
             self.disabled = v;
         }
@@ -149,6 +169,10 @@ struct Partial {
     max_event_kb: Option<usize>,
     #[serde(rename = "ZANKYO_FLUSH_BUDGET_MS")]
     flush_budget_ms: Option<u64>,
+    #[serde(rename = "ZANKYO_PUT_TIMEOUT_MS")]
+    put_timeout_ms: Option<u64>,
+    #[serde(rename = "ZANKYO_SPILL_DIR")]
+    spill_dir: Option<String>,
     #[serde(rename = "ZANKYO_DISABLED")]
     disabled: Option<bool>,
 }

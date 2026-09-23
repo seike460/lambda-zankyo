@@ -103,15 +103,7 @@ pub async fn run_event_loop(
                 }
                 // フラッシュ予算は設定値と、イベントが示す凍結期限の残時間の小さい方。
                 // deadlineMs が来ない環境では設定値のみで判断する。
-                let budget = ev
-                    .deadline_ms
-                    .and_then(|d| {
-                        let now_ms = time::OffsetDateTime::now_utc().unix_timestamp() * 1000;
-                        let remaining = d - now_ms - 200; // 200ms は送り出しの安全マージン
-                        u64::try_from(remaining).ok()
-                    })
-                    .map(|ms| recorder.flush_budget().min(Duration::from_millis(ms)))
-                    .unwrap_or_else(|| recorder.flush_budget());
+                let budget = flush_budget_for(ev.deadline_ms, recorder.flush_budget());
                 let flush = async {
                     for inv in pending {
                         recorder.save_during_shutdown(inv).await;
@@ -130,5 +122,65 @@ pub async fn run_event_loop(
                 tokio::time::sleep(RETRY_DELAY).await;
             }
         }
+    }
+}
+
+/// SHUTDOWN イベントの deadlineMs と設定予算から実際のフラッシュ予算を決める。
+/// 凍結期限の 200ms 手前までを残時間とみなし、設定予算との小さい方を取る。
+/// deadlineMs が無い・過去・負値のときは設定予算をそのまま使う。
+fn flush_budget_for(deadline_ms: Option<i64>, configured: Duration) -> Duration {
+    deadline_ms
+        .and_then(|d| {
+            let now_ms = time::OffsetDateTime::now_utc().unix_timestamp() * 1000;
+            u64::try_from(d - now_ms - 200).ok()
+        })
+        .map(|ms| configured.min(Duration::from_millis(ms)))
+        .unwrap_or(configured)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn budget_without_deadline_uses_configured() {
+        let cfg = Duration::from_millis(1200);
+        assert_eq!(flush_budget_for(None, cfg), cfg);
+    }
+
+    #[test]
+    fn budget_is_capped_by_configured() {
+        let cfg = Duration::from_millis(1200);
+        // 凍結期限が 60 秒先なら残時間より設定予算の方が小さい
+        let far = time::OffsetDateTime::now_utc().unix_timestamp() * 1000 + 60_000;
+        assert_eq!(flush_budget_for(Some(far), cfg), cfg);
+    }
+
+    #[test]
+    fn budget_shrinks_to_remaining_window() {
+        let cfg = Duration::from_millis(1200);
+        // 凍結期限が 700ms 先 → 残 500ms 程度になるはず
+        let near = time::OffsetDateTime::now_utc().unix_timestamp() * 1000 + 700;
+        let b = flush_budget_for(Some(near), cfg);
+        assert!(b < cfg && b <= Duration::from_millis(500));
+    }
+
+    #[test]
+    fn past_deadline_falls_back_to_configured() {
+        let cfg = Duration::from_millis(1200);
+        // 残時間が負 → u64 変換に失敗するので設定予算へ倒れる
+        let past = time::OffsetDateTime::now_utc().unix_timestamp() * 1000 - 1000;
+        assert_eq!(flush_budget_for(Some(past), cfg), cfg);
+    }
+
+    #[test]
+    fn shutdown_event_parses() {
+        let ev: ExtensionEvent = serde_json::from_str(
+            r#"{"eventType":"SHUTDOWN","shutdownReason":"timeout","deadlineMs":1}"#,
+        )
+        .unwrap();
+        assert_eq!(ev.event_type, "SHUTDOWN");
+        assert_eq!(ev.shutdown_reason.as_deref(), Some("timeout"));
+        assert_eq!(ev.deadline_ms, Some(1));
     }
 }

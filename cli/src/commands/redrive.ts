@@ -8,7 +8,7 @@ import {
 import { makeClients } from '../aws.ts';
 import { invokeFunction, qualifiedName } from '../invoke.ts';
 import { jsonOut } from '../output.ts';
-import { fetchRecord, resolveRecordKey } from '../store.ts';
+import { loadRecord } from '../store.ts';
 
 const USAGE = `zankyo redrive — re-invoke the production function with the recorded event
 
@@ -30,11 +30,10 @@ export async function run(argv: string[]): Promise<number> {
   const requestId = requirePositional(positionals, 0, 'requestId');
   const bucket = resolveBucket(values);
   const { s3, lambda } = makeClients(values);
-  const key = await resolveRecordKey(s3, bucket, {
+  const rec = await loadRecord(s3, bucket, {
     requestId,
     functionName: strVal(values.function),
   });
-  const rec = await fetchRecord(s3, bucket, key);
   const target = qualifiedName(rec.functionName, strVal(values.alias));
   if (values.confirm !== true) {
     const summary = {

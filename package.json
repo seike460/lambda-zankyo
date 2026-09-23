@@ -16,5 +16,8 @@
   "devDependencies": {
     "@biomejs/biome": "2.2.4",
     "typescript": "5.9.2"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": []
   }
 }

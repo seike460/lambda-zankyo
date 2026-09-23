@@ -31,6 +31,9 @@ use tracing::{debug, warn};
 pub type BoxedBody = http_body_util::combinators::BoxBody<Bytes, hyper::Error>;
 pub type HttpClient = Client<HttpConnector, BoxedBody>;
 
+/// accept 失敗時の再試行間隔。一時的な FD 枯渇等での busy loop を避ける。
+const ACCEPT_BACKOFF: std::time::Duration = std::time::Duration::from_millis(50);
+
 /// 空 or バッファ済みボディを BoxedBody に揃える。
 pub fn boxed_full<B: Into<Bytes>>(b: B) -> BoxedBody {
     Full::new(b.into())
@@ -70,7 +73,7 @@ pub async fn serve(listener: TcpListener, state: Arc<ProxyState>) {
             }
             Err(e) => {
                 warn!(error = %e, "accept failed");
-                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                tokio::time::sleep(ACCEPT_BACKOFF).await;
             }
         }
     }
@@ -309,7 +312,9 @@ async fn forward(
             }
             h.append(k.clone(), v.clone());
         }
-        h.insert(CONTENT_LENGTH, body.len().to_string().parse().unwrap());
+        if let Ok(v) = body.len().to_string().parse() {
+            h.insert(CONTENT_LENGTH, v);
+        }
     }
     let req = builder.body(boxed_full(body))?;
     st.client

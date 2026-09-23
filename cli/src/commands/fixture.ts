@@ -3,7 +3,7 @@ import { parseCliArgs, resolveBucket, SHARED_OPTIONS, strVal } from '../args-bun
 import { makeClients } from '../aws.ts';
 import { CliError } from '../errors.ts';
 import { fixtureJson } from '../fixture.ts';
-import { fetchRecord, resolveRecordKey } from '../store.ts';
+import { loadRecord } from '../store.ts';
 
 const USAGE = `zankyo fixture — write a sam local invoke -e event file from a failure record
 
@@ -28,12 +28,11 @@ export async function run(argv: string[]): Promise<number> {
   }
   const bucket = resolveBucket(values);
   const { s3 } = makeClients(values);
-  const key = await resolveRecordKey(s3, bucket, {
+  const rec = await loadRecord(s3, bucket, {
     requestId,
     last,
     functionName: strVal(values.function),
   });
-  const rec = await fetchRecord(s3, bucket, key);
   const body = fixtureJson(rec);
   const out = strVal(values.out);
   if (out) {
