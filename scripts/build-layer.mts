@@ -33,21 +33,18 @@ mkdirSync(outDir, { recursive: true });
 mkdirSync(join(ROOT, 'sar/dist'), { recursive: true });
 
 // BUILDER は `cargo build` 相当のコマンド行全体（"cross build" や
-// "cargo zigbuild"）として解釈する。未指定なら cross があれば使い、
+// "cargo zigbuild"）として解釈する。分割は空白区切りのみで
+// シェル式のクォートは解釈しない。未指定なら cross があれば使い、
 // 無ければ cargo に落ちる。
-const builderArgv = (
-  process.env.BUILDER ??
-  (spawnSync('cross', ['--version'], { stdio: 'ignore' }).status === 0
-    ? 'cross build'
-    : 'cargo build')
-)
-  .split(/\s+/)
-  .filter(Boolean);
-const [builderCmd, ...builderArgs] = builderArgv;
-if (!builderCmd) {
-  console.error('BUILDER is empty');
-  process.exit(1);
-}
+const builderArgv = () =>
+  (
+    process.env.BUILDER ??
+    (spawnSync('cross', ['--version'], { stdio: 'ignore' }).status === 0
+      ? 'cross build'
+      : 'cargo build')
+  )
+    .split(/\s+/)
+    .filter(Boolean);
 const skipBuild = process.env.SKIP_BUILD === '1';
 const EPOCH = new Date(0);
 
@@ -58,6 +55,11 @@ for (const arch of arches) {
     process.exit(1);
   }
   if (!skipBuild) {
+    const [builderCmd, ...builderArgs] = builderArgv();
+    if (!builderCmd) {
+      console.error('BUILDER is empty');
+      process.exit(1);
+    }
     console.log(`== building ${target} ==`);
     execFileSync(builderCmd, [...builderArgs, '--release', '--target', target, '-p', 'zankyo'], {
       cwd: ROOT,

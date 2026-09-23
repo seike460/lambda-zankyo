@@ -134,4 +134,22 @@ describe('fetchRecord', () => {
     const s3 = fakeS3([], '{"hello":1}');
     await assert.rejects(() => fetchRecord(s3, 'bkt', 'k'), CliError);
   });
+
+  it('warns on stderr for unknown failureType but still returns the record', async () => {
+    const newer = JSON.stringify({
+      ...(JSON.parse(VALID_RECORD) as Record<string, unknown>),
+      failureType: 'exploded',
+    });
+    const s3 = fakeS3([], newer);
+    const original = console.error;
+    const warnings: string[] = [];
+    console.error = (...args: unknown[]) => warnings.push(args.join(' '));
+    try {
+      const rec = await fetchRecord(s3, 'bkt', 'zankyo/fn/2026/09/22/r1.json');
+      assert.equal(rec.failureType, 'exploded');
+    } finally {
+      console.error = original;
+    }
+    assert.ok(warnings.some((w) => w.includes('unknown failureType')));
+  });
 });

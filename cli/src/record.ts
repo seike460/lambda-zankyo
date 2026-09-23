@@ -4,11 +4,14 @@
  */
 import { CliError } from './errors.ts';
 
+const KNOWN_FAILURE_TYPES = ['handler_error', 'init_error', 'timeout'] as const;
+
 /**
  * proxy が現在書き出す failureType 値。wire 上は opaque string として
  * 扱い、新バージョンが追加した型も旧 CLI で読める（前方互換）。
+ * 既知集合に型を追加する場合は KNOWN_FAILURE_TYPES だけを更新する。
  */
-export type FailureType = 'handler_error' | 'init_error' | 'timeout';
+export type FailureType = (typeof KNOWN_FAILURE_TYPES)[number];
 
 /** S3 キーの先頭セグメント。proxy/src/record.rs の KEY_PREFIX と揃える。 */
 export const RECORD_PREFIX = 'zankyo';
@@ -42,15 +45,11 @@ export interface ZankyoRecord {
   truncated?: boolean;
 }
 
-const KNOWN_FAILURE_TYPES: ReadonlySet<string> = new Set([
-  'handler_error',
-  'init_error',
-  'timeout',
-]);
+const KNOWN_FAILURE_TYPE_SET: ReadonlySet<string> = new Set(KNOWN_FAILURE_TYPES);
 
 /** 既知でない failureType は警告対象（読み込み自体は前方互換で通す）。 */
 export function isKnownFailureType(v: string): v is FailureType {
-  return KNOWN_FAILURE_TYPES.has(v);
+  return KNOWN_FAILURE_TYPE_SET.has(v);
 }
 
 export function isRecord(v: unknown): v is ZankyoRecord {
