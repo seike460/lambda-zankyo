@@ -1,10 +1,4 @@
-import {
-  parseCliArgs,
-  requirePositional,
-  resolveBucket,
-  SHARED_OPTIONS,
-  strVal,
-} from '../args-bundle.ts';
+import { parseCliArgs, requirePositional, resolveBucket, SHARED_OPTIONS, strVal } from '../args.ts';
 import { type AwsClients, makeClients } from '../aws.ts';
 import { invokeFunction, qualifiedName } from '../invoke.ts';
 import { jsonOut } from '../output.ts';

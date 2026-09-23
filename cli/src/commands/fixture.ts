@@ -1,5 +1,5 @@
 import { writeFile } from 'node:fs/promises';
-import { parseCliArgs, resolveBucket, SHARED_OPTIONS, strVal } from '../args-bundle.ts';
+import { parseCliArgs, resolveBucket, SHARED_OPTIONS, strVal } from '../args.ts';
 import { type AwsClients, makeClients } from '../aws.ts';
 import { CliError } from '../errors.ts';
 import { fixtureJson } from '../fixture.ts';

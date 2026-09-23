@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import pkg from '../package.json' with { type: 'json' };
 /**
  * zankyo CLI エントリポイント。
  * コマンドディスパッチとエラー→exit code の変換だけを行い、
@@ -11,7 +12,7 @@ import { run as runRedrive } from './commands/redrive.ts';
 import { run as runReplay } from './commands/replay.ts';
 import { CliError, errMessage } from './errors.ts';
 
-const VERSION = '0.1.0';
+const VERSION = pkg.version;
 
 const USAGE = `zankyo ${VERSION} — replay failed synchronous Lambda invocations
 

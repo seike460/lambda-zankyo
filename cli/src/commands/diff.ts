@@ -5,7 +5,7 @@ import {
   SHARED_OPTIONS,
   strList,
   strVal,
-} from '../args-bundle.ts';
+} from '../args.ts';
 import { type AwsClients, makeClients } from '../aws.ts';
 import { diffJson, formatDiffs } from '../diff.ts';
 import { CliError } from '../errors.ts';

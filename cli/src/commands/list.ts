@@ -1,14 +1,8 @@
-import {
-  parseCliArgs,
-  parseRecordKey,
-  parseSince,
-  resolveBucket,
-  SHARED_OPTIONS,
-  strVal,
-} from '../args-bundle.ts';
+import { parseCliArgs, parseSince, resolveBucket, SHARED_OPTIONS, strVal } from '../args.ts';
 import { type AwsClients, makeClients } from '../aws.ts';
 import { CliError } from '../errors.ts';
 import { jsonOut, table } from '../output.ts';
+import { parseRecordKey } from '../record.ts';
 import { listRecordKeys } from '../store.ts';
 
 const USAGE = `zankyo list — list failure records in S3

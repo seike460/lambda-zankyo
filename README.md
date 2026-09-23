@@ -203,7 +203,8 @@ cargo fmt --all -- --check && cargo clippy -- -D warnings
   をコミット済み。`pnpm install --frozen-lockfile` / `cargo build --locked`
   で同一依存が解決されます。
 - ツールチェーンも固定: `rust-toolchain.toml`（Rust 1.98.1）、`.nvmrc`
-  （Node 24）、`package.json` の `packageManager`（pnpm 10.13.1）。
+  （Node 25。最低要件は engines の `>=24`）、`package.json` の
+  `packageManager`（pnpm 10.13.1）。
 - CI の全 GitHub Actions はコミット SHA でピン留めしています
   （`.github/workflows/ci.yml` の `@<sha> # vN` コメント参照）。
 - `scripts/build-layer.sh` は決定的 zip を生成します: エントリの
