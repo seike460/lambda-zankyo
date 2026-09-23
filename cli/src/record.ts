@@ -6,6 +6,9 @@ import { CliError } from './errors.ts';
 
 export type FailureType = 'handler_error' | 'init_error' | 'timeout';
 
+/** S3 キーの先頭セグメント。proxy/src/record.rs の KEY_PREFIX と揃える。 */
+export const RECORD_PREFIX = 'zankyo';
+
 export interface ErrorContext {
   errorType?: string;
   errorMessage?: string;
@@ -81,7 +84,7 @@ export interface ParsedKey {
  */
 export function parseRecordKey(key: string): ParsedKey | null {
   const parts = key.split('/');
-  if (parts.length !== 6 || parts[0] !== 'zankyo' || !parts[5]?.endsWith('.json')) {
+  if (parts.length !== 6 || parts[0] !== RECORD_PREFIX || !parts[5]?.endsWith('.json')) {
     return null;
   }
   const functionName = parts[1];

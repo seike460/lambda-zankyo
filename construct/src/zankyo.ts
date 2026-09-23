@@ -25,6 +25,8 @@ const SAR_LAYER_OUTPUT_ARM64 = 'LayerVersionArnArm64';
 const DEFAULT_SEMANTIC_VERSION = '0.1.0';
 const DEFAULT_RETENTION_DAYS = 30;
 const WRAPPER_PATH = '/opt/zankyo-wrapper';
+/** レコードの S3 キー接頭辞。proxy/src/record.rs の KEY_PREFIX と揃える。 */
+const RECORD_KEY_PREFIX = 'zankyo';
 
 export interface ZankyoProps {
   /**
@@ -126,7 +128,7 @@ export class Zankyo extends Construct {
     fn.addToRolePolicy(
       new iam.PolicyStatement({
         actions: ['s3:PutObject'],
-        resources: [this.bucket.arnForObjects('zankyo/*')],
+        resources: [this.bucket.arnForObjects(`${RECORD_KEY_PREFIX}/*`)],
       }),
     );
     // SSE-KMS 書き込みに必要なのは Encrypt と GenerateDataKey。Decrypt は不要。

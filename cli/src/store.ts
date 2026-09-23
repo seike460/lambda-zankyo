@@ -5,9 +5,9 @@
 import { envNum } from './aws.ts';
 import { CliError, errMessage } from './errors.ts';
 import type { RecordListPage, RecordReader } from './ports.ts';
-import { keyMatchesRequestId, parseRecord, type ZankyoRecord } from './record.ts';
+import { keyMatchesRequestId, parseRecord, RECORD_PREFIX, type ZankyoRecord } from './record.ts';
 
-const RECORD_PREFIX = 'zankyo/';
+const RECORD_PREFIX_SLASH = `${RECORD_PREFIX}/`;
 /** ListObjectsV2 の 1 ページあたり取得件数。ZANKYO_LIST_PAGE_SIZE で調整可能。 */
 const pageSize = () => envNum('ZANKYO_LIST_PAGE_SIZE', 200);
 /** 走査するページの上限。巨大バケットでの無制限スキャンを防ぐ。 */
@@ -33,7 +33,9 @@ export async function listRecordKeys(
   bucket: string,
   opts: ListOptions = {},
 ): Promise<RecordRef[]> {
-  const prefix = opts.functionName ? `${RECORD_PREFIX}${opts.functionName}/` : RECORD_PREFIX;
+  const prefix = opts.functionName
+    ? `${RECORD_PREFIX_SLASH}${opts.functionName}/`
+    : RECORD_PREFIX_SLASH;
   const refs: RecordRef[] = [];
   let token: string | undefined;
   do {
@@ -127,7 +129,7 @@ export async function resolveRecordKey(
   if (!requestId) {
     throw new CliError('either requestId or --last is required', 2);
   }
-  const prefix = q.functionName ? `${RECORD_PREFIX}${q.functionName}/` : RECORD_PREFIX;
+  const prefix = q.functionName ? `${RECORD_PREFIX_SLASH}${q.functionName}/` : RECORD_PREFIX_SLASH;
   let token: string | undefined;
   let pages = 0;
   do {

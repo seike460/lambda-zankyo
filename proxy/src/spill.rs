@@ -6,16 +6,27 @@
 use crate::record::s3_key_from_parts;
 use serde_json::Value;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 use tracing::{info, warn};
 
+/// `.part` 残滓を掃除してよい経過時間。書き込み途中のファイルを
+/// 消さないための猶予（クラッシュ後の孤児だけを拾う）。
+const PART_ORPHAN_GRACE: Duration = Duration::from_secs(60);
+
 /// 退避ファイルを書き、上限を超えたら古いものから捨てる。
+/// `.part` へ書いてから rename する: 定期回収が書き込み途中の
+/// 半端な JSON を読んで「復旧不能」として消す競合を防ぐ。
 pub fn write(dir: &str, max_files: usize, request_id: &str, body: &[u8]) {
-    let path = Path::new(dir).join(filename(request_id));
-    let result = std::fs::create_dir_all(dir).and_then(|_| std::fs::write(&path, body));
+    let dir_path = Path::new(dir);
+    let path = dir_path.join(filename(request_id));
+    let tmp = dir_path.join(format!(".{}.part", filename(request_id)));
+    let result = std::fs::create_dir_all(dir_path)
+        .and_then(|_| std::fs::write(&tmp, body))
+        .and_then(|_| std::fs::rename(&tmp, &path));
     match result {
         Ok(()) => {
             info!(request_id, path = %path.display(), "record spilled to /tmp");
-            enforce_cap(Path::new(dir), max_files);
+            enforce_cap(dir_path, max_files);
         }
         Err(e) => warn!(request_id, error = %e, "failed to spill record"),
     }
@@ -31,7 +42,12 @@ pub fn pending(dir: &Path) -> Vec<(PathBuf, Vec<u8>, String)> {
     let mut out = Vec::new();
     for entry in entries.flatten() {
         let path = entry.path();
-        if path.extension().and_then(|e| e.to_str()) != Some("json") {
+        let ext = path.extension().and_then(|e| e.to_str());
+        if ext == Some("part") {
+            sweep_orphan_part(&path);
+            continue;
+        }
+        if ext != Some("json") {
             continue;
         }
         let Ok(body) = std::fs::read(&path) else {
@@ -47,6 +63,20 @@ pub fn pending(dir: &Path) -> Vec<(PathBuf, Vec<u8>, String)> {
         }
     }
     out
+}
+
+/// クラッシュで残った `.part` を消す。猶予時間内のものは
+/// 書き込み途中かもしれないので触らない。
+fn sweep_orphan_part(path: &Path) {
+    let old_enough = path
+        .metadata()
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.elapsed().ok())
+        .is_some_and(|age| age > PART_ORPHAN_GRACE);
+    if old_enough && std::fs::remove_file(path).is_ok() {
+        warn!(path = %path.display(), "dropping orphaned partial spill");
+    }
 }
 
 /// spill dir の JSON ファイル数を `cap` 以下に抑える。
@@ -164,6 +194,40 @@ mod tests {
         assert!(!dir.join("f0.json").exists());
         assert!(dir.join("f1.json").exists());
         assert!(dir.join("f2.json").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn write_leaves_no_part_files() {
+        let dir = std::env::temp_dir().join(format!("zankyo-atomic-{}", std::process::id()));
+        write(dir.to_str().unwrap(), 8, "req-9", b"{}");
+        // rename 済みなら .json だけが残り .part は残らない
+        assert!(dir.join("req-9.json").exists());
+        let parts: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .filter(|e| e.path().extension().and_then(|x| x.to_str()) == Some("part"))
+            .collect();
+        assert!(parts.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn pending_sweeps_old_part_orphans() {
+        let dir = std::env::temp_dir().join(format!("zankyo-part-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // クラッシュ残滓の .part を古い mtime で置く
+        let orphan = dir.join(".dead.json.part");
+        std::fs::write(&orphan, b"{\"partial\":").unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&orphan)
+            .unwrap()
+            .set_modified(std::time::SystemTime::UNIX_EPOCH)
+            .unwrap();
+        let items = pending(&dir);
+        assert!(items.is_empty());
+        assert!(!orphan.exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
