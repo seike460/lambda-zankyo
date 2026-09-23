@@ -3,7 +3,8 @@
 //! Lambda が /opt に展開するレイアウト（bin/zankyo + zankyo-wrapper）で zip 化する。
 //!
 //! 前提: cross (https://github.com/cross-rs/cross) か musl ツールチェーン。
-//! `BUILDER="cargo zigbuild"` のようにビルドコマンドを差し替えられる。
+//! `BUILDER="cargo zigbuild"` のように `cargo build` 相当の
+//! コマンド行を差し替えられる。
 //! `SKIP_BUILD=1` でビルドを省き target/ 済みのバイナリだけ梱包する。
 //! Node 24+ は型注釈を strip してそのまま実行する（ビルド不要）。
 
@@ -31,11 +32,14 @@ const outDir = isAbsolute(outDirEnv) ? outDirEnv : resolve(ROOT, outDirEnv);
 mkdirSync(outDir, { recursive: true });
 mkdirSync(join(ROOT, 'sar/dist'), { recursive: true });
 
-// BUILDER は "cross" や "cargo zigbuild" のようなコマンド行として解釈する。
-// 未指定なら cross があれば使い、無ければ cargo に落ちる。
+// BUILDER は `cargo build` 相当のコマンド行全体（"cross build" や
+// "cargo zigbuild"）として解釈する。未指定なら cross があれば使い、
+// 無ければ cargo に落ちる。
 const builderArgv = (
   process.env.BUILDER ??
-  (spawnSync('cross', ['--version'], { stdio: 'ignore' }).status === 0 ? 'cross' : 'cargo')
+  (spawnSync('cross', ['--version'], { stdio: 'ignore' }).status === 0
+    ? 'cross build'
+    : 'cargo build')
 )
   .split(/\s+/)
   .filter(Boolean);
@@ -57,7 +61,7 @@ for (const arch of arches) {
     console.log(`== building ${target} ==`);
     execFileSync(
       builderCmd,
-      [...builderArgs, 'build', '--release', '--target', target, '-p', 'zankyo'],
+      [...builderArgs, '--release', '--target', target, '-p', 'zankyo'],
       { cwd: ROOT, stdio: 'inherit' },
     );
   }
