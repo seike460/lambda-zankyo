@@ -59,11 +59,10 @@ for (const arch of arches) {
   }
   if (!skipBuild) {
     console.log(`== building ${target} ==`);
-    execFileSync(
-      builderCmd,
-      [...builderArgs, '--release', '--target', target, '-p', 'zankyo'],
-      { cwd: ROOT, stdio: 'inherit' },
-    );
+    execFileSync(builderCmd, [...builderArgs, '--release', '--target', target, '-p', 'zankyo'], {
+      cwd: ROOT,
+      stdio: 'inherit',
+    });
   }
 
   const stage = mkdtempSync(join(tmpdir(), 'zankyo-layer-'));
