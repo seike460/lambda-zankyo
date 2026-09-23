@@ -35,15 +35,25 @@ const FAILURE_TYPES: ReadonlySet<string> = new Set(['handler_error', 'init_error
 
 export function isRecord(v: unknown): v is ZankyoRecord {
   if (typeof v !== 'object' || v === null) return false;
-  const r = v as Record<string, unknown>;
+  if (
+    !(
+      'version' in v &&
+      'functionName' in v &&
+      'requestId' in v &&
+      'invokedAt' in v &&
+      'failureType' in v &&
+      'event' in v
+    )
+  ) {
+    return false;
+  }
   return (
-    typeof r.version === 'string' &&
-    typeof r.functionName === 'string' &&
-    typeof r.requestId === 'string' &&
-    typeof r.invokedAt === 'string' &&
-    typeof r.failureType === 'string' &&
-    FAILURE_TYPES.has(r.failureType) &&
-    'event' in r
+    typeof v.version === 'string' &&
+    typeof v.functionName === 'string' &&
+    typeof v.requestId === 'string' &&
+    typeof v.invokedAt === 'string' &&
+    typeof v.failureType === 'string' &&
+    FAILURE_TYPES.has(v.failureType)
   );
 }
 

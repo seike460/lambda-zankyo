@@ -16,7 +16,6 @@ use zankyo::config::Config;
 use zankyo::inflight::InFlight;
 use zankyo::proxy::{new_client, HttpClient, ProxyState};
 use zankyo::runtime::{exit_code, passthrough, spawn_via_proxy};
-use zankyo::store::Recorder;
 
 const EX_USAGE: u8 = 64;
 
@@ -75,7 +74,7 @@ async fn run(argv: Vec<OsString>) -> u8 {
     }
 
     let shared = aws_config::defaults(BehaviorVersion::latest()).load().await;
-    apply_ssm_overlay(&shared, &mut cfg).await;
+    zankyo::setup::apply_ssm_overlay(&shared, &mut cfg).await;
     if cfg.disabled {
         info!("ZANKYO_DISABLED via SSM; running passthrough");
         return passthrough(&argv).await;
@@ -109,7 +108,7 @@ async fn run(argv: Vec<OsString>) -> u8 {
         }
     };
 
-    let recorder = Arc::new(build_recorder(&shared, cfg, &env_map));
+    let recorder = Arc::new(zankyo::setup::build_recorder(&shared, cfg, &env_map));
     let inflight = Arc::new(InFlight::new());
     let client: HttpClient = new_client();
 
@@ -158,40 +157,4 @@ async fn run(argv: Vec<OsString>) -> u8 {
         },
         None => exit_code(child.wait().await),
     }
-}
-
-/// `ZANKYO_SSM_PARAM` があれば SSM の設定 JSON を env 設定へ重ねる。
-/// 取得・パースの失敗は warn で落として env 設定のまま進む（fail-open）。
-async fn apply_ssm_overlay(shared: &aws_config::SdkConfig, cfg: &mut Config) {
-    let Some(param) = cfg.ssm_param.clone() else {
-        return;
-    };
-    match zankyo::ssm::load_config_json(shared, &param).await {
-        Ok(json) => {
-            if let Err(e) = cfg.overlay_ssm_json(&json) {
-                warn!(error = %e, param, "invalid SSM config JSON; using env config");
-            }
-        }
-        Err(e) => warn!(error = %e, param, "SSM fetch failed; using env config"),
-    }
-}
-
-/// 関数メタデータと設定から Recorder を組み立てる。
-fn build_recorder(
-    shared: &aws_config::SdkConfig,
-    cfg: Config,
-    env_map: &HashMap<String, String>,
-) -> Recorder {
-    Recorder::new(
-        aws_sdk_s3::Client::new(shared),
-        cfg,
-        env_map
-            .get("AWS_LAMBDA_FUNCTION_NAME")
-            .cloned()
-            .unwrap_or_else(|| "unknown".to_string()),
-        env_map
-            .get("AWS_LAMBDA_FUNCTION_VERSION")
-            .cloned()
-            .unwrap_or_else(|| "$LATEST".to_string()),
-    )
 }

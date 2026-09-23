@@ -12,5 +12,6 @@ pub mod record;
 pub mod runtime;
 pub mod scrub;
 mod scrub_data;
+pub mod setup;
 pub mod ssm;
 pub mod store;

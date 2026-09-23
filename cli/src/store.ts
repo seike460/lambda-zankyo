@@ -45,7 +45,11 @@ export async function listRecordKeys(
     }
     token = out.IsTruncated ? out.NextContinuationToken : undefined;
     // --limit 指定時は一覧用途なので無限ページングを避ける
-  } while (token && (!opts.limit || refs.length < opts.limit) && refs.length < PAGE_LIMIT * MAX_PAGES);
+  } while (
+    token &&
+    (!opts.limit || refs.length < opts.limit) &&
+    refs.length < PAGE_LIMIT * MAX_PAGES
+  );
   refs.sort((a, b) => (b.lastModified?.getTime() ?? 0) - (a.lastModified?.getTime() ?? 0));
   return opts.limit ? refs.slice(0, opts.limit) : refs;
 }
