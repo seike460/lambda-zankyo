@@ -76,10 +76,7 @@ for (const arch of arches) {
     cpSync(join(ROOT, 'proxy/layer/zankyo-wrapper'), join(stage, 'zankyo-wrapper'));
     // /opt/extensions/zankyo: platform が external extension として
     // 別プロセス起動し、SHUTDOWN（timeout）イベントを届ける。
-    cpSync(
-      join(ROOT, 'proxy/layer/extensions/zankyo'),
-      join(stage, 'extensions/zankyo'),
-    );
+    cpSync(join(ROOT, 'proxy/layer/extensions/zankyo'), join(stage, 'extensions/zankyo'));
     for (const f of ['bin/zankyo', 'zankyo-wrapper', 'extensions/zankyo']) {
       chmodSync(join(stage, f), 0o755);
     }
@@ -93,11 +90,9 @@ for (const arch of arches) {
     // zip は既存アーカイブへ追記・更新するので、先に消して
     // 古いレイアウトのエントリが混入しないようにする。
     rmSync(zip, { force: true });
-    execFileSync(
-      'zip',
-      ['-qX', zip, 'bin/zankyo', 'extensions/zankyo', 'zankyo-wrapper'],
-      { cwd: stage },
-    );
+    execFileSync('zip', ['-qX', zip, 'bin/zankyo', 'extensions/zankyo', 'zankyo-wrapper'], {
+      cwd: stage,
+    });
     console.log(`wrote ${zip}`);
 
     // SAR テンプレートの ContentUri（sar/dist/layer-*.zip）に合わせて複写する。
