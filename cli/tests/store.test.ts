@@ -1,28 +1,8 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import type { S3Client } from '@aws-sdk/client-s3';
 import { CliError } from '../src/errors.ts';
 import { fetchRecord, listRecordKeys, resolveRecordKey } from '../src/store.ts';
-
-/** ListObjectsV2 の応答をページごとに返すフェイク。 */
-function fakeS3(pages: Record<string, unknown>[], getBody?: string): S3Client & { calls: number } {
-  const fake = {
-    calls: 0,
-    async send(command: unknown): Promise<unknown> {
-      const name = (command as { constructor: { name: string } }).constructor.name;
-      if (name === 'ListObjectsV2Command') {
-        const page = pages[Math.min(fake.calls, pages.length - 1)];
-        fake.calls += 1;
-        return page;
-      }
-      if (name === 'GetObjectCommand') {
-        return { Body: { transformToString: async () => getBody ?? '{}' } };
-      }
-      throw new Error(`unexpected command ${name}`);
-    },
-  };
-  return fake as unknown as S3Client & { calls: number };
-}
+import { fakeS3 } from './helpers.ts';
 
 function obj(key: string, lastModified?: string) {
   return { Key: key, LastModified: lastModified ? new Date(lastModified) : undefined };

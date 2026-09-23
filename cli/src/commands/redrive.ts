@@ -5,7 +5,7 @@ import {
   SHARED_OPTIONS,
   strVal,
 } from '../args-bundle.ts';
-import { makeClients } from '../aws.ts';
+import { type AwsClients, makeClients } from '../aws.ts';
 import { invokeFunction, qualifiedName } from '../invoke.ts';
 import { jsonOut } from '../output.ts';
 import { loadRecord } from '../store.ts';
@@ -16,7 +16,7 @@ usage: zankyo redrive <requestId> [--alias NAME] [--confirm] [--bucket B] [--jso
 default is dry-run; pass --confirm to actually invoke
 `;
 
-export async function run(argv: string[]): Promise<number> {
+export async function run(argv: string[], deps?: AwsClients): Promise<number> {
   const { values, positionals } = parseCliArgs(argv, {
     ...SHARED_OPTIONS,
     function: { type: 'string' },
@@ -29,7 +29,7 @@ export async function run(argv: string[]): Promise<number> {
   }
   const requestId = requirePositional(positionals, 0, 'requestId');
   const bucket = resolveBucket(values);
-  const { s3, lambda } = makeClients(values);
+  const { s3, lambda } = deps ?? makeClients(values);
   const rec = await loadRecord(s3, bucket, {
     requestId,
     functionName: strVal(values.function),

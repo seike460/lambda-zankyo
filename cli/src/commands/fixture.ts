@@ -1,6 +1,6 @@
 import { writeFile } from 'node:fs/promises';
 import { parseCliArgs, resolveBucket, SHARED_OPTIONS, strVal } from '../args-bundle.ts';
-import { makeClients } from '../aws.ts';
+import { type AwsClients, makeClients } from '../aws.ts';
 import { CliError } from '../errors.ts';
 import { fixtureJson } from '../fixture.ts';
 import { loadRecord } from '../store.ts';
@@ -10,7 +10,7 @@ const USAGE = `zankyo fixture — write a sam local invoke -e event file from a 
 usage: zankyo fixture <requestId|--last> [--function NAME] [--out FILE] [--bucket B]
 `;
 
-export async function run(argv: string[]): Promise<number> {
+export async function run(argv: string[], deps?: AwsClients): Promise<number> {
   const { values, positionals } = parseCliArgs(argv, {
     ...SHARED_OPTIONS,
     function: { type: 'string' },
@@ -27,7 +27,7 @@ export async function run(argv: string[]): Promise<number> {
     throw new CliError('usage: zankyo fixture <requestId|--last> [--out file]');
   }
   const bucket = resolveBucket(values);
-  const { s3 } = makeClients(values);
+  const { s3 } = deps ?? makeClients(values);
   const rec = await loadRecord(s3, bucket, {
     requestId,
     last,

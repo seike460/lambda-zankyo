@@ -171,14 +171,24 @@ fn runtime_api_handler() -> impl Fn(&str, &str, &HeaderMap, &Bytes) -> Response<
 }
 
 async fn call(proxy: &str, method: Method, path: &str, body: Option<Value>) -> (StatusCode, Bytes) {
+    call_raw(
+        proxy,
+        method,
+        path,
+        match body {
+            Some(v) => Bytes::from(v.to_string()),
+            None => Bytes::new(),
+        },
+    )
+    .await
+}
+
+async fn call_raw(proxy: &str, method: Method, path: &str, body: Bytes) -> (StatusCode, Bytes) {
     let client = new_client();
     let req = Request::builder()
         .method(method)
         .uri(format!("http://{proxy}{path}"))
-        .body(boxed_full(match body {
-            Some(v) => Bytes::from(v.to_string()),
-            None => Bytes::new(),
-        }))
+        .body(boxed_full(body))
         .unwrap();
     let resp = client.request(req).await.unwrap();
     let (parts, body) = resp.into_parts();
@@ -377,4 +387,54 @@ async fn shutdown_flushes_inflight_as_timeout() {
     let spill = std::path::Path::new("/tmp/zankyo/req-timeout.json");
     assert!(spill.exists());
     let _ = std::fs::remove_file(spill);
+}
+
+#[tokio::test]
+async fn non_runtime_paths_are_forwarded_without_recording() {
+    // 対象外パス（telemetry API 等）はボディごと中継するだけで記録しない
+    let (api_addr, api_hits) = spawn_mock(|_m, _p, _h, _b| ok_body(json!({"proxied": true}))).await;
+    let (s3_addr, s3_hits) = spawn_mock(|_m, _p, _h, _b| ok_empty()).await;
+    let inflight = Arc::new(InFlight::new());
+    let proxy = spawn_proxy(&api_addr, inflight, recorder_to(&s3_addr)).await;
+
+    let (status, body) = call(
+        &proxy,
+        Method::POST,
+        "/2022-07-01/telemetry",
+        Some(json!({"types": ["platform.logs"]})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(String::from_utf8_lossy(&body).contains("proxied"));
+    assert!(
+        wait_for(1_000, || {
+            captured(&api_hits)
+                .iter()
+                .any(|(_, p, _)| p == "/2022-07-01/telemetry")
+        })
+        .await
+    );
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(captured(&s3_hits).is_empty());
+}
+
+#[tokio::test]
+async fn oversized_body_is_rejected_without_forwarding() {
+    let (api_addr, api_hits) = spawn_mock(|_m, _p, _h, _b| ok_empty()).await;
+    let (s3_addr, _s3) = spawn_mock(|_m, _p, _h, _b| ok_empty()).await;
+    let inflight = Arc::new(InFlight::new());
+    let proxy = spawn_proxy(&api_addr, inflight, recorder_to(&s3_addr)).await;
+
+    // MAX_BODY_BYTES (8MiB) を超えるボディは上流へ転送せず 413 を返す
+    let big = Bytes::from(vec![b'x'; 9 * 1024 * 1024]);
+    let (status, _) = call_raw(
+        &proxy,
+        Method::POST,
+        "/2018-06-01/runtime/invocation/req-x/response",
+        big,
+    )
+    .await;
+    assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(captured(&api_hits).is_empty());
 }

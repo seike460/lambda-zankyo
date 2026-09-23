@@ -2,14 +2,7 @@ import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import type { InvokeCommand, LambdaClient } from '@aws-sdk/client-lambda';
 import { invokeFunction, qualifiedName } from '../src/invoke.ts';
-
-function fakeLambda(out: {
-  StatusCode?: number;
-  FunctionError?: string;
-  Payload?: Uint8Array;
-}): LambdaClient {
-  return { send: async () => out } as unknown as LambdaClient;
-}
+import { fakeLambda } from './helpers.ts';
 
 describe('qualifiedName', () => {
   it('appends alias with colon', () => {

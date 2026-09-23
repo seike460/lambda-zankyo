@@ -6,7 +6,7 @@ import {
   strList,
   strVal,
 } from '../args-bundle.ts';
-import { makeClients } from '../aws.ts';
+import { type AwsClients, makeClients } from '../aws.ts';
 import { diffJson, formatDiffs } from '../diff.ts';
 import { CliError } from '../errors.ts';
 import { invokeFunction, qualifiedName } from '../invoke.ts';
@@ -19,7 +19,7 @@ usage: zankyo diff <requestId> --alias A --alias B [--function NAME] [--bucket B
 exit: 0 = identical, 1 = differences, 2+ = error
 `;
 
-export async function run(argv: string[]): Promise<number> {
+export async function run(argv: string[], deps?: AwsClients): Promise<number> {
   const { values, positionals } = parseCliArgs(argv, {
     ...SHARED_OPTIONS,
     function: { type: 'string' },
@@ -36,7 +36,7 @@ export async function run(argv: string[]): Promise<number> {
     throw new CliError('diff requires exactly two --alias flags', 2, USAGE);
   }
   const bucket = resolveBucket(values);
-  const { s3, lambda } = makeClients(values);
+  const { s3, lambda } = deps ?? makeClients(values);
   const rec = await loadRecord(s3, bucket, {
     requestId,
     functionName: strVal(values.function),

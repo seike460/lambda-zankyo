@@ -34,6 +34,10 @@ pub type HttpClient = Client<HttpConnector, BoxedBody>;
 /// accept 失敗時の再試行間隔。一時的な FD 枯渇等での busy loop を避ける。
 const ACCEPT_BACKOFF: std::time::Duration = std::time::Duration::from_millis(50);
 
+/// 中継するボディの上限。Lambda の同期呼び出しペイロード上限（6MiB）に
+/// 余裕を持たせた値で、異常な巨大ボディによるメモリ圧迫を防ぐ。
+const MAX_BODY_BYTES: usize = 8 * 1024 * 1024;
+
 /// 空 or バッファ済みボディを BoxedBody に揃える。
 pub fn boxed_full<B: Into<Bytes>>(b: B) -> BoxedBody {
     Full::new(b.into())
@@ -88,9 +92,12 @@ async fn handle(req: Request<Incoming>, st: &ProxyState) -> Response<BoxedBody> 
         .unwrap_or("/")
         .to_string();
     let path = parts.uri.path().to_string();
-    let body_bytes = match body.collect().await {
-        Ok(c) => c.to_bytes(),
-        Err(e) => {
+    let body_bytes = match collect_bounded(body).await {
+        Ok(b) => b,
+        Err(CollectError::TooLarge) => {
+            return plain(StatusCode::PAYLOAD_TOO_LARGE, "zankyo: body too large");
+        }
+        Err(CollectError::Read(e)) => {
             warn!(error = %e, "failed to read runtime request body");
             return plain(
                 StatusCode::BAD_GATEWAY,
@@ -173,9 +180,13 @@ async fn handle_next(
         }
     };
     let (parts, resp_body) = resp.into_parts();
-    let bytes = match resp_body.collect().await {
-        Ok(c) => c.to_bytes(),
-        Err(e) => {
+    let bytes = match collect_bounded(resp_body).await {
+        Ok(b) => b,
+        Err(CollectError::TooLarge) => {
+            warn!("next response body exceeded limit; forwarding is skipped");
+            return plain(StatusCode::BAD_GATEWAY, "zankyo: upstream body too large");
+        }
+        Err(CollectError::Read(e)) => {
             warn!(error = %e, "failed to read next response");
             return plain(StatusCode::BAD_GATEWAY, "zankyo: upstream body error");
         }
@@ -321,6 +332,27 @@ async fn forward(
         .request(req)
         .await
         .map_err(|e| ZankyoError::Upstream(e.to_string()))
+}
+
+enum CollectError {
+    TooLarge,
+    Read(Box<dyn std::error::Error + Send + Sync>),
+}
+
+/// 上限付きでボディを読む。`http_body_util::Limited` は超過時に
+/// `LengthLimitError` を返すので、通常の読み取り失敗と分けて扱う。
+async fn collect_bounded(body: Incoming) -> std::result::Result<Bytes, CollectError> {
+    http_body_util::Limited::new(body, MAX_BODY_BYTES)
+        .collect()
+        .await
+        .map(|c| c.to_bytes())
+        .map_err(|e| {
+            if e.is::<http_body_util::LengthLimitError>() {
+                CollectError::TooLarge
+            } else {
+                CollectError::Read(e)
+            }
+        })
 }
 
 fn plain(status: StatusCode, msg: &'static str) -> Response<BoxedBody> {
