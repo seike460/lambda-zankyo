@@ -23,15 +23,18 @@ const SAR_LAYER_OUTPUT = 'LayerVersionArn';
 const SAR_LAYER_OUTPUT_ARM64 = 'LayerVersionArnArm64';
 
 const DEFAULT_SEMANTIC_VERSION = '0.1.0';
-const RECORD_RETENTION_DAYS = 30;
+const DEFAULT_RETENTION_DAYS = 30;
 const WRAPPER_PATH = '/opt/zankyo-wrapper';
 
 export interface ZankyoProps {
   /**
-   * 失敗レコードの保存先。未指定ならライフサイクル 30 日・
-   * パブリックアクセス全ブロックのバケットを新規作成する。
+   * 失敗レコードの保存先。未指定ならライフサイクル
+   * `recordRetentionDays`・パブリックアクセス全ブロックのバケットを
+   * 新規作成する。
    */
   readonly bucket?: s3.IBucket;
+  /** 新規バケットのレコード保持日数（既定 30）。bucket 指定時は無関係。 */
+  readonly recordRetentionDays?: number;
   /** SSE-KMS に使うキー。未指定なら SSE-S3。 */
   readonly kmsKey?: kms.IKey;
   /** 追加の scrub フィールド名。`ZANKYO_SCRUB_FIELDS` に展開される。 */
@@ -79,7 +82,9 @@ export class Zankyo extends Construct {
         ...(props.kmsKey
           ? { encryption: s3.BucketEncryption.KMS, encryptionKey: props.kmsKey }
           : { encryption: s3.BucketEncryption.S3_MANAGED }),
-        lifecycleRules: [{ expiration: Duration.days(RECORD_RETENTION_DAYS) }],
+        lifecycleRules: [
+          { expiration: Duration.days(props.recordRetentionDays ?? DEFAULT_RETENTION_DAYS) },
+        ],
         // 失敗レコードは監査証跡になりうるため、誤削除より残す方を既定にする
         removalPolicy: RemovalPolicy.RETAIN,
       });

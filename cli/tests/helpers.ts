@@ -1,4 +1,4 @@
-import type { LambdaClient } from '@aws-sdk/client-lambda';
+import type { InvokeCommand, LambdaClient } from '@aws-sdk/client-lambda';
 import type { S3Client } from '@aws-sdk/client-s3';
 import type { AwsClients } from '../src/aws.ts';
 
@@ -40,6 +40,12 @@ export function fakeLambda(out: {
   Payload?: Uint8Array;
 }): LambdaClient {
   const fake = { send: async (): Promise<unknown> => out };
+  return fake as unknown as LambdaClient;
+}
+
+/** InvokeCommand の中身を検査したい場合用。cast はこのファイルに閉じ込める。 */
+export function fakeLambdaHandler(handler: (command: InvokeCommand) => unknown): LambdaClient {
+  const fake = { send: async (command: InvokeCommand): Promise<unknown> => handler(command) };
   return fake as unknown as LambdaClient;
 }
 

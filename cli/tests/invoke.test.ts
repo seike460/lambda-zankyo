@@ -1,8 +1,7 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import type { InvokeCommand, LambdaClient } from '@aws-sdk/client-lambda';
 import { invokeFunction, qualifiedName } from '../src/invoke.ts';
-import { fakeLambda } from './helpers.ts';
+import { fakeLambda, fakeLambdaHandler } from './helpers.ts';
 
 describe('qualifiedName', () => {
   it('appends alias with colon', () => {
@@ -46,14 +45,12 @@ describe('invokeFunction', () => {
   it('sends an InvokeCommand with the target and event', async () => {
     let seenName: string | undefined;
     let seenPayload: string | undefined;
-    const lambda = {
-      send: async (command: InvokeCommand) => {
-        seenName = command.input.FunctionName;
-        const p = command.input.Payload;
-        seenPayload = p instanceof Uint8Array ? new TextDecoder().decode(p) : undefined;
-        return { StatusCode: 200, Payload: new TextEncoder().encode('{}') };
-      },
-    } as unknown as LambdaClient;
+    const lambda = fakeLambdaHandler((command) => {
+      seenName = command.input.FunctionName;
+      const p = command.input.Payload;
+      seenPayload = p instanceof Uint8Array ? new TextDecoder().decode(p) : undefined;
+      return { StatusCode: 200, Payload: new TextEncoder().encode('{}') };
+    });
     await invokeFunction(lambda, 'fn:prod', { ping: 1 });
     assert.equal(seenName, 'fn:prod');
     assert.equal(seenPayload, '{"ping":1}');

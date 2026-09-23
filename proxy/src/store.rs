@@ -198,7 +198,12 @@ impl Recorder {
             let Ok(body) = std::fs::read(&path) else {
                 continue;
             };
+            // 壊れた JSON や必須フィールド欠落は永遠に復旧できない。
+            // 残すと rerun のたびに積み上がる stale 残滓になるので捨てる。
             let Some(key) = key_for_spilled(&body) else {
+                if std::fs::remove_file(&path).is_ok() {
+                    warn!(path = %path.display(), "dropping unrecoverable spilled file");
+                }
                 continue;
             };
             match tokio::time::timeout(self.put_timeout(), self.put(&key, body)).await {
