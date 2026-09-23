@@ -127,9 +127,11 @@ pub(crate) async fn handle_completion(
     } else {
         (st.inflight.remove(rid), false)
     };
-    // 完了した呼び出しのステージは消す。残ると「応答なく畳まれた」
-    // 未完呼び出しとして SHUTDOWN/次回 init で二重記録される。
-    st.recorder.clear_inflight(rid);
+    // 成功経路はここでステージを消す（失敗経路は spill 作成後に消す —
+    // 先に消すと、clear 後 spill 前に死んだ場合に記録が無痕で失われる）。
+    if ctx.is_none() {
+        st.recorder.clear_inflight(rid);
+    }
     // 失敗文脈は転送の成否に関わらず記録する。/error を受け取った事実が
     // 証跡そのものであり、上流断で 502 を返す場合も捨てない。
     // 保存は upstream 転送の前に行う: 転送が済むと呼び出しが終わり、
@@ -170,6 +172,9 @@ pub(crate) async fn handle_completion(
             )
             .await;
         }
+        // レコードは spill json として残った。ここでステージを消す —
+        // 残すと「応答なく畳まれた」未完呼び出しとして二重記録される。
+        st.recorder.clear_inflight(rid);
     }
     let resp = forward_or_502(
         st,
