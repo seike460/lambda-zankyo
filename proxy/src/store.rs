@@ -19,6 +19,24 @@ use std::time::Duration;
 use time::OffsetDateTime;
 use tracing::{info, warn};
 
+/// `save` へ渡す入力一式。引数束ね。
+pub struct SaveInput {
+    pub request_id: String,
+    pub invoked_at: OffsetDateTime,
+    pub failure: FailureType,
+    pub event: EventInput,
+    pub response: Option<Value>,
+    pub ctx: ErrorContext,
+}
+
+/// イベント本体と、それが生テキスト由来かの印。
+pub struct EventInput {
+    pub value: Option<Value>,
+    /// 非 JSON ボディを生テキストで保持した場合 true。
+    /// レコードの eventIsRawText に写される。
+    pub raw_text: bool,
+}
+
 pub struct Recorder {
     s3: aws_sdk_s3::Client,
     cfg: Config,
@@ -63,16 +81,16 @@ impl Recorder {
 
     /// レコードを組み立てて保存する。scrub はここで一括適用し、
     /// event/response 両方のレポートを集約する。
-    pub async fn save(
-        &self,
-        request_id: &str,
-        invoked_at: OffsetDateTime,
-        failure: FailureType,
-        event: Option<Value>,
-        response: Option<Value>,
-        ctx: ErrorContext,
-    ) {
-        let (rec, key) = self.build_record(request_id, invoked_at, failure, event, response, ctx);
+    pub async fn save(&self, job: SaveInput) {
+        let SaveInput {
+            request_id,
+            invoked_at,
+            failure,
+            event,
+            response,
+            ctx,
+        } = job;
+        let (rec, key) = self.build_record(&request_id, invoked_at, failure, event, response, ctx);
         let body = match to_json_bytes(&rec) {
             Ok(b) => b,
             Err(e) => {
@@ -84,11 +102,11 @@ impl Recorder {
             Ok(Ok(())) => info!(request_id, key, "failure record saved"),
             Ok(Err(e)) => {
                 warn!(request_id, error = %e, "s3 put failed; spilling to /tmp");
-                self.spill(request_id, &body);
+                self.spill(&request_id, &body);
             }
             Err(_) => {
                 warn!(request_id, "s3 put timed out; spilling to /tmp");
-                self.spill(request_id, &body);
+                self.spill(&request_id, &body);
             }
         }
     }
@@ -112,7 +130,10 @@ impl Recorder {
             &inv.request_id,
             inv.invoked_at,
             FailureType::Timeout,
-            Some(inv.event),
+            EventInput {
+                value: Some(inv.event),
+                raw_text: inv.event_is_raw,
+            },
             None,
             ctx,
         );
@@ -141,12 +162,13 @@ impl Recorder {
         request_id: &str,
         invoked_at: OffsetDateTime,
         failure: FailureType,
-        event: Option<Value>,
+        event: EventInput,
         response: Option<Value>,
         ctx: ErrorContext,
     ) -> (FailureRecord, String) {
         let mut report = ScrubReport::default();
-        let mut event_v = event.unwrap_or(Value::Null);
+        let event_is_raw = event.raw_text && event.value.is_some();
+        let mut event_v = event.value.unwrap_or(Value::Null);
         self.scrubber.scrub(&mut event_v, &mut report);
         let mut response_v = response;
         if let Some(r) = response_v.as_mut() {
@@ -163,6 +185,7 @@ impl Recorder {
             event: event_v,
             response: response_v,
             error_context: ctx,
+            event_is_raw_text: event_is_raw,
             scrub_report: ScrubReportJson {
                 fields_redacted: report.fields_redacted,
                 patterns_applied: report.patterns_applied.into_iter().collect(),

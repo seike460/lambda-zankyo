@@ -30,6 +30,8 @@ export interface ZankyoRecord {
   event: unknown;
   response?: unknown;
   errorContext: ErrorContext;
+  /** event が非 JSON ボディの生テキストのとき true（proxy が記録）。 */
+  eventIsRawText?: boolean;
   scrubReport?: ScrubReport;
   truncated?: boolean;
 }

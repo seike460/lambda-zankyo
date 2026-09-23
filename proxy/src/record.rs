@@ -70,6 +70,10 @@ pub struct FailureRecord {
     pub response: Option<Value>,
     #[serde(rename = "errorContext")]
     pub error_context: ErrorContext,
+    /// イベントが非 JSON ボディの生テキストで保存されている場合 true。
+    /// CLI は replay/redrive 時に JSON 再エンコードせず原文を送る。
+    #[serde(rename = "eventIsRawText", default, skip_serializing_if = "is_false")]
+    pub event_is_raw_text: bool,
     #[serde(rename = "scrubReport")]
     pub scrub_report: ScrubReportJson,
     #[serde(default, skip_serializing_if = "is_false")]

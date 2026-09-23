@@ -46,12 +46,11 @@ export async function listRecordKeys(
       refs.push({ key: o.Key, lastModified: o.LastModified });
     }
     token = out.IsTruncated ? out.NextContinuationToken : undefined;
-    // --limit 指定時は一覧用途なので無限ページングを避ける
-  } while (
-    token &&
-    (!opts.limit || refs.length < opts.limit) &&
-    refs.length < pageSize() * maxPages()
-  );
+    // S3 の list はキー辞書順（= 日付パーティション昇順）なので、
+    // 途中で打ち切ると「最新」の判定が最古側のページだけで決まる。
+    // --limit 指定時も新しい順に並べてから切るため、
+    // 上限ページまでは必ず走査する。
+  } while (token && refs.length < pageSize() * maxPages());
   refs.sort((a, b) => (b.lastModified?.getTime() ?? 0) - (a.lastModified?.getTime() ?? 0));
   return opts.limit ? refs.slice(0, opts.limit) : refs;
 }

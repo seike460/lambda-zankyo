@@ -36,6 +36,34 @@ describe('listRecordKeys', () => {
     assert.equal(refs[1]?.key, 'zankyo/fn/2026/09/21/b.json');
   });
 
+  it('--last finds the newest key across pages (S3 lists oldest first)', async () => {
+    // キー辞書順では古い日付が先に来る。1 ページ目だけで打ち切ると
+    // 最新レコードを取りこぼす回帰の防止。
+    const s3 = fakeS3([
+      {
+        Contents: [obj('zankyo/fn/2026/09/20/old.json', '2026-09-20T00:00:00Z')],
+        IsTruncated: true,
+        NextContinuationToken: 't2',
+      },
+      { Contents: [obj('zankyo/fn/2026/09/23/new.json', '2026-09-23T00:00:00Z')] },
+    ]);
+    const refs = await listRecordKeys(s3, 'bkt', { limit: 1 });
+    assert.equal(refs[0]?.key, 'zankyo/fn/2026/09/23/new.json');
+    const key = await resolveRecordKey(
+      fakeS3([
+        {
+          Contents: [obj('zankyo/fn/2026/09/20/old.json', '2026-09-20T00:00:00Z')],
+          IsTruncated: true,
+          NextContinuationToken: 't2',
+        },
+        { Contents: [obj('zankyo/fn/2026/09/23/new.json', '2026-09-23T00:00:00Z')] },
+      ]),
+      'bkt',
+      { last: true },
+    );
+    assert.equal(key, 'zankyo/fn/2026/09/23/new.json');
+  });
+
   it('paginates until no token', async () => {
     const s3 = fakeS3([
       {

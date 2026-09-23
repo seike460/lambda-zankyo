@@ -1,6 +1,6 @@
 import { parseCliArgs, requirePositional, resolveBucket, SHARED_OPTIONS, strVal } from '../args.ts';
 import { type AwsClients, makeClients } from '../aws.ts';
-import { buildFixtureEvent } from '../fixture.ts';
+import { eventPayload } from '../fixture.ts';
 import { invokeFunction, qualifiedName } from '../invoke.ts';
 import { jsonOut } from '../output.ts';
 import { loadRecord } from '../store.ts';
@@ -41,7 +41,7 @@ export async function run(argv: string[], deps?: AwsClients): Promise<number> {
     console.log(values.json ? jsonOut(summary) : formatSummary(summary));
     return 0;
   }
-  const out = await invokeFunction(lambda, target, buildFixtureEvent(rec));
+  const out = await invokeFunction(lambda, target, eventPayload(rec));
   if (values.json) {
     console.log(
       jsonOut({

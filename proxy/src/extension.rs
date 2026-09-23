@@ -117,7 +117,11 @@ pub async fn run_event_loop(
                 let reason = ev.shutdown_reason.clone();
                 let flush = async {
                     for inv in pending {
-                        recorder.save_during_shutdown(inv, reason.as_deref()).await;
+                        // /error 処理が先行して記録済みの呼び出しは
+                        // 飛ばす — 同一 S3 キーへの二重記録を防ぐ。
+                        if inflight.claim_record(&inv.request_id) {
+                            recorder.save_during_shutdown(inv, reason.as_deref()).await;
+                        }
                     }
                 };
                 if tokio::time::timeout(budget, flush).await.is_err() {

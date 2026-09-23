@@ -38,11 +38,24 @@ pub fn spawn_via_proxy(argv: &[OsString], port: u16) -> std::io::Result<Child> {
 }
 
 /// 子の終了ステータスをプロセスの終了コードに写す。
-/// code を持たない（シグナル終了等）・wait 自体の失敗・u8 に
-/// 収まらない値は 1 に丸める。
+/// シグナル終了はシェル慣例の 128+signal に写し、ランタイムの
+/// 死因（SIGSEGV 等）が wrapper の exit code から分かるようにする。
+/// wait 自体の失敗や u8 に収まらない値は 1 に丸める。
 pub fn exit_code(status: std::io::Result<std::process::ExitStatus>) -> u8 {
     match status {
-        Ok(s) => s.code().and_then(|c| u8::try_from(c).ok()).unwrap_or(1),
+        Ok(s) => {
+            if let Some(c) = s.code() {
+                return u8::try_from(c).unwrap_or(1);
+            }
+            #[cfg(unix)]
+            {
+                use std::os::unix::process::ExitStatusExt;
+                if let Some(sig) = s.signal() {
+                    return 128u8.saturating_add(sig as u8);
+                }
+            }
+            1
+        }
         Err(_) => 1,
     }
 }

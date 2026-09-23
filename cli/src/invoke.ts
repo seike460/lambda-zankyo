@@ -21,28 +21,30 @@ export function qualifiedName(functionName: string, alias?: string): string {
 export async function invokeFunction(
   lambda: FunctionInvoker,
   functionTarget: string,
-  event: unknown,
+  /** 送信するペイロード。fixture.ts の eventPayload が作る
+   *  （JSON エンコード済み or 生テキスト）。 */
+  payload: string,
 ): Promise<InvokeOutcome> {
   const out = await lambda
     .invoke({
       FunctionName: functionTarget,
-      Payload: new TextEncoder().encode(JSON.stringify(event ?? {})),
+      Payload: new TextEncoder().encode(payload),
     })
     .catch((e) => {
       // S3 側と同じく AWS 失敗は exit 3 で統一する（README の exit code 表）
       throw new CliError(`failed to invoke ${functionTarget}: ${errMessage(e)}`, 3);
     });
   const payloadText = out.Payload ? new TextDecoder().decode(out.Payload) : '';
-  let payload: unknown = payloadText;
+  let decoded: unknown = payloadText;
   try {
-    payload = JSON.parse(payloadText);
+    decoded = JSON.parse(payloadText);
   } catch {
     // JSON でない応答はテキストのまま比較・表示する
   }
   return {
     statusCode: out.StatusCode,
     functionError: out.FunctionError,
-    payload,
+    payload: decoded,
     payloadText,
   };
 }

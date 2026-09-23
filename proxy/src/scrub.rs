@@ -24,6 +24,59 @@ pub fn normalize_field(name: &str) -> String {
         .collect()
 }
 
+/// フィールド名を語境界で分割し、各トークンを小文字化して返す。
+/// 境界 = 非英数字、小文字→大文字（camelCase）、英字↔数字の遷移。
+/// 例: `pinCount`→[pin,count]、`api_key`→[api,key]、`xsrfToken`→[xsrf,token]
+fn field_tokens(name: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let mut cur = String::new();
+    let mut prev: Option<char> = None;
+    for c in name.chars() {
+        let boundary = match prev {
+            Some(p) => {
+                (p.is_ascii_lowercase() && c.is_ascii_uppercase())
+                    || (p.is_ascii_alphabetic() && c.is_ascii_digit())
+                    || (p.is_ascii_digit() && c.is_ascii_alphabetic())
+            }
+            None => false,
+        };
+        if !c.is_ascii_alphanumeric() {
+            if !cur.is_empty() {
+                tokens.push(std::mem::take(&mut cur));
+            }
+            prev = None;
+            continue;
+        }
+        if boundary && !cur.is_empty() {
+            tokens.push(std::mem::take(&mut cur));
+        }
+        cur.push(c.to_ascii_lowercase());
+        prev = Some(c);
+    }
+    if !cur.is_empty() {
+        tokens.push(cur);
+    }
+    tokens
+}
+
+/// 連続するトークンの結合が `d` と一致するウィンドウがあるか。
+/// [user, api, key] の "apikey" のような複合語 denylist 項を拾う。
+fn token_window_match(tokens: &[String], d: &str) -> bool {
+    for i in 0..tokens.len() {
+        let mut joined = String::new();
+        for t in &tokens[i..] {
+            joined.push_str(t);
+            if joined.len() >= d.len() {
+                break;
+            }
+        }
+        if joined == d {
+            return true;
+        }
+    }
+    false
+}
+
 struct Compiled {
     name: &'static str,
     re: Regex,
@@ -67,11 +120,18 @@ impl Scrubber {
         }
     }
 
+    /// denylist 判定。名全体の正規化一致（`api_key`→apikey、
+    /// `pass_word`→password 等）か、連続トークン結合の一致
+    /// （`userApiKey`→[user,api,key]→apikey、`pinCount`→pin）で判定する。
+    /// トークン内部の部分文字列（`spin`⊃pin、`tokenize`⊃token、
+    /// `secretary`⊃secret）は対象にしない — 秘密でない値のマスクは
+    /// fixture/replay の再現データを壊す。
     fn is_denied(&self, field: &str) -> bool {
         let n = normalize_field(field);
+        let tokens = field_tokens(field);
         self.denied
             .iter()
-            .any(|d| n == *d || n.starts_with(d.as_str()) || n.ends_with(d.as_str()))
+            .any(|d| n == *d || token_window_match(&tokens, d))
     }
 
     /// JSON 値を in-place で scrub する。
@@ -241,6 +301,37 @@ mod tests {
         assert_eq!(v["access_token"], "***");
         assert_eq!(v["tokenExpiry"], "***");
         assert_eq!(v["unrelated"], "u");
+    }
+
+    #[test]
+    fn denylist_ignores_in_token_substrings() {
+        // 語境界の内側にある部分文字列は秘密とは限らない。
+        // spin/pine (pin), tokenize (token), secretary (secret) は
+        // マスクしない — 再現用の正常値を壊さないため。
+        let mut v = json!({
+            "spin": 3, "pine": "tree", "spinner": "css",
+            "tokenize": true, "tokenizer": "bert",
+            "secretary": "general", "pinCount": 4,
+        });
+        let mut r = ScrubReport::default();
+        scrubber().scrub(&mut v, &mut r);
+        assert_eq!(v["spin"], 3);
+        assert_eq!(v["pine"], "tree");
+        assert_eq!(v["spinner"], "css");
+        assert_eq!(v["tokenize"], true);
+        assert_eq!(v["tokenizer"], "bert");
+        assert_eq!(v["secretary"], "general");
+        // 語境界を跨ぐものは拾う: pinCount → [pin,count]
+        assert_eq!(v["pinCount"], "***");
+        assert_eq!(r.fields_redacted, 1);
+    }
+
+    #[test]
+    fn denylist_matches_compound_names() {
+        let mut v = json!({"userApiKey": "k", "session_id": "s", "pin_number": "9"});
+        let mut r = ScrubReport::default();
+        scrubber().scrub(&mut v, &mut r);
+        assert_eq!(r.fields_redacted, 3);
     }
 
     #[test]

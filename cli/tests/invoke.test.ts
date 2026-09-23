@@ -16,7 +16,7 @@ describe('invokeFunction', () => {
       StatusCode: 200,
       Payload: new TextEncoder().encode('{"ok":true}'),
     });
-    const out = await invokeFunction(lambda, 'fn', { a: 1 });
+    const out = await invokeFunction(lambda, 'fn', '{"a":1}');
     assert.equal(out.statusCode, 200);
     assert.deepEqual(out.payload, { ok: true });
     assert.equal(out.functionError, undefined);
@@ -27,7 +27,7 @@ describe('invokeFunction', () => {
       StatusCode: 200,
       Payload: new TextEncoder().encode('plain text'),
     });
-    const out = await invokeFunction(lambda, 'fn', {});
+    const out = await invokeFunction(lambda, 'fn', '{}');
     assert.equal(out.payload, 'plain text');
     assert.equal(out.payloadText, 'plain text');
   });
@@ -38,7 +38,7 @@ describe('invokeFunction', () => {
       FunctionError: 'Handled',
       Payload: new TextEncoder().encode('{"errorMessage":"x"}'),
     });
-    const out = await invokeFunction(lambda, 'fn', {});
+    const out = await invokeFunction(lambda, 'fn', '{}');
     assert.equal(out.functionError, 'Handled');
   });
 
@@ -50,7 +50,7 @@ describe('invokeFunction', () => {
       seenPayload = new TextDecoder().decode(input.Payload);
       return { StatusCode: 200, Payload: new TextEncoder().encode('{}') };
     });
-    await invokeFunction(lambda, 'fn:prod', { ping: 1 });
+    await invokeFunction(lambda, 'fn:prod', '{"ping":1}');
     assert.equal(seenName, 'fn:prod');
     assert.equal(seenPayload, '{"ping":1}');
   });

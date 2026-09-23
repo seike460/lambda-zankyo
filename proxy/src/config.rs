@@ -6,7 +6,6 @@
 //! env 名と同じキーを持つフラットな JSON オブジェクト。
 
 use crate::error::{Result, ZankyoError};
-use serde::Deserialize;
 use std::collections::{BTreeSet, HashMap};
 
 pub const DEFAULT_MAX_EVENT_KB: usize = 256;
@@ -221,141 +220,168 @@ impl Config {
 
     /// SSM Parameter の JSON で上書きする。JSON に存在したキーだけが
     /// env 由来の値を置き換える（部分上書き）。
-    /// 数値キーは env 経路と同じく 0 を拒否する。0 値の上限・
-    /// タイムアウトは設定ミスで関数本体まで壊すため。
+    /// パースはキーごとに行い、型が合わない値はそのキーだけ警告して
+    /// 飛ばす — 1 フィールドの書き損じで設定全体（bucket 含む）を
+    /// 失い、記録が無断停止する事態を避ける。
+    /// 数値・真偽値は JSON ネイティブ型に加えて文字列形式も受理する
+    /// （env 経路との対称性）。0 値は env と同じく拒否する
+    /// （0 の上限・タイムアウトは設定ミスで関数本体まで壊す）。
     pub fn overlay_ssm_json(&mut self, json: &str) -> Result<()> {
-        let p: Partial = serde_json::from_str(json).map_err(|e| {
+        let v: serde_json::Value = serde_json::from_str(json).map_err(|e| {
             ZankyoError::Config(format!("ZANKYO_SSM_PARAM is not valid config JSON: {e}"))
         })?;
-        for (key, zero) in [
-            ("ZANKYO_MAX_EVENT_KB", p.max_event_kb == Some(0)),
-            ("ZANKYO_FLUSH_BUDGET_MS", p.flush_budget_ms == Some(0)),
-            ("ZANKYO_PUT_TIMEOUT_MS", p.put_timeout_ms == Some(0)),
-            ("ZANKYO_SPILL_MAX_FILES", p.spill_max_files == Some(0)),
-            ("ZANKYO_SPILL_RETRY_MS", p.spill_retry_ms == Some(0)),
-            ("ZANKYO_SPILL_MAX_AGE_SECS", p.spill_max_age_secs == Some(0)),
-            ("ZANKYO_MAX_BODY_KB", p.max_body_kb == Some(0)),
-            ("ZANKYO_EXT_BODY_KB", p.ext_body_kb == Some(0)),
-            (
-                "ZANKYO_REGISTER_TIMEOUT_MS",
-                p.register_timeout_ms == Some(0),
-            ),
-            ("ZANKYO_EXT_RETRY_MS", p.ext_retry_ms == Some(0)),
-            (
-                "ZANKYO_EXT_MAX_POLL_FAILURES",
-                p.ext_max_poll_failures == Some(0),
-            ),
-            ("ZANKYO_SSM_TIMEOUT_MS", p.ssm_timeout_ms == Some(0)),
-            ("ZANKYO_FORWARD_TIMEOUT_MS", p.forward_timeout_ms == Some(0)),
-        ] {
-            if zero {
-                return Err(ZankyoError::Config(format!(
-                    "{key} must be a positive integer"
-                )));
+        let Some(obj) = v.as_object() else {
+            return Err(ZankyoError::Config(
+                "ZANKYO_SSM_PARAM must be a JSON object".into(),
+            ));
+        };
+        for (key, val) in obj {
+            match key.as_str() {
+                "ZANKYO_BUCKET" => {
+                    if let Some(s) = ssm_str(key, val) {
+                        self.bucket = s;
+                    }
+                }
+                "ZANKYO_KMS_KEY" => {
+                    if let Some(s) = ssm_str(key, val) {
+                        self.kms_key = Some(s);
+                    }
+                }
+                "ZANKYO_SCRUB_FIELDS" => {
+                    if let Some(s) = ssm_str(key, val) {
+                        self.scrub_fields = parse_fields(&s);
+                    }
+                }
+                "ZANKYO_SCRUB_MODE" => {
+                    if let Some(s) = ssm_str(key, val) {
+                        match parse_mode(&s) {
+                            Ok(m) => self.scrub_mode = m,
+                            Err(e) => {
+                                tracing::warn!(error = %e, key, "invalid SSM config value; ignored")
+                            }
+                        }
+                    }
+                }
+                "ZANKYO_DISABLED" => {
+                    if let Some(b) = ssm_bool(key, val) {
+                        self.disabled = b;
+                    }
+                }
+                "ZANKYO_SPILL_DIR" => {
+                    if let Some(s) = ssm_str(key, val) {
+                        self.spill_dir = s;
+                    }
+                }
+                "ZANKYO_MAX_EVENT_KB" => {
+                    if let Some(n) = ssm_u64(key, val) {
+                        self.max_event_kb = n as usize;
+                    }
+                }
+                "ZANKYO_FLUSH_BUDGET_MS" => {
+                    if let Some(n) = ssm_u64(key, val) {
+                        self.flush_budget_ms = n;
+                    }
+                }
+                "ZANKYO_PUT_TIMEOUT_MS" => {
+                    if let Some(n) = ssm_u64(key, val) {
+                        self.put_timeout_ms = n;
+                    }
+                }
+                "ZANKYO_SPILL_MAX_FILES" => {
+                    if let Some(n) = ssm_u64(key, val) {
+                        self.spill_max_files = n as usize;
+                    }
+                }
+                "ZANKYO_SPILL_RETRY_MS" => {
+                    if let Some(n) = ssm_u64(key, val) {
+                        self.spill_retry_ms = n;
+                    }
+                }
+                "ZANKYO_SPILL_MAX_AGE_SECS" => {
+                    if let Some(n) = ssm_u64(key, val) {
+                        self.spill_max_age_secs = n;
+                    }
+                }
+                "ZANKYO_MAX_BODY_KB" => {
+                    if let Some(n) = ssm_u64(key, val) {
+                        self.max_body_kb = n as usize;
+                    }
+                }
+                "ZANKYO_EXT_BODY_KB" => {
+                    if let Some(n) = ssm_u64(key, val) {
+                        self.ext_body_kb = n as usize;
+                    }
+                }
+                "ZANKYO_REGISTER_TIMEOUT_MS" => {
+                    if let Some(n) = ssm_u64(key, val) {
+                        self.register_timeout_ms = n;
+                    }
+                }
+                "ZANKYO_EXT_RETRY_MS" => {
+                    if let Some(n) = ssm_u64(key, val) {
+                        self.ext_retry_ms = n;
+                    }
+                }
+                "ZANKYO_EXT_MAX_POLL_FAILURES" => {
+                    if let Some(n) = ssm_u64(key, val) {
+                        self.ext_max_poll_failures = n as u32;
+                    }
+                }
+                "ZANKYO_SSM_TIMEOUT_MS" => {
+                    if let Some(n) = ssm_u64(key, val) {
+                        self.ssm_timeout_ms = n;
+                    }
+                }
+                "ZANKYO_FORWARD_TIMEOUT_MS" => {
+                    if let Some(n) = ssm_u64(key, val) {
+                        self.forward_timeout_ms = n;
+                    }
+                }
+                other => tracing::warn!(key = other, "unknown ZANKYO_SSM_PARAM key; ignored"),
             }
-        }
-        if let Some(v) = p.bucket {
-            self.bucket = v;
-        }
-        if let Some(v) = p.kms_key {
-            self.kms_key = Some(v);
-        }
-        if let Some(v) = p.scrub_fields {
-            self.scrub_fields = parse_fields(&v);
-        }
-        if let Some(v) = p.scrub_mode {
-            self.scrub_mode = parse_mode(&v)?;
-        }
-        if let Some(v) = p.max_event_kb {
-            self.max_event_kb = v;
-        }
-        if let Some(v) = p.flush_budget_ms {
-            self.flush_budget_ms = v;
-        }
-        if let Some(v) = p.put_timeout_ms {
-            self.put_timeout_ms = v;
-        }
-        if let Some(v) = p.spill_dir {
-            self.spill_dir = v;
-        }
-        if let Some(v) = p.spill_max_files {
-            self.spill_max_files = v;
-        }
-        if let Some(v) = p.spill_retry_ms {
-            self.spill_retry_ms = v;
-        }
-        if let Some(v) = p.spill_max_age_secs {
-            self.spill_max_age_secs = v;
-        }
-        if let Some(v) = p.max_body_kb {
-            self.max_body_kb = v;
-        }
-        if let Some(v) = p.ext_body_kb {
-            self.ext_body_kb = v;
-        }
-        if let Some(v) = p.register_timeout_ms {
-            self.register_timeout_ms = v;
-        }
-        if let Some(v) = p.ext_retry_ms {
-            self.ext_retry_ms = v;
-        }
-        if let Some(v) = p.ext_max_poll_failures {
-            self.ext_max_poll_failures = v;
-        }
-        if let Some(v) = p.ssm_timeout_ms {
-            self.ssm_timeout_ms = v;
-        }
-        if let Some(v) = p.forward_timeout_ms {
-            self.forward_timeout_ms = v;
-        }
-        if let Some(v) = p.disabled {
-            self.disabled = v;
         }
         Ok(())
     }
 }
 
-/// SSM JSON のスキーマ。env 名と同じキー名を使う。
-#[derive(Debug, Deserialize)]
-struct Partial {
-    #[serde(rename = "ZANKYO_BUCKET")]
-    bucket: Option<String>,
-    #[serde(rename = "ZANKYO_KMS_KEY")]
-    kms_key: Option<String>,
-    #[serde(rename = "ZANKYO_SCRUB_FIELDS")]
-    scrub_fields: Option<String>,
-    #[serde(rename = "ZANKYO_SCRUB_MODE")]
-    scrub_mode: Option<String>,
-    #[serde(rename = "ZANKYO_MAX_EVENT_KB")]
-    max_event_kb: Option<usize>,
-    #[serde(rename = "ZANKYO_FLUSH_BUDGET_MS")]
-    flush_budget_ms: Option<u64>,
-    #[serde(rename = "ZANKYO_PUT_TIMEOUT_MS")]
-    put_timeout_ms: Option<u64>,
-    #[serde(rename = "ZANKYO_SPILL_DIR")]
-    spill_dir: Option<String>,
-    #[serde(rename = "ZANKYO_SPILL_MAX_FILES")]
-    spill_max_files: Option<usize>,
-    #[serde(rename = "ZANKYO_SPILL_RETRY_MS")]
-    spill_retry_ms: Option<u64>,
-    #[serde(rename = "ZANKYO_SPILL_MAX_AGE_SECS")]
-    spill_max_age_secs: Option<u64>,
-    #[serde(rename = "ZANKYO_MAX_BODY_KB")]
-    max_body_kb: Option<usize>,
-    #[serde(rename = "ZANKYO_EXT_BODY_KB")]
-    ext_body_kb: Option<usize>,
-    #[serde(rename = "ZANKYO_REGISTER_TIMEOUT_MS")]
-    register_timeout_ms: Option<u64>,
-    #[serde(rename = "ZANKYO_EXT_RETRY_MS")]
-    ext_retry_ms: Option<u64>,
-    #[serde(rename = "ZANKYO_EXT_MAX_POLL_FAILURES")]
-    ext_max_poll_failures: Option<u32>,
-    #[serde(rename = "ZANKYO_SSM_TIMEOUT_MS")]
-    ssm_timeout_ms: Option<u64>,
-    #[serde(rename = "ZANKYO_FORWARD_TIMEOUT_MS")]
-    forward_timeout_ms: Option<u64>,
-    #[serde(rename = "ZANKYO_DISABLED")]
-    disabled: Option<bool>,
+/// SSM 値から文字列を取る。型違いは警告して None。
+fn ssm_str(key: &str, v: &serde_json::Value) -> Option<String> {
+    match v.as_str() {
+        Some(s) => Some(s.to_string()),
+        None => {
+            tracing::warn!(key, "SSM config value is not a string; ignored");
+            None
+        }
+    }
+}
+
+/// SSM 値から真偽値を取る。bool のほか env と同じ文字列形式も受理。
+fn ssm_bool(key: &str, v: &serde_json::Value) -> Option<bool> {
+    match v {
+        serde_json::Value::Bool(b) => Some(*b),
+        serde_json::Value::String(s) => Some(parse_bool(s)),
+        _ => {
+            tracing::warn!(key, "SSM config value is not a boolean; ignored");
+            None
+        }
+    }
+}
+
+/// SSM 値から正整数を取る。JSON 数値のほか数値文字列も受理。
+/// 0・非数値・負数は警告して None（そのキーだけ無効）。
+fn ssm_u64(key: &str, v: &serde_json::Value) -> Option<u64> {
+    let n = match v {
+        serde_json::Value::Number(n) => n.as_u64(),
+        serde_json::Value::String(s) => s.parse::<u64>().ok(),
+        _ => None,
+    };
+    match n {
+        Some(n) if n > 0 => Some(n),
+        _ => {
+            tracing::warn!(key, "SSM config value is not a positive integer; ignored");
+            None
+        }
+    }
 }
 
 #[cfg(test)]
@@ -424,5 +450,22 @@ mod tests {
     fn ssm_rejects_invalid_json() {
         let mut cfg = Config::from_env_map(&env(&[])).unwrap();
         assert!(cfg.overlay_ssm_json("not json").is_err());
+        assert!(cfg.overlay_ssm_json("[1,2]").is_err());
+    }
+
+    #[test]
+    fn ssk_bad_field_does_not_drop_whole_overlay() {
+        // 1 フィールドの型違いで overlay 全体が捨てられると、
+        // SSM 側にしか無い bucket まで失って記録が止まる。
+        let mut cfg = Config::from_env_map(&env(&[])).unwrap();
+        cfg.overlay_ssm_json(
+            r#"{"ZANKYO_BUCKET":"b","ZANKYO_DISABLED":"true","ZANKYO_MAX_EVENT_KB":"64","ZANKYO_PUT_TIMEOUT_MS":"oops","ZANKYO_FLUSH_BUDGET_MS":0}"#,
+        )
+        .unwrap();
+        assert_eq!(cfg.bucket, "b");
+        assert!(cfg.disabled); // 文字列 "true" も受理
+        assert_eq!(cfg.max_event_kb, 64); // 文字列数値も受理
+        assert_eq!(cfg.put_timeout_ms, DEFAULT_PUT_TIMEOUT_MS); // 型違いは既定値のまま
+        assert_eq!(cfg.flush_budget_ms, DEFAULT_FLUSH_BUDGET_MS); // 0 は拒否
     }
 }

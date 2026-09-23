@@ -376,6 +376,7 @@ async fn shutdown_flushes_inflight_as_timeout() {
     inflight.insert(Invocation {
         request_id: "req-timeout".to_string(),
         event: json!({"token": "secret-token-value", "input": 7}),
+        event_is_raw: false,
         invoked_at: OffsetDateTime::now_utc(),
     });
     let spill_dir = std::env::temp_dir().join(format!("zankyo-it-shutdown-{}", std::process::id()));

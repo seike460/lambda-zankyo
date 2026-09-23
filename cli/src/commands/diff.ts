@@ -9,7 +9,7 @@ import {
 import { type AwsClients, makeClients } from '../aws.ts';
 import { diffJson, formatDiffs } from '../diff.ts';
 import { CliError } from '../errors.ts';
-import { buildFixtureEvent } from '../fixture.ts';
+import { eventPayload } from '../fixture.ts';
 import { invokeFunction, qualifiedName } from '../invoke.ts';
 import { jsonOut } from '../output.ts';
 import { loadRecord } from '../store.ts';
@@ -42,10 +42,10 @@ export async function run(argv: string[], deps?: AwsClients): Promise<number> {
     requestId,
     functionName: strVal(values.function),
   });
-  const event = buildFixtureEvent(rec);
+  const payload = eventPayload(rec);
   const [ra, rb] = await Promise.all([
-    invokeFunction(lambda, qualifiedName(rec.functionName, a), event),
-    invokeFunction(lambda, qualifiedName(rec.functionName, b), event),
+    invokeFunction(lambda, qualifiedName(rec.functionName, a), payload),
+    invokeFunction(lambda, qualifiedName(rec.functionName, b), payload),
   ]);
   const diffs = diffJson(ra.payload, rb.payload);
   if (values.json) {

@@ -7,9 +7,9 @@
 
 use crate::inflight::{InFlight, Invocation};
 use crate::record::{
-    error_context_from_body, init_request_id, response_error_context, ErrorContext, FailureType,
+    error_context_from_body, init_request_id, response_error_context, FailureType,
 };
-use crate::store::Recorder;
+use crate::store::{EventInput, Recorder, SaveInput};
 use crate::upstream::{collect_bounded, forward, plain, strip_hop_by_hop, CollectError};
 use bytes::Bytes;
 use http::{HeaderMap, Method, Request, Response, StatusCode};
@@ -226,48 +226,20 @@ impl Drop for ActiveGuard<'_> {
     }
 }
 
-/// `Recorder::save` へ渡すレコード一式。
-struct SaveJob {
-    request_id: String,
-    invoked_at: OffsetDateTime,
-    failure: FailureType,
-    event: Option<Value>,
-    response: Option<Value>,
-    ctx: ErrorContext,
-}
-
 /// ランタイムへの応答を遅らせないよう、レコード保存は非同期で行う。
 /// タスクは `pending` に積まれ、プロセス終了前に orchestrate が
 /// ドレインする（投げっぱなしにすると init_error 等の記録が消える）。
 /// 終了処理で pending が closed 済みなら JoinSet へ積んでも
 /// 誰も await しないため、その場合は呼び出し側で同期的に保存する。
-async fn spawn_save(pending: &PendingSaves, recorder: Arc<Recorder>, job: SaveJob) {
+async fn spawn_save(pending: &PendingSaves, recorder: Arc<Recorder>, job: SaveInput) {
     let mut p = pending.lock().await;
     if p.closed {
         drop(p);
-        recorder
-            .save(
-                &job.request_id,
-                job.invoked_at,
-                job.failure,
-                job.event,
-                job.response,
-                job.ctx,
-            )
-            .await;
+        recorder.save(job).await;
         return;
     }
     p.set.spawn(async move {
-        recorder
-            .save(
-                &job.request_id,
-                job.invoked_at,
-                job.failure,
-                job.event,
-                job.response,
-                job.ctx,
-            )
-            .await;
+        recorder.save(job).await;
     });
 }
 
@@ -308,11 +280,17 @@ async fn handle_next(
             .unwrap_or_default()
             .to_string();
         if !request_id.is_empty() {
-            let event = serde_json::from_slice::<Value>(&bytes)
-                .unwrap_or_else(|_| Value::String(String::from_utf8_lossy(&bytes).into_owned()));
+            let (event, event_is_raw) = match serde_json::from_slice::<Value>(&bytes) {
+                Ok(v) => (v, false),
+                Err(_) => (
+                    Value::String(String::from_utf8_lossy(&bytes).into_owned()),
+                    true,
+                ),
+            };
             st.inflight.insert(Invocation {
                 request_id,
                 event,
+                event_is_raw,
                 invoked_at: OffsetDateTime::now_utc(),
             });
         }
@@ -357,23 +335,31 @@ async fn handle_completion(
     // 失敗文脈は転送の成否に関わらず記録する。/error を受け取った事実が
     // 証跡そのものであり、上流断で 502 を返す場合も捨てない。
     if let Some(ctx) = ctx {
-        let (event, invoked_at, request_id) = match inv {
-            Some(i) => (Some(i.event), i.invoked_at, i.request_id),
-            None => (None, OffsetDateTime::now_utc(), rid.to_string()),
-        };
-        spawn_save(
-            &st.pending,
-            st.recorder.clone(),
-            SaveJob {
-                request_id,
-                invoked_at,
-                failure: FailureType::HandlerError,
-                event,
-                response: serde_json::from_slice::<Value>(&body).ok(),
-                ctx,
-            },
-        )
-        .await;
+        // 同一 requestId の失敗記録は 1 件。上流断で 502 を返した後の
+        // ランタイム再試行や、SHUTDOWN drain との競合で event 欠落・
+        // errorContext 欠落の記録が同一キーを上書きするのを防ぐ。
+        if st.inflight.claim_record(rid) {
+            let (event, event_is_raw, invoked_at, request_id) = match inv {
+                Some(i) => (Some(i.event), i.event_is_raw, i.invoked_at, i.request_id),
+                None => (None, false, OffsetDateTime::now_utc(), rid.to_string()),
+            };
+            spawn_save(
+                &st.pending,
+                st.recorder.clone(),
+                SaveInput {
+                    request_id,
+                    invoked_at,
+                    failure: FailureType::HandlerError,
+                    event: EventInput {
+                        value: event,
+                        raw_text: event_is_raw,
+                    },
+                    response: serde_json::from_slice::<Value>(&body).ok(),
+                    ctx,
+                },
+            )
+            .await;
+        }
     }
     resp.map(boxed_response).unwrap_or_else(|r| *r)
 }
@@ -406,11 +392,14 @@ async fn handle_init_error(
     spawn_save(
         &st.pending,
         st.recorder.clone(),
-        SaveJob {
+        SaveInput {
             request_id: init_request_id(&now),
             invoked_at: now,
             failure: FailureType::InitError,
-            event: None,
+            event: EventInput {
+                value: None,
+                raw_text: false,
+            },
             response: None,
             ctx,
         },

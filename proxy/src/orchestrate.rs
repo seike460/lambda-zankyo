@@ -71,13 +71,10 @@ pub async fn run(argv: &[OsString]) -> u8 {
         });
     }
 
-    let shutdown =
-        start_extension(&client, &upstream, register_timeout, &inflight, &recorder).await;
-
     let drain_budget = std::time::Duration::from_millis(cfg.put_timeout_ms.saturating_add(1_000));
     let state = Arc::new(ProxyState {
-        upstream,
-        client,
+        upstream: upstream.clone(),
+        client: client.clone(),
         inflight,
         recorder,
         cfg,
@@ -85,6 +82,17 @@ pub async fn run(argv: &[OsString]) -> u8 {
         active: std::sync::atomic::AtomicUsize::new(0),
     });
     let server = tokio::spawn(crate::proxy::serve(listener, state.clone()));
+
+    // extension 登録は proxy serve と並行して行う。
+    // register を先に await すると、ハングした場合に子の初回 /next が
+    // register_timeout の分だけ遅れる。
+    let shutdown = tokio::spawn(start_extension(
+        client,
+        upstream,
+        register_timeout,
+        state.inflight.clone(),
+        state.recorder.clone(),
+    ));
 
     let code = wait_for_exit(&mut child, shutdown).await;
     // 新規接続を止めてから、残ったハンドラと save を待つ。
@@ -127,30 +135,22 @@ fn spawn_child(argv: &[OsString], listener: &TcpListener) -> Option<Child> {
 
 /// extension 登録はベストエフォート: 失敗しても proxy 経由の
 /// /error・/response 捕捉は残る（timeout 捕捉だけが失われる）。
-/// 戻り値は SHUTDOWN 受信時に `true` で終わるタスクのハンドル。
+/// SHUTDOWN 受信時に `true`、それ以外で終われば `false` を返す。
 async fn start_extension(
-    client: &HttpClient,
-    upstream: &str,
+    client: HttpClient,
+    upstream: String,
     register_timeout: std::time::Duration,
-    inflight: &Arc<InFlight>,
-    recorder: &Arc<Recorder>,
-) -> Option<JoinHandle<bool>> {
-    match extension::register(client, upstream, register_timeout).await {
+    inflight: Arc<InFlight>,
+    recorder: Arc<Recorder>,
+) -> bool {
+    match extension::register(&client, &upstream, register_timeout).await {
         Ok(ext_id) => {
             info!("registered as external extension");
-            let (c, api, inf, rec) = (
-                client.clone(),
-                upstream.to_string(),
-                inflight.clone(),
-                recorder.clone(),
-            );
-            Some(tokio::spawn(async move {
-                extension::run_event_loop(c, api, ext_id, inf, rec).await
-            }))
+            extension::run_event_loop(client, upstream, ext_id, inflight, recorder).await
         }
         Err(e) => {
             warn!(error = %e, "extension register failed; timeout capture unavailable");
-            None
+            false
         }
     }
 }
@@ -159,19 +159,16 @@ async fn start_extension(
 /// 先に終わる場合は正常終了（0）として抜ける。ただし extension が
 /// SHUTDOWN 以外の理由（ポーリング断等）で終わった場合は、子プロセスの
 /// 完了を待ち続ける — ここで抜けると関数実行中に子を殺してしまう。
-async fn wait_for_exit(child: &mut Child, shutdown: Option<JoinHandle<bool>>) -> u8 {
-    match shutdown {
-        Some(h) => tokio::select! {
-            status = child.wait() => exit_code(status),
-            res = h => match res {
-                Ok(true) => 0,
-                Ok(false) | Err(_) => {
-                    warn!("extension loop ended without shutdown; still waiting on runtime");
-                    exit_code(child.wait().await)
-                }
-            },
+async fn wait_for_exit(child: &mut Child, shutdown: JoinHandle<bool>) -> u8 {
+    tokio::select! {
+        status = child.wait() => exit_code(status),
+        res = shutdown => match res {
+            Ok(true) => 0,
+            Ok(false) | Err(_) => {
+                warn!("extension loop ended without shutdown; still waiting on runtime");
+                exit_code(child.wait().await)
+            }
         },
-        None => exit_code(child.wait().await),
     }
 }
 

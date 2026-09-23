@@ -1,6 +1,6 @@
 import { parseCliArgs, requirePositional, resolveBucket, SHARED_OPTIONS, strVal } from '../args.ts';
 import { type AwsClients, makeClients } from '../aws.ts';
-import { buildFixtureEvent } from '../fixture.ts';
+import { eventPayload } from '../fixture.ts';
 import { invokeFunction, qualifiedName } from '../invoke.ts';
 import { jsonOut } from '../output.ts';
 import { loadRecord } from '../store.ts';
@@ -30,7 +30,7 @@ export async function run(argv: string[], deps?: AwsClients): Promise<number> {
   const target = qualifiedName(rec.functionName, strVal(values.alias));
   // 元イベントが残っていないレコード（truncated / event 欠落）を
   // 投げても結果は意味を持たないので、fixture 経路と同じ検証で止める
-  const out = await invokeFunction(lambda, target, buildFixtureEvent(rec));
+  const out = await invokeFunction(lambda, target, eventPayload(rec));
   if (values.json) {
     console.log(
       jsonOut({
