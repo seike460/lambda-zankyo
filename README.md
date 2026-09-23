@@ -49,7 +49,7 @@ shutdown ウィンドウに PutObject が間に合わない場合は取りこぼ
 
 - **SAR（推奨）**: Serverless Application Repository から `lambda-zankyo`
   を 1 クリック導入（`sar/template.yaml` 参照）。
-- **セルフホスト**: `bash scripts/build-layer.sh` で両 arch の zip を作り、
+- **セルフホスト**: `node scripts/build-layer.mts` で両 arch の zip を作り、
   通常の Lambda Layer として発行します（GitHub Releases にも zip を添付）。
 
 いずれも関数に Layer を付け、環境変数を設定します:
@@ -106,7 +106,7 @@ env を部分上書きします。複数関数で設定を一元管理するた�
 | `ZANKYO_MAX_EVENT_KB` | `256` | イベント保存の上限（超過は先頭のみ + `truncated`） |
 | `ZANKYO_FLUSH_BUDGET_MS` | `1200` | SHUTDOWN フラッシュの予算上限 |
 | `ZANKYO_PUT_TIMEOUT_MS` | `5000` | 通常経路の PutObject 上限時間 |
-| `ZANKYO_SPILL_DIR` | `/tmp/zankyo` | S3 失敗時・SHUTDOWN 時のローカル退避先 |
+| `ZANKYO_SPILL_DIR` | `/tmp/zankyo/<function>` | S3 失敗時・SHUTDOWN 時のローカル退避先（既定は関数名でスコープ） |
 | `ZANKYO_SPILL_MAX_FILES` | `64` | spill 保持数の上限。超過分は古いものから破棄 |
 | `ZANKYO_SPILL_RETRY_MS` | `60000` | spill 再送を試みる間隔（生存中の定期回収） |
 | `ZANKYO_SPILL_MAX_AGE_SECS` | `604800` | spill ファイルの有効期間。超過分は再送せず破棄 |
@@ -199,7 +199,7 @@ cli/         # TypeScript CLI (node --test、AWS SDK v3、引数は node:util)
 construct/   # CDK construct (aws-cdk-lib v2、SAR 参照 + bucket/IAM 配線)
 examples/    # デモスタック（handler error / timeout / init error）
 sar/         # SAR 公開用 SAM テンプレート
-scripts/     # build-layer.sh（musl 静的バイナリ → layer zip）
+scripts/     # build-layer.mts（musl 静的バイナリ → layer zip）
 SPEC.md      # 仕様書（決定事項・スコープ外・Open Questions）
 ```
 
@@ -228,7 +228,7 @@ cargo fmt --all -- --check && cargo clippy -- -D warnings
   `packageManager`（pnpm 10.13.1）。
 - CI の全 GitHub Actions はコミット SHA でピン留めしています
   （`.github/workflows/ci.yml` の `@<sha> # vN` コメント参照）。
-- `scripts/build-layer.sh` は決定的 zip を生成します: エントリの
+- `scripts/build-layer.mts` は決定的 zip を生成します: エントリの
   mtime を epoch 0 に固定し、`zip -X` で拡張属性を捨て、エントリ順を
   `LC_ALL=C sort` で安定化。同一バイナリからは同一 zip が出ます。
 

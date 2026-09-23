@@ -76,7 +76,7 @@ jobs:
           cargo install cross --locked --version 0.2.5
           cross build --release --target aarch64-unknown-linux-musl -p zankyo
       - name: package layer zips
-        run: bash scripts/build-layer.sh
+        run: node scripts/build-layer.mts
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: zankyo-layer

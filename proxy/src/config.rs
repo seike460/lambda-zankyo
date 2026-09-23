@@ -11,6 +11,8 @@ use std::collections::{BTreeSet, HashMap};
 pub const DEFAULT_MAX_EVENT_KB: usize = 256;
 pub const DEFAULT_FLUSH_BUDGET_MS: u64 = 1_200;
 pub const DEFAULT_PUT_TIMEOUT_MS: u64 = 5_000;
+/// spill dir の既定プレフィックス。`AWS_LAMBDA_FUNCTION_NAME` がある
+/// 環境では `/tmp/zankyo/<function>` と関数名でスコープする。
 pub const DEFAULT_SPILL_DIR: &str = "/tmp/zankyo";
 /// spill dir に残すレコードの最大数。S3 が届かない状態が続いても
 /// /tmp を使い尽くさないよう、古いものから捨てる。
@@ -156,7 +158,7 @@ impl Config {
             max_event_kb: DEFAULT_MAX_EVENT_KB,
             flush_budget_ms: DEFAULT_FLUSH_BUDGET_MS,
             put_timeout_ms: DEFAULT_PUT_TIMEOUT_MS,
-            spill_dir: DEFAULT_SPILL_DIR.to_string(),
+            spill_dir: default_spill_dir(env),
             spill_max_files: DEFAULT_SPILL_MAX_FILES,
             spill_retry_ms: DEFAULT_SPILL_RETRY_MS,
             spill_max_age_secs: DEFAULT_SPILL_MAX_AGE_SECS,
@@ -226,6 +228,29 @@ impl Config {
     }
 }
 
+/// 既定の spill dir。関数名でスコープすることで、同一 sandbox を共有する
+/// 他関数の残滓と混ざらず、回収も関数単位で完結する。
+/// 関数名はパスに使える文字だけへ正規化する。
+fn default_spill_dir(env: &HashMap<String, String>) -> String {
+    let name = env.get("AWS_LAMBDA_FUNCTION_NAME").map(String::as_str);
+    match name {
+        Some(n) if !n.is_empty() => {
+            let clean: String = n
+                .chars()
+                .map(|c| {
+                    if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                        c
+                    } else {
+                        '_'
+                    }
+                })
+                .collect();
+            format!("{DEFAULT_SPILL_DIR}/{clean}")
+        }
+        _ => DEFAULT_SPILL_DIR.to_string(),
+    }
+}
+
 /// spill ディレクトリ値の検証。空文字と相対パスを弾く。
 /// Lambda の CWD（/var/task）は read-only で、相対パスは
 /// create_dir_all が必ず失敗して spill が毎回 warn で落ちるため、
@@ -288,5 +313,22 @@ mod tests {
     #[test]
     fn rejects_bad_mode() {
         assert!(Config::from_env_map(&env(&[("ZANKYO_SCRUB_MODE", "yes")])).is_err());
+    }
+
+    #[test]
+    fn spill_dir_defaults_to_function_scope() {
+        // Lambda 環境では関数名でスコープされる
+        let cfg = Config::from_env_map(&env(&[("AWS_LAMBDA_FUNCTION_NAME", "my-fn")])).unwrap();
+        assert_eq!(cfg.spill_dir, "/tmp/zankyo/my-fn");
+        // 関数名が無い環境（ローカル）ではプレフィックス直下
+        let cfg = Config::from_env_map(&env(&[])).unwrap();
+        assert_eq!(cfg.spill_dir, "/tmp/zankyo");
+        // 明示指定が優先される
+        let cfg = Config::from_env_map(&env(&[
+            ("AWS_LAMBDA_FUNCTION_NAME", "my-fn"),
+            ("ZANKYO_SPILL_DIR", "/tmp/custom"),
+        ]))
+        .unwrap();
+        assert_eq!(cfg.spill_dir, "/tmp/custom");
     }
 }

@@ -21,7 +21,7 @@ Metadata:
     SourceCodeUrl: https://github.com/seike460/lambda-zankyo
 
 Resources:
-  # scripts/build-layer.sh の出力を配置して sam publish する。
+  # scripts/build-layer.mts の出力を配置して sam publish する。
   # Layer zip の中身は bin/zankyo + zankyo-wrapper（exec wrapper 入口）。
   ZankyoLayerX86:
     Type: AWS::Serverless::LayerVersion
