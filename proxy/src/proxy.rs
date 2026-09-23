@@ -7,7 +7,7 @@
 
 use crate::inflight::{InFlight, Invocation};
 use crate::record::{
-    error_context_from_body, init_request_id, response_error_context, FailureType,
+    error_context_from_body, init_request_id, response_error_context, ErrorContext, FailureType,
 };
 use crate::store::Recorder;
 use crate::upstream::{collect_bounded, forward, plain, CollectError, FORWARD_TIMEOUT};
@@ -139,24 +139,61 @@ async fn handle(req: Request<Incoming>, st: &ProxyState) -> Response<BoxedBody> 
         }
         _ => {
             // 対象外パス（/restore/next 等）は中継のみ
-            match forward(
+            forward_or_502(
                 st,
                 &parts.method,
                 &path_and_query,
                 &parts.headers,
                 body_bytes,
                 Some(FORWARD_TIMEOUT),
+                "upstream",
             )
             .await
-            {
-                Ok(resp) => resp.map(|b| b.boxed()),
-                Err(e) => {
-                    warn!(error = %e, path = %path_and_query, "upstream forward failed");
-                    plain(StatusCode::BAD_GATEWAY, "zankyo: upstream unreachable")
-                }
-            }
+            .map(|r| r.map(|b| b.boxed()))
+            .unwrap_or_else(|r| *r)
         }
     }
+}
+
+/// 上流へ転送し、失敗時は warn + 502 応答に落とす共通経路。
+/// `ctx` はログ上で経路を区別するための短いラベル。
+/// Err 側は Box で返し、Result のメモリサイズを小さく保つ。
+async fn forward_or_502(
+    st: &ProxyState,
+    method: &Method,
+    pq: &str,
+    headers: &HeaderMap,
+    body: Bytes,
+    timeout: Option<std::time::Duration>,
+    ctx: &'static str,
+) -> Result<Response<Incoming>, Box<Response<BoxedBody>>> {
+    match forward(st, method, pq, headers, body, timeout).await {
+        Ok(resp) => Ok(resp),
+        Err(e) => {
+            warn!(error = %e, path = %pq, ctx, "upstream forward failed");
+            Err(Box::new(plain(
+                StatusCode::BAD_GATEWAY,
+                "zankyo: upstream unreachable",
+            )))
+        }
+    }
+}
+
+/// ランタイムへの応答を遅らせないよう、レコード保存は非同期で行う。
+fn spawn_save(
+    recorder: Arc<Recorder>,
+    request_id: String,
+    invoked_at: OffsetDateTime,
+    failure: FailureType,
+    event: Option<Value>,
+    response: Option<Value>,
+    ctx: ErrorContext,
+) {
+    tokio::spawn(async move {
+        recorder
+            .save(&request_id, invoked_at, failure, event, response, ctx)
+            .await;
+    });
 }
 
 /// `/next`: 応答ヘッダから requestId 等を取り、ボディ（イベント）を
@@ -168,12 +205,10 @@ async fn handle_next(
     headers: &HeaderMap,
     body: Bytes,
 ) -> Response<BoxedBody> {
-    let resp = match forward(st, method, pq, headers, body, None).await {
+    // /next の転送はランタイムのロングポーリングを壊さないよう無制限に待つ
+    let resp = match forward_or_502(st, method, pq, headers, body, None, "invocation/next").await {
         Ok(r) => r,
-        Err(e) => {
-            warn!(error = %e, "invocation/next forward failed");
-            return plain(StatusCode::BAD_GATEWAY, "zankyo: upstream unreachable");
-        }
+        Err(r) => return *r,
     };
     let (parts, resp_body) = resp.into_parts();
     let bytes = match collect_bounded(resp_body).await {
@@ -231,42 +266,34 @@ async fn handle_completion(
     // 失敗時に残すと、完了した呼び出しが shutdown で timeout として
     // 二重記録される（再配達されれば別 requestId で来る）。
     let inv = st.inflight.remove(rid);
-    let resp = match forward(st, method, pq, headers, body.clone(), Some(FORWARD_TIMEOUT)).await {
+    let resp = match forward_or_502(
+        st,
+        method,
+        pq,
+        headers,
+        body.clone(),
+        Some(FORWARD_TIMEOUT),
+        "completion",
+    )
+    .await
+    {
         Ok(r) => r,
-        Err(e) => {
-            warn!(error = %e, rid, "completion forward failed");
-            return plain(StatusCode::BAD_GATEWAY, "zankyo: upstream unreachable");
-        }
+        Err(r) => return *r,
     };
     if let Some(ctx) = ctx {
-        let (recorder, inv_event, invoked_at, request_id) = match inv {
-            Some(i) => (
-                st.recorder.clone(),
-                Some(i.event),
-                i.invoked_at,
-                i.request_id,
-            ),
-            None => (
-                st.recorder.clone(),
-                None,
-                OffsetDateTime::now_utc(),
-                rid.to_string(),
-            ),
+        let (event, invoked_at, request_id) = match inv {
+            Some(i) => (Some(i.event), i.invoked_at, i.request_id),
+            None => (None, OffsetDateTime::now_utc(), rid.to_string()),
         };
-        let response_payload = serde_json::from_slice::<Value>(&body).ok();
-        // ランタイムへ応答を返したあと非同期で記録する（呼び出し経路を遅らせない）
-        tokio::spawn(async move {
-            recorder
-                .save(
-                    &request_id,
-                    invoked_at,
-                    FailureType::HandlerError,
-                    inv_event,
-                    response_payload,
-                    ctx,
-                )
-                .await;
-        });
+        spawn_save(
+            st.recorder.clone(),
+            request_id,
+            invoked_at,
+            FailureType::HandlerError,
+            event,
+            serde_json::from_slice::<Value>(&body).ok(),
+            ctx,
+        );
     }
     resp.map(|b| b.boxed())
 }
@@ -284,21 +311,30 @@ async fn handle_init_error(
         .and_then(|v| v.to_str().ok())
         .map(String::from);
     let ctx = error_context_from_body(&body, header_type);
-    let resp = match forward(st, method, pq, headers, body.clone(), Some(FORWARD_TIMEOUT)).await {
+    let resp = match forward_or_502(
+        st,
+        method,
+        pq,
+        headers,
+        body.clone(),
+        Some(FORWARD_TIMEOUT),
+        "init/error",
+    )
+    .await
+    {
         Ok(r) => r,
-        Err(e) => {
-            warn!(error = %e, "init/error forward failed");
-            return plain(StatusCode::BAD_GATEWAY, "zankyo: upstream unreachable");
-        }
+        Err(r) => return *r,
     };
     let now = OffsetDateTime::now_utc();
-    let recorder = st.recorder.clone();
-    let request_id = init_request_id(&now);
-    tokio::spawn(async move {
-        recorder
-            .save(&request_id, now, FailureType::InitError, None, None, ctx)
-            .await;
-    });
+    spawn_save(
+        st.recorder.clone(),
+        init_request_id(&now),
+        now,
+        FailureType::InitError,
+        None,
+        None,
+        ctx,
+    );
     resp.map(|b| b.boxed())
 }
 

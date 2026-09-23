@@ -7,6 +7,7 @@ pub mod config;
 pub mod error;
 pub mod extension;
 pub mod inflight;
+pub mod orchestrate;
 pub mod proxy;
 pub mod record;
 pub mod runtime;

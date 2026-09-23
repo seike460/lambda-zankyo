@@ -23,8 +23,9 @@ zankyo バイナリを起動し、zankyo が実際の runtime を子プロセス
 
 | ファイル | 責務 |
 |---|---|
-| `main.rs` | exec wrapper 起点。子プロセス起動・proxy/extension の配線のみ |
+| `main.rs` | exec wrapper 起点。argv 解釈と logging 初期化のみ |
 | `setup.rs` | 起動判定（env + SSM overlay → `StartupPlan`）と Recorder 構築 |
+| `orchestrate.rs` | Record 確定後の配線。listen・子プロセス・extension・spill 回復を直線で起動 |
 | `proxy.rs` | Runtime API の経路判定。イベント観測と失敗確定 |
 | `upstream.rs` | 上流 Runtime API への転送。hop-by-hop 除去と上限付きボディ読み |
 | `extension.rs` | Extensions API。SHUTDOWN(timeout) で in-flight を flush |
