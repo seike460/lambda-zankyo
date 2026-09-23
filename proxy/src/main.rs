@@ -5,17 +5,16 @@
 //! 失敗時は原則 fail-open: zankyo 側の問題で関数本体を止めない。
 //! このファイルは配線と分岐だけを担い、各処理はライブラリモジュールへ委譲する。
 
-use aws_config::BehaviorVersion;
 use std::collections::HashMap;
 use std::ffi::OsString;
 use std::process::ExitCode;
 use std::sync::Arc;
 use tokio::net::TcpListener;
 use tracing::{info, warn};
-use zankyo::config::Config;
 use zankyo::inflight::InFlight;
 use zankyo::proxy::{new_client, HttpClient, ProxyState};
 use zankyo::runtime::{exit_code, passthrough, spawn_via_proxy};
+use zankyo::setup::StartupPlan;
 
 const EX_USAGE: u8 = 64;
 
@@ -47,42 +46,16 @@ async fn main() -> ExitCode {
 
 async fn run(argv: Vec<OsString>) -> u8 {
     let env_map: HashMap<String, String> = std::env::vars().collect();
-    let mut cfg = match Config::from_env_map(&env_map) {
-        Ok(c) => c,
-        Err(e) => {
-            warn!(error = %e, "config error; falling back to passthrough");
-            return passthrough(&argv).await;
-        }
-    };
-
-    let Some(upstream) = env_map.get("AWS_LAMBDA_RUNTIME_API").cloned() else {
-        // Lambda 環境外（ローカル実行）。プロキシ先が無いので passthrough。
+    // 起動形態の判定（設定解決・SSM overlay・fail-open 分岐）は setup 側。
+    // ここでは Record 確定後の配線だけを直線で書く。
+    let StartupPlan::Record(plan) = zankyo::setup::resolve_plan(&env_map).await else {
         return passthrough(&argv).await;
     };
-
-    if cfg.disabled {
-        info!("ZANKYO_DISABLED is set; running passthrough");
-        return passthrough(&argv).await;
-    }
-
-    // SSM overlay: ZANKYO_SSM_PARAM 指定時はバケット未設定でも取得を試みる
-    // （bucket が SSM 側だけに定義されるケースを許すため）。
-    let needs_aws = cfg.ssm_param.is_some() || !cfg.bucket.is_empty();
-    if !needs_aws {
-        warn!("ZANKYO_BUCKET is not set; recording disabled (passthrough)");
-        return passthrough(&argv).await;
-    }
-
-    let shared = aws_config::defaults(BehaviorVersion::latest()).load().await;
-    zankyo::setup::apply_ssm_overlay(&shared, &mut cfg).await;
-    if cfg.disabled {
-        info!("ZANKYO_DISABLED via SSM; running passthrough");
-        return passthrough(&argv).await;
-    }
-    if cfg.bucket.is_empty() {
-        warn!("no ZANKYO_BUCKET after SSM overlay; recording disabled (passthrough)");
-        return passthrough(&argv).await;
-    }
+    let zankyo::setup::RecordPlan {
+        cfg,
+        shared,
+        upstream,
+    } = *plan;
 
     // 自分自身を Runtime API として listen し、子にはこちらを向かせる
     let listener = match TcpListener::bind("127.0.0.1:0").await {
