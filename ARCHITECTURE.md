@@ -24,14 +24,18 @@ zankyo バイナリを起動し、zankyo が実際の runtime を子プロセス
 | ファイル | 責務 |
 |---|---|
 | `main.rs` | exec wrapper 起点。子プロセス起動・proxy/extension の配線のみ |
-| `proxy.rs` | Runtime API の HTTP 中継。イベント観測と失敗確定 |
+| `setup.rs` | 起動判定（env + SSM overlay → `StartupPlan`）と Recorder 構築 |
+| `proxy.rs` | Runtime API の経路判定。イベント観測と失敗確定 |
+| `upstream.rs` | 上流 Runtime API への転送。hop-by-hop 除去と上限付きボディ読み |
 | `extension.rs` | Extensions API。SHUTDOWN(timeout) で in-flight を flush |
 | `inflight.rs` | `/next`〜確定までのイベント保持（Mutex<HashMap>） |
-| `store.rs` | S3 への PutObject。timeout 時は /tmp 退避のベストエフォート |
+| `store.rs` | S3 への PutObject。失敗時は spill_dir 退避＋起動時の再送 |
 | `record.rs` | 保存レコードのスキーマ生成（serde） |
 | `scrub.rs` | PII マスキング。denylist + パターンの純粋ロジック |
 | `scrub_data.rs` | scrub の判定データ。denylist と検出パターンをコードから分離し、追加はテーブルの 1 エントリで完結させる |
 | `config.rs` | env / SSM JSON の設定解決。env 名はここに集約 |
+| `runtime.rs` | 子プロセス起動（passthrough / proxy 経由）と終了コード変換 |
+| `ssm.rs` | SSM Parameter Store 取得（10s timeout、fail-open） |
 | `error.rs` | `ZankyoError` と `Result` の統一型 |
 | `lib.rs` | 上記の公開。binary と integration test が共有する |
 
@@ -60,4 +64,6 @@ zankyo バイナリを起動し、zankyo が実際の runtime を子プロセス
    に PutObject。
 4. SHUTDOWN reason=timeout: `InFlight` を drain して残りを
    「応答が返らなかった失敗」として flush。残り時間内に終わらなければ
-   `/tmp/zankyo` に退避（取りこぼしうる、既知制約）。
+   `/tmp/zankyo` に退避（取りこぼしうる、既知制約）。spill した
+   レコードは次回起動時に `recover_spills` が S3 へ再送し、
+   成功したものだけ削除する（冪等に再実行可能）。

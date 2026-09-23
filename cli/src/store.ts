@@ -61,7 +61,7 @@ async function listPage(s3: S3Client, bucket: string, prefix: string, token: str
       { abortSignal: requestSignal() },
     );
   } catch (e) {
-    throw new CliError(`failed to list s3://${bucket}/${prefix}: ${errMessage(e)}`, 5);
+    throw new CliError(`failed to list s3://${bucket}/${prefix}: ${errMessage(e)}`, 3);
   }
 }
 
@@ -73,7 +73,7 @@ export async function fetchRecord(
   const out = await s3
     .send(new GetObjectCommand({ Bucket: bucket, Key: key }), { abortSignal: requestSignal() })
     .catch((e) => {
-      throw new CliError(`failed to read s3://${bucket}/${key}: ${errMessage(e)}`, 4);
+      throw new CliError(`failed to read s3://${bucket}/${key}: ${errMessage(e)}`, 3);
     });
   if (out.ContentLength !== undefined && out.ContentLength > MAX_RECORD_BYTES) {
     throw new CliError(
