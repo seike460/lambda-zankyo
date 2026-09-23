@@ -87,7 +87,9 @@ pub async fn next_event(
 }
 
 /// INVOKE/SHUTDOWN を受け取り続けるループ。
-/// SHUTDOWN を受けたら in-flight 呼び出しをフラッシュして戻る。
+/// SHUTDOWN を受けたら in-flight 呼び出しをフラッシュして `true` で戻る。
+/// ポーリング断が続いて諦めた場合は `false`（timeout 捕捉だけを失う
+/// 縮退運転であり、関数本体の継続には影響しない）。
 /// INVOKE の requestId 相関は proxy 側の観測で完結するため、ここでは
 /// SHUTDOWN 検知のみを担う。
 pub async fn run_event_loop(
@@ -96,7 +98,7 @@ pub async fn run_event_loop(
     ext_id: String,
     inflight: Arc<InFlight>,
     recorder: Arc<Recorder>,
-) {
+) -> bool {
     let mut failures: u32 = 0;
     loop {
         match next_event(&client, &upstream_api, &ext_id).await {
@@ -108,7 +110,7 @@ pub async fn run_event_loop(
                 );
                 let pending = inflight.drain();
                 if pending.is_empty() {
-                    return;
+                    return true;
                 }
                 // フラッシュ予算は設定値と、イベントが示す凍結期限の残時間の小さい方。
                 // deadlineMs が来ない環境では設定値のみで判断する。
@@ -121,7 +123,7 @@ pub async fn run_event_loop(
                 if tokio::time::timeout(budget, flush).await.is_err() {
                     warn!("shutdown flush exceeded total budget");
                 }
-                return;
+                return true;
             }
             Ok(_) => {
                 failures = 0;
@@ -135,7 +137,7 @@ pub async fn run_event_loop(
                 failures += 1;
                 if failures >= MAX_POLL_FAILURES {
                     warn!(failures, "extension event poll keeps failing; giving up");
-                    return;
+                    return false;
                 }
                 warn!(error = %e, failures, "extension event poll failed; retrying");
                 tokio::time::sleep(RETRY_DELAY).await;

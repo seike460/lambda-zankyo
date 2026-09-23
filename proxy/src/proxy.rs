@@ -227,6 +227,10 @@ async fn handle_completion(
     } else {
         response_error_context(&body)
     };
+    // in-flight から外すのは forward の成否に関わらず行う。
+    // 失敗時に残すと、完了した呼び出しが shutdown で timeout として
+    // 二重記録される（再配達されれば別 requestId で来る）。
+    let inv = st.inflight.remove(rid);
     let resp = match forward(st, method, pq, headers, body.clone(), Some(FORWARD_TIMEOUT)).await {
         Ok(r) => r,
         Err(e) => {
@@ -234,8 +238,6 @@ async fn handle_completion(
             return plain(StatusCode::BAD_GATEWAY, "zankyo: upstream unreachable");
         }
     };
-    // in-flight から外すのは成否に関わらず（再配達されれば別 requestId で来る）
-    let inv = st.inflight.remove(rid);
     if let Some(ctx) = ctx {
         let (recorder, inv_event, invoked_at, request_id) = match inv {
             Some(i) => (

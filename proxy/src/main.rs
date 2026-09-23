@@ -104,7 +104,7 @@ async fn run(argv: Vec<OsString>) -> u8 {
                 recorder.clone(),
             );
             Some(tokio::spawn(async move {
-                zankyo::extension::run_event_loop(c, api, ext_id, inf, rec).await;
+                zankyo::extension::run_event_loop(c, api, ext_id, inf, rec).await
             }))
         }
         Err(e) => {
@@ -122,11 +122,19 @@ async fn run(argv: Vec<OsString>) -> u8 {
     tokio::spawn(zankyo::proxy::serve(listener, state));
 
     // 子の終了コードをそのまま返す。SHUTDOWN フラッシュ後に extension 側が
-    // 先に終わる場合は正常終了（0）として抜ける。
+    // 先に終わる場合は正常終了（0）として抜ける。ただし extension が
+    // SHUTDOWN 以外の理由（ポーリング断等）で終わった場合は、子プロセスの
+    // 完了を待ち続ける — ここで抜けると関数実行中に子を殺してしまう。
     match ext_handle {
         Some(h) => tokio::select! {
             status = child.wait() => exit_code(status),
-            _ = h => 0,
+            res = h => match res {
+                Ok(true) => 0,
+                Ok(false) | Err(_) => {
+                    warn!("extension loop ended without shutdown; still waiting on runtime");
+                    exit_code(child.wait().await)
+                }
+            },
         },
         None => exit_code(child.wait().await),
     }

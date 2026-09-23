@@ -50,8 +50,21 @@ pub async fn forward(
         .map_err(|e| ZankyoError::Config(format!("bad upstream uri: {e}")))?;
     let mut builder = Request::builder().method(method).uri(uri);
     if let Some(h) = builder.headers_mut() {
+        // RFC 9110: Connection ヘッダは「この接続でだけ有効な追加ヘッダ」を
+        // 指名できる。固定の hop-by-hop 一覧だけでなく、指名された
+        // ヘッダも上流へ渡さない。
+        let mut drop_named: Vec<String> = Vec::new();
+        for v in headers.get_all("connection") {
+            if let Ok(s) = v.to_str() {
+                drop_named.extend(s.split(',').map(|t| t.trim().to_ascii_lowercase()));
+            }
+        }
         for (k, v) in headers.iter() {
-            if k == HOST || k == CONTENT_LENGTH || HOP_BY_HOP.contains(&k.as_str()) {
+            if k == HOST
+                || k == CONTENT_LENGTH
+                || HOP_BY_HOP.contains(&k.as_str())
+                || drop_named.iter().any(|n| n == k.as_str())
+            {
                 continue;
             }
             h.append(k.clone(), v.clone());
@@ -128,5 +141,23 @@ mod tests {
         let name = h.keys().next().unwrap().as_str();
         assert_eq!(name, "connection");
         assert!(HOP_BY_HOP.contains(&name));
+    }
+
+    #[test]
+    fn connection_header_names_are_parsed() {
+        // "Connection: x-opt, close" は x-opt も drop 対象にする
+        let mut h = HeaderMap::new();
+        h.insert(
+            "connection",
+            HeaderValue::from_static("X-Custom-Hop, keep-alive"),
+        );
+        let mut drop_named: Vec<String> = Vec::new();
+        for v in h.get_all("connection") {
+            if let Ok(s) = v.to_str() {
+                drop_named.extend(s.split(',').map(|t| t.trim().to_ascii_lowercase()));
+            }
+        }
+        assert!(drop_named.iter().any(|n| n == "x-custom-hop"));
+        assert!(drop_named.iter().any(|n| n == "keep-alive"));
     }
 }
