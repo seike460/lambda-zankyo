@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import { CliError } from '../src/errors.ts';
-import { buildFixtureEvent, fixtureJson } from '../src/fixture.ts';
+import { buildFixtureEvent, eventPayload, fixtureJson } from '../src/fixture.ts';
 import type { ZankyoRecord } from '../src/record.ts';
 
 const base: ZankyoRecord = {
@@ -35,5 +35,25 @@ describe('fixtureJson', () => {
     const out = fixtureJson(base);
     assert.ok(out.endsWith('\n'));
     assert.deepEqual(JSON.parse(out), { input: 'data' });
+  });
+
+  it('writes raw text events verbatim (no JSON quoting)', () => {
+    const raw: ZankyoRecord = { ...base, event: '<xml>not json</xml>', eventIsRawText: true };
+    assert.equal(fixtureJson(raw), '<xml>not json</xml>\n');
+  });
+});
+
+describe('eventPayload', () => {
+  it('JSON-encodes normal events', () => {
+    assert.equal(eventPayload(base), '{"input":"data"}');
+  });
+
+  it('passes raw text through unchanged', () => {
+    const raw: ZankyoRecord = { ...base, event: 'hello, world', eventIsRawText: true };
+    assert.equal(eventPayload(raw), 'hello, world');
+  });
+
+  it('still rejects truncated records', () => {
+    assert.throws(() => eventPayload({ ...base, truncated: true }), CliError);
   });
 });

@@ -147,6 +147,15 @@ s3://{ZANKYO_BUCKET}/zankyo/{function-name}/{yyyy}/{mm}/{dd}/{requestId}.json
 }
 ```
 
+補助フィールド（該当時のみ付与）:
+
+- `eventIsRawText: true` — 元イベントが JSON でない生テキストの場合。
+  `event` は文字列として保持され、replay/redrive/diff は JSON 再エンコードせず
+  原文のままペイロードに使います。fixture はそのまま書き出します。
+- `truncated: true` — イベントが `ZANKYO_MAX_EVENT_KB` を超えた場合。
+  先頭のみ保持のため fixture/replay/redrive/diff はすべて対象外
+  （部分イベントの replay は誤結果を生むため拒否）。
+
 ## PII scrub（既定 ON）
 
 ハイブリッド方式で、消した内容を `scrubReport` に証跡化します。
