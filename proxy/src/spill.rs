@@ -21,34 +21,81 @@ const MANAGED_PREFIX: &str = "zankyo-";
 /// 退避ファイルを書き、上限を超えたら古いものから捨てる。
 /// `.part` へ書いてから rename する: 定期回収が書き込み途中の
 /// 半端な JSON を読んで「復旧不能」として消す競合を防ぐ。
-pub fn write(dir: &str, max_files: usize, request_id: &str, body: &[u8]) {
+/// .part 名に pid を含めるのは、proxy と external extension agent が
+/// 同一 rid に並行して書き込む際の O_TRUNC 競合を避けるため。
+/// モードは 0600: レコードは scrub 済みだがイベント断片を含みうるため
+/// sandbox 内の他プロセスからも読めない最小権限にする。
+/// 戻り値は書き込み成功可否 — 失敗時は呼び出し側で代替の証跡
+/// （.inflight ステージ等）を消さない判断に使う。
+pub fn write(dir: &str, max_files: usize, request_id: &str, body: &[u8]) -> bool {
     let dir_path = Path::new(dir);
     let path = dir_path.join(filename(request_id));
-    let tmp = dir_path.join(format!(".{}.part", filename(request_id)));
-    let result = std::fs::create_dir_all(dir_path)
-        .and_then(|_| std::fs::write(&tmp, body))
+    let tmp = dir_path.join(format!(
+        ".{}.{}.part",
+        filename(request_id),
+        std::process::id()
+    ));
+    let result = ensure_dir(dir_path)
+        .and_then(|_| write_mode_600(&tmp, body))
         .and_then(|_| std::fs::rename(&tmp, &path));
     match result {
         Ok(()) => {
             info!(request_id, path = %path.display(), "record spilled to /tmp");
             enforce_cap(dir_path, max_files);
+            true
         }
-        Err(e) => warn!(request_id, error = %e, "failed to spill record"),
+        Err(e) => {
+            warn!(request_id, error = %e, "failed to spill record");
+            false
+        }
     }
+}
+
+/// 0600 で新規作成する。umask 既定の 0666&~umask（=0644）だと
+/// sandbox 同居プロセスから読めるため、zankyo 管理ファイルはすべて
+/// owner のみに絞る。rename 後もモードは引き継がれる。
+fn write_mode_600(path: &Path, body: &[u8]) -> std::io::Result<()> {
+    use std::os::unix::fs::OpenOptionsExt;
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(path)
+        .and_then(|mut f| std::io::Write::write_all(&mut f, body))
+}
+
+/// spill dir を 0700 で作る。既存 dir のモードは変えない
+/// （ユーザー管理の共有 dir を上書きしない）。zankyo が作った
+/// 関数スコープ dir だけが owner 限定になる。
+fn ensure_dir(path: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::DirBuilderExt;
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(path)
 }
 
 /// 呼び出し中イベントのステージを書く（external extension との共有用）。
 /// spill と同じく .part 経由の atomic rename — agent が読みかけの
 /// 半端なファイルを見ないようにする。失敗しても warn のみ（呼び出し
 /// 本体に影響させない）。
-pub fn write_inflight(dir: &Path, request_id: &str, body: &[u8]) {
+pub fn write_inflight(dir: &Path, request_id: &str, body: &[u8]) -> bool {
     let path = dir.join(inflight_name(request_id));
-    let tmp = dir.join(format!(".{}.part", inflight_name(request_id)));
-    if let Err(e) = std::fs::create_dir_all(dir)
-        .and_then(|_| std::fs::write(&tmp, body))
+    let tmp = dir.join(format!(
+        ".{}.{}.part",
+        inflight_name(request_id),
+        std::process::id()
+    ));
+    match ensure_dir(dir)
+        .and_then(|_| write_mode_600(&tmp, body))
         .and_then(|_| std::fs::rename(&tmp, &path))
     {
-        warn!(request_id, error = %e, "failed to stage inflight event");
+        Ok(()) => true,
+        Err(e) => {
+            warn!(request_id, error = %e, "failed to stage inflight event");
+            false
+        }
     }
 }
 

@@ -172,9 +172,9 @@ pub(crate) async fn handle_completion(
             )
             .await;
         }
-        // レコードは spill json として残った。ここでステージを消す —
-        // 残すと「応答なく畳まれた」未完呼び出しとして二重記録される。
-        st.recorder.clear_inflight(rid);
+        // inflight ステージの消去は stage_save/commit_staged が
+        // spill・PUT の成功を確認した時点で行う（両方失敗時は
+        // 残して init 時の timeout 変換に救いを残す）。
     }
     let resp = forward_or_502(
         st,

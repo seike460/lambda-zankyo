@@ -157,12 +157,6 @@ impl InFlight {
         }
     }
 
-    /// SHUTDOWN 時に残っている全呼び出しを取り出す。
-    pub fn drain(&self) -> Vec<Invocation> {
-        let mut st = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        st.map.drain().map(|(_, v)| v).collect()
-    }
-
     /// drain と記録権の一括確保を 1 回のロックで行う。
     /// 別呼び出しだと、その隙間に到着した /error が event 欠落のまま
     /// 記録権を取り、イベント保持側（timeout 記録）を捨てさせうる。
@@ -253,16 +247,6 @@ mod tests {
         // cap を超えると最古の r0 が追い出され、再度 claim できる
         assert!(f.claim_record("overflow"));
         assert!(f.claim_record("r0"));
-    }
-
-    #[test]
-    fn drain_empties_map() {
-        let f = InFlight::new();
-        f.insert(inv("r1"));
-        f.insert(inv("r2"));
-        let drained = f.drain();
-        assert_eq!(drained.len(), 2);
-        assert_eq!(f.len(), 0);
     }
 
     #[test]

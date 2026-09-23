@@ -115,7 +115,12 @@ impl Recorder {
             warn!(request_id, "failed to serialize record; dropping");
             return None;
         };
-        self.spill(&request_id, &body);
+        // spill に残った時点でレコードは保全済み — inflight ステージを
+        // 消してよい。spill 失敗時はステージを残し、init 時の
+        // timeout 変換に救いを残す（PUT 成功でも消える）。
+        if self.spill(&request_id, &body) {
+            self.clear_inflight(&request_id);
+        }
         Some(StagedRecord {
             request_id,
             key,
@@ -155,11 +160,12 @@ impl Recorder {
             return None;
         };
         // 先にローカルへ落とす: PutObject がウィンドウに間に合わなくても
-        // 実行環境の /tmp が同一 sandbox で再利用される場合に拾える
-        self.spill(&inv.request_id, &body);
-        // レコードは spill json として残ったので inflight ステージは
-        // 消費済み — 残すと次回 init で同じ呼び出しが再度変換される。
-        self.clear_inflight(&inv.request_id);
+        // 実行環境の /tmp が同一 sandbox で再利用される場合に拾える。
+        // spill 成功時のみ inflight ステージを消す — 失敗時は残して
+        // init 時の timeout 変換に救いを残す（PUT 成功でも消える）。
+        if self.spill(&inv.request_id, &body) {
+            self.clear_inflight(&inv.request_id);
+        }
         Some(StagedRecord {
             request_id: inv.request_id.clone(),
             key,
@@ -205,10 +211,14 @@ impl Recorder {
             };
             if let Some(job) = self.stage_timeout(&inv, reason) {
                 self.commit_staged(&job).await;
+                // 変換済みのステージは消す（stage_timeout 側でも
+                // 正規名を消すが、ファイル名と埋め込み rid が
+                // 食い違う場合に備えて path 側も消す）
+                let _ = std::fs::remove_file(&path);
             } else {
+                // 変換に失敗したステージは残し、次回 init の再試行に任せる
                 warn!(request_id = %inv.request_id, "failed to stage timed-out record");
             }
-            let _ = std::fs::remove_file(&path);
         }
     }
 
@@ -223,6 +233,9 @@ impl Recorder {
                 let spill_path =
                     Path::new(&self.cfg.spill_dir).join(spill::filename(&job.request_id));
                 let _ = std::fs::remove_file(spill_path);
+                // S3 に届いたのでローカルの証跡は全部消す
+                // （spill 失敗で残った .inflight もここで拾う）
+                self.clear_inflight(&job.request_id);
             }
             Ok(Err(e)) => {
                 warn!(request_id = %job.request_id, error = %e, "s3 put failed; spill kept")
@@ -347,13 +360,13 @@ impl Recorder {
         let _ = std::fs::remove_dir(dir);
     }
 
-    fn spill(&self, request_id: &str, body: &[u8]) {
+    fn spill(&self, request_id: &str, body: &[u8]) -> bool {
         spill::write(
             &self.cfg.spill_dir,
             self.cfg.spill_max_files,
             request_id,
             body,
-        );
+        )
     }
 }
 

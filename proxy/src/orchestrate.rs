@@ -83,6 +83,8 @@ pub async fn run(argv: &[OsString]) -> u8 {
     // 含める（早期終了時に PUT が途中で切られないようにする）。
     // 先に inflight 残滓を変換する — 「応答なく環境が畳まれた呼び出し」
     // を timeout レコード化してから、溜まった spill 全件を再送する順。
+    // 順序不変条件: このタスクは serve 開始前に積む。稼働後に
+    // recover_inflights を呼ぶと進行中の呼び出しを未完と誤認する。
     {
         let rec = recorder.clone();
         pending.lock().await.set.spawn(async move {
@@ -128,7 +130,10 @@ pub async fn run(argv: &[OsString]) -> u8 {
     let has_external_ext = std::path::Path::new(EXTERNAL_EXT_PATH).exists();
     let shutdown = if has_external_ext {
         info!("external extension detected; internal register skipped");
-        tokio::spawn(async { false })
+        // 決して解決しないハンドル — false を返すと wait_for_exit が
+        // 「extension 死亡」の warn を毎回 init で出してしまう。
+        // SHUTDOWN フラッシュは別プロセスの agent が担う。
+        tokio::spawn(std::future::pending::<bool>())
     } else {
         tokio::spawn(start_extension(
             client,

@@ -39,19 +39,18 @@ pub fn new_client() -> HttpClient {
     Client::builder(TokioExecutor::new()).build(HttpConnector::new())
 }
 
-/// 非同期で投げたレコード保存タスクの管理状態。
-/// `closed` 後に届いた save は JoinSet へ積んでも誰も await しないため、
-/// spawn 側がインラインで実行する。fire-and-forget で捨てないための仕組み。
+/// バックグラウンド回収タスク（init 時の inflight 変換＋spill 再送）の
+/// JoinSet。終了時に drain して途中の PUT を打ち切らないための管理。
+/// 失敗レコードの保存自体はハンドラ内でインライン実行される
+/// （転送前保存）ため、ここに積むのは起動経路の回収処理だけ。
 pub struct Pending {
     pub set: tokio::task::JoinSet<()>,
-    pub closed: bool,
 }
 
 impl Pending {
     pub fn new() -> Self {
         Self {
             set: tokio::task::JoinSet::new(),
-            closed: false,
         }
     }
 }
@@ -232,25 +231,23 @@ pub(crate) fn boxed_response(mut resp: Response<Incoming>) -> Response<BoxedBody
 /// drain 中に新たな save が増えないか確認する待機間隔。
 const DRAIN_POLL: std::time::Duration = std::time::Duration::from_millis(10);
 
-/// 積まれた save タスクが空になるまで待つ。全体で `budget` まで —
+/// 積まれた回収タスクが空になるまで待つ。全体で `budget` まで —
 /// S3 が応答しない環境で子プロセスの終了を無制限に遅らせない。
-/// pending を closed にしてから join するので、drain 中に到着した
-/// save は JoinSet ではなくハンドラ側のインライン実行になり、
-/// それらも `active` が 0 になるまで待ち合わせる。
+/// その後 `active` が 0 になるまで待ち、転送前保存を実行中の
+/// ハンドラも拾い切る。
 pub(crate) async fn drain_pending(state: &ProxyState, budget: std::time::Duration) {
     let drain = async {
         {
             let mut p = state.pending.lock().await;
-            p.closed = true;
             while let Some(res) = p.set.join_next().await {
-                // panic した save はレコードを失う — 数えて警告に残す
+                // panic した回収タスクはレコードを失う — 数えて警告に残す
                 if let Err(e) = res {
                     warn!(error = %e, "pending record save panicked");
                 }
             }
         }
-        // closed 以後にインライン化した save はハンドラの仕事として
-        // 残っているので、ハンドラが居なくなるまで待つ。
+        // ハンドラ内のインライン save（転送前保存）は JoinSet に
+        // 載らないため、ハンドラが居なくなるまで待つ。
         while state.active.load(std::sync::atomic::Ordering::SeqCst) > 0 {
             tokio::time::sleep(DRAIN_POLL).await;
         }
