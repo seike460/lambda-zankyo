@@ -1,0 +1,30 @@
+{
+  "name": "lambda-zankyo",
+  "version": "0.1.0",
+  "description": "Replay failed synchronous Lambda invocations: fixture, diff, redrive (paired with the zankyo Layer)",
+  "type": "module",
+  "license": "MIT",
+  "bin": {
+    "zankyo": "dist/bin.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit",
+    "test": "node --test tests/*.test.ts",
+    "lint": "biome check ."
+  },
+  "dependencies": {
+    "@aws-sdk/client-lambda": "^3.0.0",
+    "@aws-sdk/client-s3": "^3.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "typescript": "5.9.2"
+  }
+}

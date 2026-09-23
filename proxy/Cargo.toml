@@ -1,0 +1,50 @@
+[package]
+name = "zankyo"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Lambda Runtime API proxy + external extension that persists failed synchronous invocations"
+rust-version = "1.85"
+
+[dependencies]
+# Async runtime: proxy は常駐プロセスとして Runtime API を中継する
+tokio = { version = "1", features = [
+    "rt-multi-thread",
+    "macros",
+    "net",
+    "io-util",
+    "process",
+    "time",
+    "signal",
+    "sync",
+] }
+# HTTP: Runtime API / Extensions API は共にローカル HTTP/1.1
+hyper = { version = "1", features = ["client", "server", "http1"] }
+hyper-util = { version = "0.1", features = [
+    "client",
+    "client-legacy",
+    "server",
+    "tokio",
+] }
+http-body-util = "0.1"
+http = "1"
+bytes = "1"
+# レコード形式・設定 JSON
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# S3 PutObject / SSM GetParameter。aws-config の既定 TLS は rustls で
+# musl 静的ビルドから OpenSSL 依存を排除できる
+aws-config = { version = "1", features = ["behavior-version-latest"] }
+aws-sdk-s3 = "1"
+aws-sdk-ssm = "1"
+# PII scrub: denylist 照合とパターン検出
+regex = "1"
+hmac = "0.12"
+sha2 = "0.10"
+hex = "0.4"
+# エラー型・時刻・ログ
+thiserror = "2"
+time = { version = "0.3", features = ["formatting", "macros"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }

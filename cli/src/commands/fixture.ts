@@ -1,0 +1,46 @@
+import { writeFile } from 'node:fs/promises';
+import { parseCliArgs, resolveBucket, SHARED_OPTIONS, strVal } from '../args-bundle.ts';
+import { makeClients } from '../aws.ts';
+import { CliError } from '../errors.ts';
+import { fixtureJson } from '../fixture.ts';
+import { fetchRecord, resolveRecordKey } from '../store.ts';
+
+const USAGE = `zankyo fixture — write a sam local invoke -e event file from a failure record
+
+usage: zankyo fixture <requestId|--last> [--function NAME] [--out FILE] [--bucket B]
+`;
+
+export async function run(argv: string[]): Promise<number> {
+  const { values, positionals } = parseCliArgs(argv, {
+    ...SHARED_OPTIONS,
+    function: { type: 'string' },
+    out: { type: 'string' },
+    last: { type: 'boolean', default: false },
+  });
+  if (values.help) {
+    console.log(USAGE);
+    return 0;
+  }
+  const last = values.last === true;
+  const requestId = last ? undefined : positionals[0];
+  if (!last && !requestId) {
+    throw new CliError('usage: zankyo fixture <requestId|--last> [--out file]');
+  }
+  const bucket = resolveBucket(values);
+  const { s3 } = makeClients(values);
+  const key = await resolveRecordKey(s3, bucket, {
+    requestId,
+    last,
+    functionName: strVal(values.function),
+  });
+  const rec = await fetchRecord(s3, bucket, key);
+  const body = fixtureJson(rec);
+  const out = strVal(values.out);
+  if (out) {
+    await writeFile(out, body);
+    console.log(`wrote ${out} — run: sam local invoke -e ${out}`);
+  } else {
+    process.stdout.write(body);
+  }
+  return 0;
+}

@@ -1,0 +1,5 @@
+{
+  "app": "node bin/demo.ts",
+  "watch": { "include": ["lib/**"] },
+  "context": {}
+}

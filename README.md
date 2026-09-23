@@ -1,0 +1,199 @@
+# lambda-zankyo（残響）
+
+**sync invoke で失敗した Lambda 呼び出しの「イベント＋エラー応答」を確実に残し、
+ローカル再現・差分リプレイ・本番再実行まで担う Layer＋CLI。**
+
+> **スコープ**: 対象は **sync（RequestResponse）呼び出し** のみ。
+> async invoke / stream invoke の失敗は **Lambda Destinations** に任せます
+> （そちらは公式経路が存在します。zankyo は「無い方」を埋めるツールです）。
+
+## なぜ存在するか
+
+- Lambda Destinations は **async / stream 限定**。API Gateway・ALB・
+  Function URL・直接 invoke・Cognito など **sync invoke の失敗イベントを
+  保存する公式経路はありません**。
+- sync の失敗は「エラーはログに残るが、**入力イベントは蒸発する**」。
+  handler が event をログしていなければ再現不能です。
+- Powertools `logEvent` や Middy はコード変更前提。Datadog は商用で
+  fixture 出力・`sam local` 連携・差分リプレイがありません。
+
+## アーキテクチャ
+
+```
+Lambda Service ──Runtime API──▶ zankyo proxy (Rust, Layer) ──▶ 実ランタイム(handler)
+                     ▲                │
+                     │                ├─ Extensions API /register（SHUTDOWN 受信用）
+                     │                └─ 失敗時のみ: イベント+エラー → scrub → S3(+KMS)
+                     └── AWS_LAMBDA_EXEC_WRAPPER=/opt/zankyo-wrapper で差し込み
+```
+
+- Layer 内の**単一 Rust バイナリ**が Runtime API proxy と external extension を兼務。
+- **成功呼び出しは素通り**。失敗判定が必要な経路（`/response`・`/error`・
+  `/init/error`）だけボディを読み、常時コスト・レイテンシを最小化します。
+- 失敗の定義: `/error` 呼出 / `/init/error` / `/response` 内の `errorType`
+  含有 / `SHUTDOWN reason=timeout`（in-flight イベントをフラッシュ）。
+- **fail-open 設計**: zankyo 側の障害（設定ミス・bind 失敗・S3 エラー）で
+  関数本体を止めません。記録だけ諦めて passthrough します。
+
+### timeout 捕捉
+
+in-flight イベントをメモリに保持し、Extensions API の `SHUTDOWN`
+（reason=timeout）受信時に S3 へ**ベストエフォート**でフラッシュします。
+shutdown ウィンドウに PutObject が間に合わない場合は取りこぼします。
+緩衝として `/tmp/zankyo/{requestId}.json` にも同期退避します
+（取りこぼし頻度は計測・文書化対象。SPEC Open Questions #4）。
+
+## 使い方
+
+### 1. Layer の導入
+
+- **SAR（推奨）**: Serverless Application Repository から `lambda-zankyo`
+  を 1 クリック導入（`sar/template.yaml` 参照）。
+- **セルフホスト**: `bash scripts/build-layer.sh` で両 arch の zip を作り、
+  通常の Lambda Layer として発行します（GitHub Releases にも zip を添付）。
+
+いずれも関数に Layer を付け、環境変数を設定します:
+
+```bash
+AWS_LAMBDA_EXEC_WRAPPER=/opt/zankyo-wrapper
+ZANKYO_BUCKET=<記録用バケット名>
+```
+
+### 2. CDK（一番簡単）
+
+```ts
+import { Zankyo } from 'zankyo-cdk';
+
+const zankyo = new Zankyo(this, 'Zankyo', {
+  // bucket?, kmsKey?, scrubFields?, layer? (セルフホスト時), arm64?
+});
+zankyo.attachTo(myFunction);
+// → Layer 追加 + AWS_LAMBDA_EXEC_WRAPPER/ZANKYO_* env 注入
+//   + s3:PutObject（+ kms:Encrypt/GenerateDataKey）権限を role へ
+```
+
+bucket 未指定なら「パブリックアクセス全ブロック + lifecycle 30 日 +
+enforceSSL」のバケットを自動作成します。
+
+### 3. CLI
+
+```bash
+npm install -g lambda-zankyo   # npx lambda-zankyo でも可
+export ZANKYO_BUCKET=my-records
+
+zankyo list --function my-api --since 24h        # 失敗レコード一覧
+zankyo fixture --last --out event.json           # sam local invoke -e 用
+zankyo replay <requestId> --alias dev            # 指定バージョンで再実行
+zankyo diff <requestId> --alias v12 --alias v13  # 新旧比較（CI 向け exit code）
+zankyo redrive <requestId> --confirm             # 本番再投入（既定 dry-run）
+```
+
+共通フラグ: `--bucket` / `--region` / `--profile` / `--json`。
+exit code: `0` 成功 / `1` diff差異・関数エラー / `2` 引数ミス / `3` AWS 失敗 / `4` レコード不在。
+
+## 設定（環境変数）
+
+`ZANKYO_SSM_PARAM` 指定時は SSM Parameter の JSON（同じキー名）が
+env を部分上書きします。複数関数で設定を一元管理するための経路です。
+
+| env | 既定 | 用途 |
+|---|---|---|
+| `ZANKYO_BUCKET` | （必須※） | 失敗レコードの保存先。未設定なら記録せず passthrough |
+| `ZANKYO_KMS_KEY` | SSE-S3 | SSE-KMS のキー ARN |
+| `ZANKYO_SSM_PARAM` | なし | 設定 JSON を保持する SSM Parameter 名 |
+| `ZANKYO_SCRUB_FIELDS` | 既定 denylist | 追加フィールド名（カンマ区切り） |
+| `ZANKYO_SCRUB_MODE` | `mask` | `mask` / `hash`（HMAC 擬似名化）/ `off` |
+| `ZANKYO_MAX_EVENT_KB` | `256` | イベント保存の上限（超過は先頭のみ + `truncated`） |
+| `ZANKYO_FLUSH_BUDGET_MS` | `1200` | SHUTDOWN フラッシュの予算上限 |
+| `ZANKYO_DISABLED` | `false` | 緊急停止スイッチ（passthrough） |
+
+※「必須」は記録を有効にする条件です。未設定でも関数は正常に動きます。
+
+## データ仕様
+
+### S3 レイアウト
+
+```
+s3://{ZANKYO_BUCKET}/zankyo/{function-name}/{yyyy}/{mm}/{dd}/{requestId}.json
+```
+
+### レコード形式（1 ファイル = 1 失敗呼び出し）
+
+```json
+{
+  "version": "1",
+  "functionName": "my-api",
+  "functionVersion": "12",
+  "requestId": "...",
+  "invokedAt": "2026-09-22T12:34:56Z",
+  "failureType": "handler_error | init_error | timeout",
+  "event": { "…scrub 済みイベント…" },
+  "response": { "…scrub 済み応答または error オブジェクト…" },
+  "errorContext": { "errorType": "...", "errorMessage": "...", "stackTrace": "..." },
+  "scrubReport": { "fieldsRedacted": 12, "patternsApplied": ["email","jwt"] },
+  "truncated": false
+}
+```
+
+## PII scrub（既定 ON）
+
+ハイブリッド方式で、消した内容を `scrubReport` に証跡化します。
+
+- **フィールド名 denylist**: `password, secret, token, apiKey, authorization,
+  privateKey, sessionId, ssn, creditCard, cvv, pin`（大文字小文字・
+  セパレータ `_` `-` `.` 空白は不問。`access_token`→`token` のような
+  prefix/suffix 一致も対象）＋ `ZANKYO_SCRUB_FIELDS`。
+- **パターン検出**: email / クレカ番号（**Luhn 検証付き**）/ JWT /
+  AWS アクセスキー / Bearer トークン / 電話番号 / IPv4。
+- **mask モード**は形状保持（`j***@e***.com`、`***1234`）で再現性を維持。
+- **hash モード**は HMAC-SHA256 擬似名化（鍵は関数名+バケット由来の
+  決定的 seed。暗号化ではなく「同じ値→同じハッシュ」の再現性が目的）。
+- 無効化は `ZANKYO_SCRUB_MODE=off` の明示設定のみ。
+
+## セキュリティ
+
+- レコードは**利用者自身のアカウントの S3** にのみ保存。外部送信ゼロ。
+- 関数に付与するのは `s3:PutObject` のみ（+KMS 時は Encrypt/GenerateDataKey）。
+- proxy が listen するのは `127.0.0.1` のみ。
+- 依存は lockfile で固定（`Cargo.lock` / `pnpm-lock.yaml`）。
+  CI で `cargo audit` と `pnpm audit` を実行します。
+
+## 制限事項（重要）
+
+- **async invoke は対象外**（Lambda Destinations を使ってください）。
+- `AWS_LAMBDA_EXEC_WRAPPER` は 1 スロットのみ。他の wrapper ツール
+  （aws-lambda-web-adapter 等）との**併用は未対応**です。
+- `provided.*` ランタイムは bootstrap が exec wrapper を尊重する場合のみ。
+- SnapStart・RESPONSE_STREAM・API Gateway 29s タイムアウト（Lambda は
+  成功しているケース）は正式保証外（SPEC Open Questions）。
+- timeout フラッシュはベストエフォート（shutdown ウィンドウ制約あり）。
+
+## リポジトリ構成
+
+```
+proxy/       # Rust: Runtime API proxy + external extension（単一バイナリ）
+cli/         # TypeScript CLI (node --test、AWS SDK v3、引数は node:util)
+construct/   # CDK construct (aws-cdk-lib v2、SAR 参照 + bucket/IAM 配線)
+examples/    # デモスタック（handler error / timeout / init error）
+sar/         # SAR 公開用 SAM テンプレート
+scripts/     # build-layer.sh（musl 静的バイナリ → layer zip）
+SPEC.md      # 仕様書（決定事項・スコープ外・Open Questions）
+```
+
+## 開発
+
+```bash
+pnpm install            # JS/TS 依存
+pnpm gate               # lint + typecheck + test（全パッケージ）
+cargo test --workspace  # Rust ユニットテスト
+cargo fmt --all -- --check && cargo clippy -- -D warnings
+```
+
+- TS: strict + `noUncheckedIndexedAccess` + `exactOptionalPropertyTypes`、
+  Biome でフォーマット統一。テストは `node --test`（外部サービス不要）。
+- Rust: ロジック（scrub/record/config/inflight）は IO と分離した
+  ユニットテスト。proxy/extension 経路は E2E（examples/）で検証。
+
+## License
+
+MIT

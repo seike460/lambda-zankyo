@@ -1,0 +1,49 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  lambda-zankyo — Layer that persists failed synchronous Lambda invocations
+  (event + error response, PII-scrubbed) to your own S3 bucket.
+
+Metadata:
+  AWS::ServerlessRepo::Application:
+    Name: lambda-zankyo
+    Description: >-
+      Runtime API proxy + external extension (single static binary) that stores
+      failed SYNC Lambda invocations — the ones Lambda Destinations cannot see —
+      as replayable records in your own S3 bucket.
+    Author: seike460
+    SpdxLicenseId: MIT
+    LicenseUrl: ../../LICENSE
+    ReadmeUrl: ../../README.md
+    Labels: [lambda, observability, replay, debugging, incidents]
+    HomePageUrl: https://github.com/seike460/lambda-zankyo
+    SemanticVersion: 0.1.0
+    SourceCodeUrl: https://github.com/seike460/lambda-zankyo
+
+Resources:
+  # scripts/build-layer.sh の出力を配置して sam publish する。
+  # Layer zip の中身は bin/zankyo + zankyo-wrapper（exec wrapper 入口）。
+  ZankyoLayerX86:
+    Type: AWS::Serverless::LayerVersion
+    Properties:
+      LayerName: lambda-zankyo
+      Description: zankyo — failed sync invocation recorder (x86_64)
+      ContentUri: ./dist/layer-x86_64.zip
+      CompatibleArchitectures: [x86_64]
+      LicenseInfo: MIT
+  ZankyoLayerArm:
+    Type: AWS::Serverless::LayerVersion
+    Properties:
+      LayerName: lambda-zankyo-arm64
+      Description: zankyo — failed sync invocation recorder (arm64)
+      ContentUri: ./dist/layer-aarch64.zip
+      CompatibleArchitectures: [arm64]
+      LicenseInfo: MIT
+
+Outputs:
+  # zankyo-cdk construct が参照する契約名（construct/src/zankyo.ts の
+  # SAR_LAYER_OUTPUT と対）。arm64 関数は Arm64 側を使う。
+  LayerVersionArn:
+    Value: !Ref ZankyoLayerX86
+  LayerVersionArnArm64:
+    Value: !Ref ZankyoLayerArm

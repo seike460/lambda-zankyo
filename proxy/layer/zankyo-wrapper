@@ -1,0 +1,5 @@
+#!/bin/sh
+# zankyo exec wrapper: Lambda は AWS_LAMBDA_EXEC_WRAPPER の実行ファイルに
+# 本来のランタイム起動コマンドを argv で渡す。zankyo バイナリが
+# Runtime API proxy + extension を兼務し、子プロセスとして "$@" を起動する。
+exec /opt/bin/zankyo "$@"

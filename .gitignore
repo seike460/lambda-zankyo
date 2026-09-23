@@ -1,0 +1,21 @@
+# Dependencies / build outputs
+node_modules/
+dist/
+*.tsbuildinfo
+target/
+cdk.out/
+.cdk.staging/
+
+# Secrets & local env — never commit
+.env
+.env.*
+apikey
+*.pem
+*.key
+
+# OS noise
+.DS_Store
+
+# Test artifacts
+coverage/
+*.xlsx

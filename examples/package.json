@@ -1,0 +1,22 @@
+{
+  "name": "zankyo-examples",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Demo app: three failing functions wired with the Zankyo construct",
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "synth": "cdk synth",
+    "deploy": "cdk deploy"
+  },
+  "dependencies": {
+    "aws-cdk-lib": "^2.200.0",
+    "constructs": "^10.4.0",
+    "zankyo-cdk": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "aws-cdk": "^2.1000.0",
+    "typescript": "5.9.2"
+  }
+}

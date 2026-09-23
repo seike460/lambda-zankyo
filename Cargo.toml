@@ -1,0 +1,15 @@
+[workspace]
+resolver = "2"
+members = ["proxy"]
+
+[workspace.package]
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/seike460/lambda-zankyo"
+
+[profile.release]
+# Layer バイナリはサイズと起動速度が効く。lto + strip + panic=abort で小さく保つ。
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"
