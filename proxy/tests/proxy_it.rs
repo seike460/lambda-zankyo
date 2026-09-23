@@ -96,8 +96,17 @@ async fn wait_for(ms: u64, mut f: impl FnMut() -> bool) -> bool {
     f()
 }
 
-/// `endpoint` (mock S3) に向けた Recorder。
+static NEXT_SPILL: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+/// `endpoint` (mock S3) に向けた Recorder。spill はテストごとに
+/// 一意の一時 dir を使い、テスト間・リラン間で残滓を共有しない。
 fn recorder_to(endpoint: &str) -> Arc<Recorder> {
+    let n = NEXT_SPILL.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!("zankyo-it-{}-{}", std::process::id(), n));
+    recorder_to_with_spill(endpoint, &dir)
+}
+
+fn recorder_to_with_spill(endpoint: &str, spill: &std::path::Path) -> Arc<Recorder> {
     let conf = aws_sdk_s3::Config::builder()
         .region(aws_sdk_s3::config::Region::new("us-east-1"))
         .credentials_provider(aws_sdk_s3::config::SharedCredentialsProvider::new(
@@ -107,10 +116,13 @@ fn recorder_to(endpoint: &str) -> Arc<Recorder> {
         .force_path_style(true)
         .behavior_version(aws_sdk_s3::config::BehaviorVersion::latest())
         .build();
-    let cfg = Config::from_env_map(&HashMap::from([(
-        "ZANKYO_BUCKET".to_string(),
-        "test-bucket".to_string(),
-    )]))
+    let cfg = Config::from_env_map(&HashMap::from([
+        ("ZANKYO_BUCKET".to_string(), "test-bucket".to_string()),
+        (
+            "ZANKYO_SPILL_DIR".to_string(),
+            spill.to_string_lossy().into_owned(),
+        ),
+    ]))
     .unwrap();
     Arc::new(Recorder::new(
         aws_sdk_s3::Client::from_conf(conf),
@@ -363,7 +375,8 @@ async fn shutdown_flushes_inflight_as_timeout() {
         event: json!({"token": "secret-token-value", "input": 7}),
         invoked_at: OffsetDateTime::now_utc(),
     });
-    let recorder = recorder_to(&s3_addr);
+    let spill_dir = std::env::temp_dir().join(format!("zankyo-it-shutdown-{}", std::process::id()));
+    let recorder = recorder_to_with_spill(&s3_addr, &spill_dir);
 
     zankyo::extension::run_event_loop(
         new_client(),
@@ -383,10 +396,10 @@ async fn shutdown_flushes_inflight_as_timeout() {
     assert_eq!(rec["errorContext"]["errorType"], "Timeout");
     // timeout 経路でも scrub は効く
     assert_eq!(rec["event"]["token"], "s***");
-    // /tmp への spill も確認して後始末する
-    let spill = std::path::Path::new("/tmp/zankyo/req-timeout.json");
+    // spill ファイルが残っていることを確認してから dir ごと後始末する
+    let spill = spill_dir.join("req-timeout.json");
     assert!(spill.exists());
-    let _ = std::fs::remove_file(spill);
+    let _ = std::fs::remove_dir_all(&spill_dir);
 }
 
 #[tokio::test]

@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, it } from 'node:test';
@@ -36,8 +36,9 @@ describe('zankyo list', () => {
 });
 
 describe('zankyo fixture', () => {
-  it('writes the stored event to --out', async () => {
+  it('writes the stored event to --out', async (t) => {
     const dir = await mkdtemp(join(tmpdir(), 'zankyo-'));
+    t.after(() => rm(dir, { recursive: true, force: true }));
     const outFile = join(dir, 'event.json');
     const s3 = fakeS3([{ Contents: [{ Key: KEY }] }], VALID_RECORD);
     const { code } = await captureStdout(() =>
