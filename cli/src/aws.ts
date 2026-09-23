@@ -19,6 +19,15 @@ export const envTimeout = (name: string, fallback: number): number => {
   return Number.isFinite(n) && n > 0 ? Math.floor(n) : fallback;
 };
 
+/**
+ * 個別の send() 呼び出しへ渡す abort シグナル。
+ * NodeHttpHandler の requestTimeout はソケット層の打ち切りで、
+ * ボディのストリーミング読み取り完了後まで効かない経路があるため、
+ * 呼び出し単位でも同じ値で打ち切る（defense in depth）。
+ */
+export const requestSignal = (): AbortSignal =>
+  AbortSignal.timeout(envTimeout('ZANKYO_REQUEST_TIMEOUT_MS', 30_000));
+
 export interface AwsClients {
   s3: S3Client;
   lambda: LambdaClient;

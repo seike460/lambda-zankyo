@@ -3,6 +3,7 @@
  * キー規約の解釈は record.ts の純粋関数に寄せ、ここは取得だけを担う。
  */
 import { GetObjectCommand, ListObjectsV2Command, type S3Client } from '@aws-sdk/client-s3';
+import { requestSignal } from './aws.ts';
 import { CliError, errMessage } from './errors.ts';
 import { keyMatchesRequestId, parseRecord, type ZankyoRecord } from './record.ts';
 
@@ -57,6 +58,7 @@ async function listPage(s3: S3Client, bucket: string, prefix: string, token: str
   try {
     return await s3.send(
       new ListObjectsV2Command({ Bucket: bucket, Prefix: prefix, ContinuationToken: token }),
+      { abortSignal: requestSignal() },
     );
   } catch (e) {
     throw new CliError(`failed to list s3://${bucket}/${prefix}: ${errMessage(e)}`, 5);
@@ -68,9 +70,11 @@ export async function fetchRecord(
   bucket: string,
   key: string,
 ): Promise<ZankyoRecord> {
-  const out = await s3.send(new GetObjectCommand({ Bucket: bucket, Key: key })).catch((e) => {
-    throw new CliError(`failed to read s3://${bucket}/${key}: ${errMessage(e)}`, 4);
-  });
+  const out = await s3
+    .send(new GetObjectCommand({ Bucket: bucket, Key: key }), { abortSignal: requestSignal() })
+    .catch((e) => {
+      throw new CliError(`failed to read s3://${bucket}/${key}: ${errMessage(e)}`, 4);
+    });
   if (out.ContentLength !== undefined && out.ContentLength > MAX_RECORD_BYTES) {
     throw new CliError(
       `record too large (${out.ContentLength} bytes): s3://${bucket}/${key}`,

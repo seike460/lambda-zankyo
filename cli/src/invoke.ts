@@ -3,6 +3,7 @@
  * JSON でない応答も失わないように生テキストを併せて返す。
  */
 import { InvokeCommand, type LambdaClient } from '@aws-sdk/client-lambda';
+import { requestSignal } from './aws.ts';
 
 export interface InvokeOutcome {
   statusCode: number | undefined;
@@ -28,6 +29,7 @@ export async function invokeFunction(
       Payload: new TextEncoder().encode(JSON.stringify(event ?? {})),
       LogType: 'Tail',
     }),
+    { abortSignal: requestSignal() },
   );
   const payloadText = out.Payload ? new TextDecoder().decode(out.Payload) : '';
   let payload: unknown = payloadText;
