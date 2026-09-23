@@ -7,9 +7,14 @@ Lambda Runtime API (localhost)
         ▲   │  /next, /response, /error, /init/error
         │   ▼
 ┌─────────────────────────┐        ┌──────────────┐
-│  zankyo (proxy/src)     │  PUT   │  S3 bucket   │
-│  Runtime API proxy      ├───────►│  zankyo/...  │
-│  + external extension   │        └──────────────┘
+│  zankyo proxy プロセス   │  PUT   │  S3 bucket   │
+│  (exec wrapper 起動)    ├───────►│  zankyo/...  │
+└─────────────────────────┘        └──────────────┘
+        │ .inflight ステージ (/tmp)
+        ▼
+┌─────────────────────────┐
+│  zankyo agent プロセス   │
+│  (/opt/extensions 起動)  │
 └─────────────────────────┘
         ▲   │  /extension/register, /event/next
         └───┘  Extensions API (SHUTDOWN 検知)
@@ -18,6 +23,15 @@ Lambda Runtime API (localhost)
 exec wrapper (`AWS_LAMBDA_EXEC_WRAPPER=/opt/zankyo-wrapper`) が
 zankyo バイナリを起動し、zankyo が実際の runtime を子プロセスとして
 実行する。handler から見た Runtime API の振る舞いは変わらない。
+
+timeout 捕捉は external extension が担う。internal extension
+（exec wrapper 内からの register）には AWS が SHUTDOWN を
+配信しないため、layer は `/opt/extensions/zankyo` を置き、
+platform が別プロセスで agent を起動する。in-flight イベントは
+プロセスをまたげないため、proxy が `/next` 時点で `/tmp` へ
+`.inflight` ステージを書き、agent が SHUTDOWN で読んで
+timeout レコードへ変換する。完了した呼び出しのステージは
+proxy が即削除する（残存＝未完の証跡）。
 
 ## 品質・保守性の不変条件
 
@@ -49,7 +63,7 @@ zankyo バイナリを起動し、zankyo が実際の runtime を子プロセス
 | `proxy.rs` | Runtime API の listen・経路判定・接続管理 |
 | `handlers.rs` | `/next`・`/response`・`/error`・`/init/error` の個別処理 |
 | `upstream.rs` | 上流 Runtime API への転送。hop-by-hop 除去と上限付きボディ読み |
-| `extension.rs` | Extensions API。SHUTDOWN で in-flight を flush |
+| `extension.rs` | Extensions API。internal ループと external agent（`.inflight` 変換） |
 | `inflight.rs` | `/next`〜確定までのイベント保持（Mutex<HashMap>） |
 | `store.rs` | S3 PutObject とレコード組み立て（scrub 適用） |
 | `spill.rs` | /tmp 退避の管理。書き込み・回収・保持数上限・廃棄 |
@@ -80,14 +94,18 @@ zankyo バイナリを起動し、zankyo が実際の runtime を子プロセス
 ## データフロー
 
 1. `/next` 応答を中継しつつ requestId とイベントを `InFlight` に保持。
+   同時に `.inflight` ステージを /tmp へ書く（agent との共有）。
 2. `/response` に `errorType` があれば失敗。`/error`・`/init/error` は
-   常に失敗。成功なら `InFlight` から除去して終わり。
-3. 失敗時: イベントを scrub → レコード JSON を生成 →
-   `s3://{ZANKYO_BUCKET}/zankyo/{function}/{yyyy}/{mm}/{dd}/{requestId}.json`
-   に PutObject。
-4. SHUTDOWN（reason: timeout/failure/spindown）: `InFlight` を drain
-   して残りを「応答が返らなかった失敗」として flush。errorType は
-   reason から写す。残り時間内に終わらなければ `/tmp/zankyo` に
-   退避（取りこぼしうる、既知制約）。spill したレコードは次回起動時に
+   常に失敗。完了した呼び出しは `InFlight` とステージから除去する。
+3. 失敗時: イベントを scrub → レコード JSON を生成 → /tmp へ先書き
+   （write-ahead spill）→ bounded な S3 PutObject を **応答転送の前に**
+   完了させる。呼び出し終了で環境が freeze されると非同期 PUT は
+   進まないため、失敗経路だけこの順序を取る（成功経路はコスト 0）。
+   PUT が間に合わなければ spill が残り、定期回収・次回 init が拾う。
+4. SHUTDOWN（reason: timeout/failure/spindown）: external extension の
+   agent が残った `.inflight` ステージを読み、「応答が返らなかった
+   失敗」として timeout レコード化 → spill → 予算内で PUT。
+   errorType は reason から写す。spill したレコードは次回起動時に
    `recover_spills` が S3 へ再送し、成功したものだけ削除する
-   （冪等に再実行可能）。
+   （冪等に再実行可能）。`.inflight` が init 時に残っていれば
+   「応答なく畳まれた呼び出し」として同様に変換する。

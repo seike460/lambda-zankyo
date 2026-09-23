@@ -37,6 +37,48 @@ pub fn write(dir: &str, max_files: usize, request_id: &str, body: &[u8]) {
     }
 }
 
+/// 呼び出し中イベントのステージを書く（external extension との共有用）。
+/// spill と同じく .part 経由の atomic rename — agent が読みかけの
+/// 半端なファイルを見ないようにする。失敗しても warn のみ（呼び出し
+/// 本体に影響させない）。
+pub fn write_inflight(dir: &Path, request_id: &str, body: &[u8]) {
+    let path = dir.join(inflight_name(request_id));
+    let tmp = dir.join(format!(".{}.part", inflight_name(request_id)));
+    if let Err(e) = std::fs::create_dir_all(dir)
+        .and_then(|_| std::fs::write(&tmp, body))
+        .and_then(|_| std::fs::rename(&tmp, &path))
+    {
+        warn!(request_id, error = %e, "failed to stage inflight event");
+    }
+}
+
+/// 呼び出し完了時にステージを消す。残った `.inflight` は「応答なく
+/// 環境が畳まれた呼び出し」の証跡として init 時・SHUTDOWN 時に
+/// timeout レコードへ変換されるため、完了したものは必ず消す。
+pub fn clear_inflight(dir: &Path, request_id: &str) {
+    let path = dir.join(inflight_name(request_id));
+    match std::fs::remove_file(&path) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => warn!(request_id, error = %e, "failed to clear inflight stage"),
+    }
+}
+
+/// 残っている inflight ステージを列挙する。
+/// 実行環境が応答を返す前に畳まれた呼び出し＝未完の証跡。
+/// init 直後と SHUTDOWN 受信時のみ呼ぶこと（稼働中に読むと
+/// 進行中の呼び出しを未完と誤認する）。
+pub fn pending_inflights(dir: &Path) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("inflight") && is_managed(p))
+        .collect()
+}
+
 /// 回収待ちの spill を (path, body, s3_key) で列挙する。
 /// 壊れた JSON や必須フィールド欠落は永遠に復旧できないため、
 /// ここで削除する（残すと rerun のたびに積み上がる stale 残滓になる）。
@@ -149,6 +191,18 @@ pub fn enforce_cap(dir: &Path, cap: usize) {
 /// 使える文字だけへ正規化する。`/` や `..` を含む値で spill_dir の
 /// 外へ書き出さないための防御。
 pub fn filename(request_id: &str) -> String {
+    format!("{MANAGED_PREFIX}{}.json", sanitize(request_id))
+}
+
+/// `filename` と同じ正規化を inflight ステージ名へ適用する。
+/// 拡張子 `.inflight` は `pending`（.json のみ回収）や `enforce_cap`
+/// の対象外にするための区別子 — 呼び出し完了時に消す一時ファイルで、
+/// レコード spill とは寿命が違う。
+pub fn inflight_name(request_id: &str) -> String {
+    format!("{MANAGED_PREFIX}{}.inflight", sanitize(request_id))
+}
+
+fn sanitize(request_id: &str) -> String {
     let clean: String = request_id
         .chars()
         .map(|c| {
@@ -160,8 +214,11 @@ pub fn filename(request_id: &str) -> String {
         })
         .collect();
     let clean = clean.trim_start_matches('.');
-    let name = if clean.is_empty() { "record" } else { clean };
-    format!("{MANAGED_PREFIX}{name}.json")
+    if clean.is_empty() {
+        "record".to_string()
+    } else {
+        clean.to_string()
+    }
 }
 
 /// spill した record JSON から S3 キーを再構成する。
@@ -326,6 +383,35 @@ mod tests {
         // 復旧不能なものはその場で消え、次回以降残滓として残らない
         assert!(!broken.exists());
         assert!(!missing.exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn inflight_write_clear_pending_cycle() {
+        let dir = std::env::temp_dir().join(format!("zankyo-infl-{}", std::process::id()));
+        let dirp = dir.as_path();
+        write_inflight(dirp, "req-1", b"{}");
+        write_inflight(dirp, "req/2", b"{}"); // 正規化される
+        assert_eq!(pending_inflights(dirp).len(), 2);
+        // inflight は spill json の回収対象に含まれない
+        assert!(pending(dirp, Duration::from_secs(3600)).is_empty());
+        clear_inflight(dirp, "req-1");
+        let rest = pending_inflights(dirp);
+        assert_eq!(rest.len(), 1);
+        assert!(rest[0].ends_with("zankyo-req_2.inflight"));
+        clear_inflight(dirp, "req/2");
+        clear_inflight(dirp, "missing"); // 存在しなくてもエラーにしない
+        assert!(pending_inflights(dirp).is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn foreign_inflight_files_are_never_listed() {
+        let dir = std::env::temp_dir().join(format!("zankyo-inflf-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let foreign = dir.join("other-tool.inflight");
+        std::fs::write(&foreign, b"{}").unwrap();
+        assert!(pending_inflights(&dir).is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

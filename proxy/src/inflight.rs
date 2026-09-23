@@ -32,6 +32,46 @@ pub struct Invocation {
     pub invoked_at: OffsetDateTime,
 }
 
+impl Invocation {
+    /// 外部 extension プロセスと共有するためのステージ表現。
+    /// /opt/extensions で別プロセスとして起動する agent はメモリ上の
+    /// InFlight を共有できないため、proxy が呼び出し中のイベントを
+    /// /tmp の `.inflight` ファイルへ書き、SHUTDOWN 時に agent が読む。
+    /// i128 の nanos は JSON number に入らないため文字列で持つ。
+    pub fn to_staged(&self) -> Option<Vec<u8>> {
+        serde_json::to_vec(&serde_json::json!({
+            "requestId": self.request_id,
+            "invokedAtNanos": self.invoked_at.unix_timestamp_nanos().to_string(),
+            "encoding": match self.encoding {
+                EventEncoding::Json => "json",
+                EventEncoding::RawText => "raw",
+                EventEncoding::Base64 => "base64",
+            },
+            "event": self.event,
+        }))
+        .ok()
+    }
+
+    /// `to_staged` の逆。壊れた JSON・必須フィールド欠落・未知の
+    /// encoding は None（呼び出し側で捨てる）。
+    pub fn from_staged(body: &[u8]) -> Option<Invocation> {
+        let v: Value = serde_json::from_slice(body).ok()?;
+        let nanos: i128 = v.get("invokedAtNanos")?.as_str()?.parse().ok()?;
+        let encoding = match v.get("encoding")?.as_str()? {
+            "json" => EventEncoding::Json,
+            "raw" => EventEncoding::RawText,
+            "base64" => EventEncoding::Base64,
+            _ => return None,
+        };
+        Some(Invocation {
+            request_id: v.get("requestId")?.as_str()?.to_string(),
+            event: v.get("event").cloned().unwrap_or(Value::Null),
+            encoding,
+            invoked_at: OffsetDateTime::from_unix_timestamp_nanos(nanos).ok()?,
+        })
+    }
+}
+
 /// 記録済み requestId の保持上限。長寿命環境で失敗が積み上がっても
 /// 無制限に増えないよう FIFO で間引く。dedupe の効く実用上の窓
 /// （同一 requestId の再試行間隔）より十分に大きい。
@@ -223,5 +263,40 @@ mod tests {
         let drained = f.drain();
         assert_eq!(drained.len(), 2);
         assert_eq!(f.len(), 0);
+    }
+
+    #[test]
+    fn staged_roundtrip_preserves_all_encodings() {
+        for (enc, event) in [
+            (EventEncoding::Json, serde_json::json!({"k": 1})),
+            (EventEncoding::RawText, Value::String("not json".into())),
+            (EventEncoding::Base64, Value::String("AAEC".into())),
+        ] {
+            let src = Invocation {
+                request_id: "r-stage".to_string(),
+                event,
+                encoding: enc,
+                invoked_at: OffsetDateTime::now_utc(),
+            };
+            let body = src.to_staged().unwrap();
+            let back = Invocation::from_staged(&body).unwrap();
+            assert_eq!(back.request_id, "r-stage");
+            assert_eq!(back.encoding, enc);
+            assert_eq!(back.event, src.event);
+            // nanos 精度まで戻ること（invokedAt の s3 キー日付が変わらない）
+            assert_eq!(back.invoked_at, src.invoked_at);
+        }
+    }
+
+    #[test]
+    fn staged_rejects_malformed() {
+        assert!(Invocation::from_staged(b"not json").is_none());
+        assert!(Invocation::from_staged(br#"{"requestId":"r1"}"#).is_none());
+        // 未知の encoding は捨てる（前方互換: 新しい encoding を書いた
+        // 新バージョン proxy のステージを旧 agent が読んでも落ちない）
+        assert!(Invocation::from_staged(
+            br#"{"requestId":"r1","invokedAtNanos":"1","encoding":"future","event":null}"#
+        )
+        .is_none());
     }
 }

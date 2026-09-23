@@ -1,0 +1,7 @@
+#!/bin/sh
+# zankyo external extension: Lambda platform は layer の
+# /opt/extensions/<name> を実行ファイルとして起動する。
+# argv なしで起動されるため zankyo は agent モードで動き、
+# SHUTDOWN イベント（timeout 捕捉）を受け取れる
+# （internal extension には SHUTDOWN が届かない AWS 仕様のため）。
+exec /opt/bin/zankyo

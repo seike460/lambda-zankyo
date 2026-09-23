@@ -35,6 +35,12 @@ async fn main() -> ExitCode {
     init_tracing();
     let argv: Vec<OsString> = std::env::args_os().skip(1).collect();
     if argv.is_empty() {
+        // argv なし起動は 2 通り: /opt/extensions/zankyo から platform が
+        // 起動する external extension と、人手での裸実行。Lambda 環境
+        // 変数の有無で区別する。
+        if std::env::var_os("AWS_LAMBDA_RUNTIME_API").is_some() {
+            return ExitCode::from(zankyo::orchestrate::run_agent().await);
+        }
         return usage();
     }
     ExitCode::from(zankyo::orchestrate::run(&argv).await)

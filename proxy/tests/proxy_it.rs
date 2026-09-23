@@ -589,6 +589,72 @@ async fn second_error_call_does_not_overwrite_record() {
 }
 
 #[tokio::test]
+async fn inflight_stage_is_cleared_on_completion() {
+    // /next で .inflight ステージが書かれ、完了（成功・失敗とも）で消える。
+    // 残ったステージは「応答なく畳まれた呼び出し」の証跡なので、
+    // 正常完了分が残ると次回 init で誤って timeout 記録される。
+    let (api_addr, _api) = spawn_mock(runtime_api_handler()).await;
+    let (s3_addr, _s3) = spawn_mock(|_m, _p, _h, _b| ok_empty()).await;
+    let spill_dir = std::env::temp_dir().join(format!("zankyo-it-infl-{}", std::process::id()));
+    let recorder = recorder_to_with_spill(&s3_addr, &spill_dir);
+    let inflight = Arc::new(InFlight::new());
+    let proxy = spawn_proxy(&api_addr, inflight, recorder).await;
+    let stage = spill_dir.join("zankyo-req-123.inflight");
+
+    call(
+        &proxy,
+        Method::GET,
+        "/2018-06-01/runtime/invocation/next",
+        None,
+    )
+    .await;
+    assert!(stage.exists());
+    let (status, _) = call(
+        &proxy,
+        Method::POST,
+        "/2018-06-01/runtime/invocation/req-123/response",
+        Some(json!({"ok": true})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(!stage.exists());
+    let _ = std::fs::remove_dir_all(&spill_dir);
+}
+
+#[tokio::test]
+async fn leftover_inflight_stage_becomes_timeout_record() {
+    // external extension / init 時回収: 残った .inflight ステージを
+    // timeout レコードへ変換し、ステージ本体は消える。
+    let (s3_addr, s3_hits) = spawn_mock(|_m, _p, _h, _b| ok_empty()).await;
+    let spill_dir = std::env::temp_dir().join(format!("zankyo-it-infl2-{}", std::process::id()));
+    let recorder = recorder_to_with_spill(&s3_addr, &spill_dir);
+    let inv = Invocation {
+        request_id: "req-stuck".to_string(),
+        event: json!({"token": "secret-token-value"}),
+        encoding: EventEncoding::Json,
+        invoked_at: OffsetDateTime::now_utc(),
+    };
+    recorder.stage_inflight(&inv);
+    let stage = spill_dir.join("zankyo-req-stuck.inflight");
+    assert!(stage.exists());
+
+    recorder.recover_inflights(Some("timeout")).await;
+
+    assert!(wait_for(2_000, || !captured(&s3_hits).is_empty()).await);
+    let (_, path, body) = captured(&s3_hits).remove(0);
+    assert!(path.contains("req-stuck.json"));
+    let rec: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(rec["failureType"], "timeout");
+    assert_eq!(rec["event"]["token"], "s***");
+    // SHUTDOWN reason は errorContext へ引き継ぐ
+    assert_eq!(rec["errorContext"]["errorType"], "Timeout");
+    // 変換後はステージも spill も残らない（PUT 成功時）
+    assert!(!stage.exists());
+    assert!(!spill_dir.join("zankyo-req-stuck.json").exists());
+    let _ = std::fs::remove_dir_all(&spill_dir);
+}
+
+#[tokio::test]
 async fn oversized_body_is_rejected_without_forwarding() {
     let (api_addr, api_hits) = spawn_mock(|_m, _p, _h, _b| ok_empty()).await;
     let (s3_addr, _s3) = spawn_mock(|_m, _p, _h, _b| ok_empty()).await;

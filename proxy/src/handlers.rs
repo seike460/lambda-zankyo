@@ -5,9 +5,7 @@
 //! 起動）だけを扱う。
 
 use crate::inflight::{EventEncoding, Invocation};
-use crate::proxy::{
-    boxed_full, boxed_response, forward_or_502, BoxedBody, PendingSaves, ProxyState,
-};
+use crate::proxy::{boxed_full, boxed_response, forward_or_502, BoxedBody, ProxyState};
 use crate::record::{
     error_context_from_body, init_request_id, response_error_context, FailureType,
 };
@@ -17,25 +15,19 @@ use base64::Engine;
 use bytes::Bytes;
 use http::{HeaderMap, Method, Response, StatusCode};
 use serde_json::Value;
-use std::sync::Arc;
 use time::OffsetDateTime;
 use tracing::warn;
 
-/// ランタイムへの応答を遅らせないよう、レコード保存は非同期で行う。
-/// タスクは `pending` に積まれ、プロセス終了前に orchestrate が
-/// ドレインする（投げっぱなしにすると init_error 等の記録が消える）。
-/// 終了処理で pending が closed 済みなら JoinSet へ積んでも
-/// 誰も await しないため、その場合は呼び出し側で同期的に保存する。
-async fn spawn_save(pending: &PendingSaves, recorder: Arc<Recorder>, job: SaveInput) {
-    let mut p = pending.lock().await;
-    if p.closed {
-        drop(p);
-        recorder.save(job).await;
-        return;
+/// 失敗レコードを upstream 転送の前に保存する。
+/// 呼び出しが完了すると実行環境は freeze されるため、応答後に spawn した
+/// 保存タスクは PUT が終わる前に止まり、実質的に届かない。失敗経路だけは
+/// 上流への応答を save 完了まで遅らせ（commit 側は flush budget で
+/// 打ち切る）、unfrozen 時間内に書き切る。write-ahead なので PUT が
+/// 間に合わなくても spill から定期回収が拾う。成功経路はこの処理を通らない。
+async fn save_before_forward(recorder: &Recorder, job: SaveInput) {
+    if let Some(staged) = recorder.stage_save(job) {
+        recorder.commit_staged(&staged).await;
     }
-    p.set.spawn(async move {
-        recorder.save(job).await;
-    });
 }
 
 /// `/next`: 応答ヘッダから requestId 等を取り、ボディ（イベント）を
@@ -88,12 +80,17 @@ pub(crate) async fn handle_next(
                     ),
                 },
             };
-            st.inflight.insert(Invocation {
+            let inv = Invocation {
                 request_id,
                 event,
                 encoding,
                 invoked_at: OffsetDateTime::now_utc(),
-            });
+            };
+            // external extension との共有用に /tmp へも残す。
+            // SHUTDOWN 時に別プロセスの agent がこれを読み、応答の
+            // なかった呼び出しを timeout レコードへ変換する。
+            st.recorder.stage_inflight(&inv);
+            st.inflight.insert(inv);
         }
     }
     Response::from_parts(parts, boxed_full(bytes))
@@ -130,22 +127,23 @@ pub(crate) async fn handle_completion(
     } else {
         (st.inflight.remove(rid), false)
     };
-    let resp = forward_or_502(
-        st,
-        method,
-        pq,
-        headers,
-        body.clone(),
-        Some(std::time::Duration::from_millis(st.cfg.forward_timeout_ms)),
-        "completion",
-    )
-    .await;
+    // 完了した呼び出しのステージは消す。残ると「応答なく畳まれた」
+    // 未完呼び出しとして SHUTDOWN/次回 init で二重記録される。
+    st.recorder.clear_inflight(rid);
     // 失敗文脈は転送の成否に関わらず記録する。/error を受け取った事実が
     // 証跡そのものであり、上流断で 502 を返す場合も捨てない。
+    // 保存は upstream 転送の前に行う: 転送が済むと呼び出しが終わり、
+    // 実行環境が freeze されて非同期の PUT は進まなくなる。
     if let Some(ctx) = ctx {
         // 同一 requestId の失敗記録は 1 件。上流断で 502 を返した後の
         // ランタイム再試行や、SHUTDOWN drain との競合で event 欠落・
         // errorContext 欠落の記録が同一キーを上書きするのを防ぐ。
+        tracing::info!(
+            rid,
+            claimed,
+            has_inv = inv.is_some(),
+            "failure observed; saving record"
+        );
         if claimed {
             let (event, encoding, invoked_at, request_id) = match inv {
                 Some(i) => (Some(i.event), i.encoding, i.invoked_at, i.request_id),
@@ -156,9 +154,8 @@ pub(crate) async fn handle_completion(
                     rid.to_string(),
                 ),
             };
-            spawn_save(
-                &st.pending,
-                st.recorder.clone(),
+            save_before_forward(
+                &st.recorder,
                 SaveInput {
                     request_id,
                     invoked_at,
@@ -174,6 +171,16 @@ pub(crate) async fn handle_completion(
             .await;
         }
     }
+    let resp = forward_or_502(
+        st,
+        method,
+        pq,
+        headers,
+        body.clone(),
+        Some(std::time::Duration::from_millis(st.cfg.forward_timeout_ms)),
+        "completion",
+    )
+    .await;
     resp.map(boxed_response).unwrap_or_else(|r| *r)
 }
 
@@ -190,25 +197,16 @@ pub(crate) async fn handle_init_error(
         .and_then(|v| v.to_str().ok())
         .map(String::from);
     let ctx = error_context_from_body(&body, header_type);
-    let resp = forward_or_502(
-        st,
-        method,
-        pq,
-        headers,
-        body.clone(),
-        Some(std::time::Duration::from_millis(st.cfg.forward_timeout_ms)),
-        "init/error",
-    )
-    .await;
-    // init error は転送できなくても記録する（このイベントは他経路では拾えない）
+    // init error は転送できなくても記録する（このイベントは他経路では拾えない）。
+    // 記録も転送前に済ませる: init 失敗後は環境が即座に畳まれうるため、
+    // 非同期タスクでは PUT が freeze に間に合わない。
     let now = OffsetDateTime::now_utc();
     let rid = init_request_id(&now);
     // 擬似 requestId は nanos 粒度だが、万一同じキーが来ても
     // dedupe 集合で二重記録を防ぐ。
     if st.inflight.claim_record(&rid) {
-        spawn_save(
-            &st.pending,
-            st.recorder.clone(),
+        save_before_forward(
+            &st.recorder,
             SaveInput {
                 request_id: rid,
                 invoked_at: now,
@@ -223,5 +221,15 @@ pub(crate) async fn handle_init_error(
         )
         .await;
     }
+    let resp = forward_or_502(
+        st,
+        method,
+        pq,
+        headers,
+        body.clone(),
+        Some(std::time::Duration::from_millis(st.cfg.forward_timeout_ms)),
+        "init/error",
+    )
+    .await;
     resp.map(boxed_response).unwrap_or_else(|r| *r)
 }

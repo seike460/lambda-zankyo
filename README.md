@@ -21,27 +21,31 @@
 
 ```
 Lambda Service ──Runtime API──▶ zankyo proxy (Rust, Layer) ──▶ 実ランタイム(handler)
-                     ▲                │
-                     │                ├─ Extensions API /register（SHUTDOWN 受信用）
-                     │                └─ 失敗時のみ: イベント+エラー → scrub → S3(+KMS)
+                     ▲                │        └─ /tmp に .inflight ステージ共有
+                     │                ├─ 失敗時のみ: イベント+エラー → scrub → S3(+KMS)
+                     │                └─ zankyo agent (/opt/extensions 起動)
+                     │                     └─ Extensions API /register（SHUTDOWN 受信用）
                      └── AWS_LAMBDA_EXEC_WRAPPER=/opt/zankyo-wrapper で差し込み
 ```
 
-- Layer 内の**単一 Rust バイナリ**が Runtime API proxy と external extension を兼務。
+- Layer 内の**単一 Rust バイナリ**が Runtime API proxy と external extension
+  agent を兼務（起動方法でモードが分かれる）。
 - **成功呼び出しは素通り**。失敗判定が必要な経路（`/response`・`/error`・
   `/init/error`）だけボディを読み、常時コスト・レイテンシを最小化します。
 - 失敗の定義: `/error` 呼出 / `/init/error` / `/response` 内の `errorType`
-  含有 / `SHUTDOWN reason=timeout`（in-flight イベントをフラッシュ）。
+  含有 / `SHUTDOWN reason=timeout`（未完呼び出しを timeout 記録化）。
 - **fail-open 設計**: zankyo 側の障害（設定ミス・bind 失敗・S3 エラー）で
   関数本体を止めません。記録だけ諦めて passthrough します。
 
 ### timeout 捕捉
 
-in-flight イベントをメモリに保持し、Extensions API の `SHUTDOWN`
-（reason=timeout）受信時に S3 へ**ベストエフォート**でフラッシュします。
-shutdown ウィンドウに PutObject が間に合わない場合は取りこぼします。
-緩衝として `/tmp/zankyo/<function>/zankyo-{requestId}.json` にも同期退避します
-（取りこぼし頻度は計測・文書化対象。SPEC Open Questions #4）。
+`SHUTDOWN` イベントは external extension にしか届かない AWS 仕様のため、
+layer は `/opt/extensions/zankyo` を配置し、platform が agent を
+別プロセスで起動します。proxy は呼び出し中のイベントを
+`/tmp/zankyo/<function>/zankyo-{requestId}.inflight` にステージし、
+完了時に削除します。agent は `SHUTDOWN` 受信時に残ったステージを
+timeout レコードへ変換し S3 へフラッシュします（ベストエフォート。
+shutdown ウィンドウに間に合わなければ spill が残り、次回 init が拾います）。
 
 ## 使い方
 

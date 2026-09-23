@@ -71,21 +71,33 @@ for (const arch of arches) {
   const stage = mkdtempSync(join(tmpdir(), 'zankyo-layer-'));
   try {
     mkdirSync(join(stage, 'bin'), { recursive: true });
+    mkdirSync(join(stage, 'extensions'), { recursive: true });
     cpSync(join(ROOT, 'target', target, 'release', 'zankyo'), join(stage, 'bin/zankyo'));
     cpSync(join(ROOT, 'proxy/layer/zankyo-wrapper'), join(stage, 'zankyo-wrapper'));
-    chmodSync(join(stage, 'bin/zankyo'), 0o755);
-    chmodSync(join(stage, 'zankyo-wrapper'), 0o755);
+    // /opt/extensions/zankyo: platform が external extension として
+    // 別プロセス起動し、SHUTDOWN（timeout）イベントを届ける。
+    cpSync(
+      join(ROOT, 'proxy/layer/extensions/zankyo'),
+      join(stage, 'extensions/zankyo'),
+    );
+    for (const f of ['bin/zankyo', 'zankyo-wrapper', 'extensions/zankyo']) {
+      chmodSync(join(stage, f), 0o755);
+    }
     // 決定的 zip: mtime を epoch 固定（zip 側で 1980-01-01 に揃う）、
     // -X で拡張属性を捨てる。エントリは引数順なので固定すれば
     // 同一バイナリから同一 zip になる。
-    for (const f of ['bin', 'bin/zankyo', 'zankyo-wrapper']) {
+    for (const f of ['bin', 'bin/zankyo', 'extensions', 'extensions/zankyo', 'zankyo-wrapper']) {
       utimesSync(join(stage, f), EPOCH, EPOCH);
     }
     const zip = join(outDir, `zankyo-${arch}.zip`);
     // zip は既存アーカイブへ追記・更新するので、先に消して
     // 古いレイアウトのエントリが混入しないようにする。
     rmSync(zip, { force: true });
-    execFileSync('zip', ['-qX', zip, 'bin/zankyo', 'zankyo-wrapper'], { cwd: stage });
+    execFileSync(
+      'zip',
+      ['-qX', zip, 'bin/zankyo', 'extensions/zankyo', 'zankyo-wrapper'],
+      { cwd: stage },
+    );
     console.log(`wrote ${zip}`);
 
     // SAR テンプレートの ContentUri（sar/dist/layer-*.zip）に合わせて複写する。

@@ -87,36 +87,40 @@ impl Recorder {
         Duration::from_millis(self.cfg.put_timeout_ms)
     }
 
-    /// レコードを組み立てて保存する。scrub はここで一括適用し、
-    /// event/response 両方のレポートを集約する。
+    /// レコードを組み立てて保存する。`stage_save` + `commit_staged` の
+    /// 連結（write-ahead → PUT → 成功で spill 削除）。
     pub async fn save(&self, job: SaveInput) {
-        let SaveInput {
-            request_id,
-            invoked_at,
-            failure,
-            event,
-            response,
-            ctx,
-        } = job;
-        let (rec, key) = self.build_record(&request_id, invoked_at, failure, event, response, ctx);
-        let body = match to_json_bytes(&rec) {
-            Ok(b) => b,
-            Err(e) => {
-                warn!(error = %e, request_id, "failed to serialize record; dropping");
-                return;
-            }
-        };
-        match tokio::time::timeout(self.put_timeout(), self.put(&key, body.clone())).await {
-            Ok(Ok(())) => info!(request_id, key, "failure record saved"),
-            Ok(Err(e)) => {
-                warn!(request_id, error = %e, "s3 put failed; spilling to /tmp");
-                self.spill(&request_id, &body);
-            }
-            Err(_) => {
-                warn!(request_id, "s3 put timed out; spilling to /tmp");
-                self.spill(&request_id, &body);
-            }
+        if let Some(staged) = self.stage_save(job) {
+            self.commit_staged(&staged).await;
         }
+    }
+
+    /// 失敗レコードを組み立てて /tmp へ先書きする（write-ahead）。
+    /// 呼び出し完了直後に実行環境は freeze されるため、S3 PUT は
+    /// 「この呼び出しの unfrozen 時間内」に終わらせる必要がある。
+    /// 先にローカルへ落とせば、PUT が間に合わなくても定期回収・
+    /// 次回 init の recover_spills が拾える。
+    /// シリアライズ失敗時のみ None（spill すら作れない）。
+    pub fn stage_save(&self, job: SaveInput) -> Option<StagedRecord> {
+        let request_id = job.request_id.clone();
+        let (rec, key) = self.build_record(
+            &job.request_id,
+            job.invoked_at,
+            job.failure,
+            job.event,
+            job.response,
+            job.ctx,
+        );
+        let Ok(body) = to_json_bytes(&rec) else {
+            warn!(request_id, "failed to serialize record; dropping");
+            return None;
+        };
+        self.spill(&request_id, &body);
+        Some(StagedRecord {
+            request_id,
+            key,
+            body,
+        })
     }
 
     /// SHUTDOWN 経路の第1段。タイムアウトレコードを組み立てて
@@ -153,6 +157,9 @@ impl Recorder {
         // 先にローカルへ落とす: PutObject がウィンドウに間に合わなくても
         // 実行環境の /tmp が同一 sandbox で再利用される場合に拾える
         self.spill(&inv.request_id, &body);
+        // レコードは spill json として残ったので inflight ステージは
+        // 消費済み — 残すと次回 init で同じ呼び出しが再度変換される。
+        self.clear_inflight(&inv.request_id);
         Some(StagedRecord {
             request_id: inv.request_id.clone(),
             key,
@@ -160,22 +167,68 @@ impl Recorder {
         })
     }
 
-    /// `stage_timeout` で spill 済みのレコードを S3 へ PUT する。
-    /// 届いたら spill を消す（残すと次回 init で同一キーへ冗長な PUT が走る）。
+    /// `/next` で観測した呼び出しを /tmp へステージする。
+    /// external extension（/opt/extensions 起動の別プロセス）が
+    /// SHUTDOWN 時にこのファイルを読んで未完呼び出しを記録する。
+    /// プロセス間共有にしか使わないため、失敗しても呼び出しに影響しない。
+    pub fn stage_inflight(&self, inv: &Invocation) {
+        if let Some(body) = inv.to_staged() {
+            spill::write_inflight(Path::new(&self.cfg.spill_dir), &inv.request_id, &body);
+        }
+    }
+
+    /// 呼び出し完了時にステージを消す。残ると未完の証跡として
+    /// timeout 記録へ変換されてしまうため、完了した呼び出し分は必ず消す。
+    pub fn clear_inflight(&self, request_id: &str) {
+        spill::clear_inflight(Path::new(&self.cfg.spill_dir), request_id);
+    }
+
+    /// 残った inflight ステージを timeout レコードへ変換する。
+    /// 「応答を返す前に環境が畳まれた呼び出し」の回収で、init 直後
+    /// （前環境の残滓、reason 不明 → None）と external extension の
+    /// SHUTDOWN フラッシュ（reason あり）から呼ぶ。
+    /// 稼働中に呼ぶと進行中の呼び出しを未完と誤認するため禁。
+    /// 変換後はステージを消す — レコードは spill json として残るので
+    /// PUT に失敗しても recover_spills が拾う。
+    pub async fn recover_inflights(&self, reason: Option<&str>) {
+        let dir = Path::new(&self.cfg.spill_dir);
+        for path in spill::pending_inflights(dir) {
+            let Some(inv) = std::fs::read(&path)
+                .ok()
+                .and_then(|b| Invocation::from_staged(&b))
+            else {
+                // 読めない・パースできないステージは復旧不能 — 消す
+                if std::fs::remove_file(&path).is_ok() {
+                    warn!(path = %path.display(), "dropping unreadable inflight stage");
+                }
+                continue;
+            };
+            if let Some(job) = self.stage_timeout(&inv, reason) {
+                self.commit_staged(&job).await;
+            } else {
+                warn!(request_id = %inv.request_id, "failed to stage timed-out record");
+            }
+            let _ = std::fs::remove_file(&path);
+        }
+    }
+
+    /// stage 済みのレコードを S3 へ PUT する（時間は flush budget で
+    /// 打ち切る）。届いたら spill を消す（残すと次回 init で同一キーへ
+    /// 冗長な PUT が走る）。失敗しても spill は残るため記録は保全される。
     pub async fn commit_staged(&self, job: &StagedRecord) {
         match tokio::time::timeout(self.flush_budget(), self.put(&job.key, job.body.clone())).await
         {
             Ok(Ok(())) => {
-                info!(request_id = %job.request_id, key = %job.key, "timeout record saved during shutdown");
+                info!(request_id = %job.request_id, key = %job.key, "failure record saved");
                 let spill_path =
                     Path::new(&self.cfg.spill_dir).join(spill::filename(&job.request_id));
                 let _ = std::fs::remove_file(spill_path);
             }
             Ok(Err(e)) => {
-                warn!(request_id = %job.request_id, error = %e, "shutdown flush failed; spill kept")
+                warn!(request_id = %job.request_id, error = %e, "s3 put failed; spill kept")
             }
             Err(_) => {
-                warn!(request_id = %job.request_id, "shutdown flush exceeded budget; spill kept")
+                warn!(request_id = %job.request_id, "s3 put exceeded budget; spill kept")
             }
         }
     }

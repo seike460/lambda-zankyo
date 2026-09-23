@@ -25,6 +25,32 @@ const DRAIN_SLACK_MS: u64 = 1_000;
 /// 子終了後に extension の SHUTDOWN 処理を待つ猶予の上限。
 /// Lambda の sandbox 凍結までに残る時間は限られるため上限を設ける。
 const SHUTDOWN_GRACE_CAP_MS: u64 = 1_000;
+/// layer が配置する external extension の起動ファイル。
+/// 存在する環境では platform が別プロセスで agent を起動するため、
+/// このプロセスからの internal register は不要（拒否される）。
+const EXTERNAL_EXT_PATH: &str = "/opt/extensions/zankyo";
+
+/// external extension プロセスのエントリ。
+/// `/opt/extensions/zankyo` から platform が argv なしで起動する
+/// （main.rs が空 argv をここへ振り分ける）。proxy と別プロセスの
+/// ため Runtime API へ自前で register し、SHUTDOWN で inflight
+/// ステージを timeout 記録へ変換する。
+/// 失敗しても exit 0: extension の非 0 終了は platform にエラーと
+/// 解釈されうるため、記録不能でも静かに畳む（fail-open）。
+pub async fn run_agent() -> u8 {
+    let env_map: HashMap<String, String> = std::env::vars().collect();
+    let StartupPlan::Record(plan) = setup::resolve_plan(&env_map).await else {
+        return 0;
+    };
+    let RecordPlan {
+        cfg,
+        shared,
+        upstream,
+    } = *plan;
+    let recorder = Arc::new(setup::build_recorder(&shared, cfg, &env_map));
+    extension::run_agent(new_client(), upstream, recorder).await;
+    0
+}
 
 /// 実行本体。子プロセスの終了コードをそのまま返す。
 /// どのステップで失敗しても zankyo を噛まない passthrough に落ちる。
@@ -55,13 +81,15 @@ pub async fn run(argv: &[OsString]) -> u8 {
     // 前回の実行で残った spill があれば再送する。非同期・ベストエフォートで、
     // 起動経路を遅らせない。初回再送は pending へ積み、終了時の drain に
     // 含める（早期終了時に PUT が途中で切られないようにする）。
+    // 先に inflight 残滓を変換する — 「応答なく環境が畳まれた呼び出し」
+    // を timeout レコード化してから、溜まった spill 全件を再送する順。
     {
         let rec = recorder.clone();
-        pending
-            .lock()
-            .await
-            .set
-            .spawn(async move { rec.recover_spills().await });
+        pending.lock().await.set.spawn(async move {
+            // 前環境の残滓は shutdown reason が分からない（None=unknown）
+            rec.recover_inflights(None).await;
+            rec.recover_spills().await;
+        });
     }
     // 生存中も定期再送する。S3 の一時障害が回復した時点で
     // /tmp を空に戻し、溜まったままの状態を放置しない。
@@ -94,13 +122,22 @@ pub async fn run(argv: &[OsString]) -> u8 {
     // extension 登録は proxy serve と並行して行う。
     // register を先に await すると、ハングした場合に子の初回 /next が
     // register_timeout の分だけ遅れる。
-    let shutdown = tokio::spawn(start_extension(
-        client,
-        upstream,
-        register_timeout,
-        state.inflight.clone(),
-        state.recorder.clone(),
-    ));
+    // layer に /opt/extensions/zankyo が含まれる環境では、platform が
+    // external extension として別プロセスで agent を起動する。
+    // internal register は SHUTDOWN を拒否されるため、その場合は省く。
+    let has_external_ext = std::path::Path::new(EXTERNAL_EXT_PATH).exists();
+    let shutdown = if has_external_ext {
+        info!("external extension detected; internal register skipped");
+        tokio::spawn(async { false })
+    } else {
+        tokio::spawn(start_extension(
+            client,
+            upstream,
+            register_timeout,
+            state.inflight.clone(),
+            state.recorder.clone(),
+        ))
+    };
 
     let (code, pending_shutdown) = wait_for_exit(&mut child, shutdown).await;
     // 子が先に落ちた場合、Lambda がランタイム死亡を検知して SHUTDOWN を

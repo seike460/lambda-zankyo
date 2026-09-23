@@ -46,13 +46,24 @@ pub async fn register(
         .await
         .map_err(|_| ZankyoError::Upstream("extension register timed out".into()))?
         .map_err(|e| ZankyoError::Upstream(e.to_string()))?;
-    resp.headers()
+    let (parts, body) = resp.into_parts();
+    if let Some(id) = parts
+        .headers
         .get("lambda-extension-identifier")
         .and_then(|v| v.to_str().ok())
-        .map(|s| s.to_string())
-        .ok_or_else(|| {
-            ZankyoError::Upstream("extension register: missing identifier header".into())
-        })
+    {
+        return Ok(id.to_string());
+    }
+    // 失敗時はステータスとボディを残す（platform の拒否理由が分かる）。
+    let body = http_body_util::Limited::new(body, 4096)
+        .collect()
+        .await
+        .map(|c| String::from_utf8_lossy(&c.to_bytes()).into_owned())
+        .unwrap_or_default();
+    Err(ZankyoError::Upstream(format!(
+        "extension register: status {} body {}",
+        parts.status, body
+    )))
 }
 
 /// `/event/next` はイベント到着までブロックするロングポーリング。
@@ -152,6 +163,65 @@ pub async fn run_event_loop(
                 // timeout 捕捉を失うので、短い待機を挟んで再試行する。
                 // ただし連続失敗が上限を超えたら Extensions API の障害と
                 // みなしてループを抜ける（無限リトライで zombie 化しない）。
+                failures += 1;
+                if failures >= max_failures {
+                    warn!(failures, "extension event poll keeps failing; giving up");
+                    return false;
+                }
+                warn!(error = %e, failures, "extension event poll failed; retrying");
+                tokio::time::sleep(retry_delay).await;
+            }
+        }
+    }
+}
+
+/// external extension プロセスのイベントループ。
+/// `/opt/extensions/` から platform が直接起動した agent 用。
+/// internal extension（exec wrapper 内 register）には SHUTDOWN が
+/// 届かない AWS 仕様のため、タイムアウト捕捉はこちらが担う。
+/// in-flight は別プロセスの proxy とメモリを共有できないため、
+/// proxy が /next で書く `.inflight` ステージを読んで未完呼び出しを
+/// timeout レコードへ変換する。
+/// 戻り値は「SHUTDOWN を受けてフラッシュまで済ませたか」。
+pub async fn run_agent(client: HttpClient, upstream_api: String, recorder: Arc<Recorder>) -> bool {
+    let cfg = recorder.config();
+    let retry_delay = Duration::from_millis(cfg.ext_retry_ms);
+    let max_failures = cfg.ext_max_poll_failures;
+    let body_limit = cfg.ext_body_kb.saturating_mul(1024);
+    let ext_id = match register(
+        &client,
+        &upstream_api,
+        Duration::from_millis(cfg.register_timeout_ms),
+    )
+    .await
+    {
+        Ok(id) => id,
+        Err(e) => {
+            warn!(error = %e, "external extension register failed");
+            return false;
+        }
+    };
+    info!("external extension registered; waiting for shutdown events");
+    let mut failures: u32 = 0;
+    loop {
+        match next_event(&client, &upstream_api, &ext_id, body_limit).await {
+            Ok(ev) if ev.event_type == "SHUTDOWN" => {
+                info!(
+                    reason = ev.shutdown_reason.as_deref().unwrap_or("unknown"),
+                    "shutdown received; converting staged inflights to timeout records"
+                );
+                let budget = flush_budget_for(ev.deadline_ms, recorder.flush_budget());
+                let flush = recorder.recover_inflights(ev.shutdown_reason.as_deref());
+                if tokio::time::timeout(budget, flush).await.is_err() {
+                    warn!("inflight flush exceeded shutdown budget; spills remain for next init");
+                }
+                return true;
+            }
+            Ok(_) => {
+                failures = 0;
+                continue;
+            }
+            Err(e) => {
                 failures += 1;
                 if failures >= max_failures {
                     warn!(failures, "extension event poll keeps failing; giving up");
