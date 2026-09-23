@@ -87,14 +87,6 @@ impl Recorder {
         Duration::from_millis(self.cfg.put_timeout_ms)
     }
 
-    /// レコードを組み立てて保存する。`stage_save` + `commit_staged` の
-    /// 連結（write-ahead → PUT → 成功で spill 削除）。
-    pub async fn save(&self, job: SaveInput) {
-        if let Some(staged) = self.stage_save(job) {
-            self.commit_staged(&staged).await;
-        }
-    }
-
     /// 失敗レコードを組み立てて /tmp へ先書きする（write-ahead）。
     /// 呼び出し完了直後に実行環境は freeze されるため、S3 PUT は
     /// 「この呼び出しの unfrozen 時間内」に終わらせる必要がある。
@@ -362,7 +354,7 @@ impl Recorder {
 
     fn spill(&self, request_id: &str, body: &[u8]) -> bool {
         spill::write(
-            &self.cfg.spill_dir,
+            Path::new(&self.cfg.spill_dir),
             self.cfg.spill_max_files,
             request_id,
             body,

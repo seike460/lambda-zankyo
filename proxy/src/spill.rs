@@ -27,8 +27,7 @@ const MANAGED_PREFIX: &str = "zankyo-";
 /// sandbox 内の他プロセスからも読めない最小権限にする。
 /// 戻り値は書き込み成功可否 — 失敗時は呼び出し側で代替の証跡
 /// （.inflight ステージ等）を消さない判断に使う。
-pub fn write(dir: &str, max_files: usize, request_id: &str, body: &[u8]) -> bool {
-    let dir_path = Path::new(dir);
+pub fn write(dir_path: &Path, max_files: usize, request_id: &str, body: &[u8]) -> bool {
     let path = dir_path.join(filename(request_id));
     let tmp = dir_path.join(format!(
         ".{}.{}.part",
@@ -196,7 +195,7 @@ fn is_managed(path: &Path) -> bool {
         .is_some_and(|n| n.starts_with(MANAGED_PREFIX))
 }
 
-/// `.part` 側の管理対象判定。書き込み中名は `.zankyo-*.json.part`。
+/// `.part` 側の管理対象判定。書き込み中名は `.zankyo-*.{pid}.part`。
 fn is_managed_part(path: &Path) -> bool {
     path.file_name()
         .and_then(|n| n.to_str())
@@ -340,7 +339,7 @@ mod tests {
     #[test]
     fn write_leaves_no_part_files() {
         let dir = std::env::temp_dir().join(format!("zankyo-atomic-{}", std::process::id()));
-        write(dir.to_str().unwrap(), 8, "req-9", b"{}");
+        write(&dir, 8, "req-9", b"{}");
         // rename 済みなら .json だけが残り .part は残らない
         assert!(dir.join("zankyo-req-9.json").exists());
         let parts: Vec<_> = std::fs::read_dir(&dir)
