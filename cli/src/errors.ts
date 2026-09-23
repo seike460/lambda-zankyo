@@ -15,10 +15,6 @@ export class CliError extends Error {
   }
 }
 
-export function requireRecord(text: string): never {
-  throw new CliError(`record not found: ${text}`, 4);
-}
-
 /** unknown の例外からメッセージ文字列を取り出す。 */
 export function errMessage(e: unknown): string {
   return e instanceof Error ? e.message : String(e);

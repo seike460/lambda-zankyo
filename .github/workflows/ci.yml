@@ -27,6 +27,7 @@ jobs:
       - run: pnpm lint          # biome check .
       - run: pnpm typecheck     # tsc --noEmit in each package
       - run: pnpm test          # node --test in each package
+      - run: pnpm build         # emit check: tsc -p tsconfig.build.json per package
 
   rust-quality:
     name: rust (fmt + clippy + test)

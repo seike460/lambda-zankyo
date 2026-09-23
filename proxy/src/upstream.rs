@@ -49,12 +49,7 @@ pub async fn forward(
         // RFC 9110: Connection ヘッダは「この接続でだけ有効な追加ヘッダ」を
         // 指名できる。固定の hop-by-hop 一覧だけでなく、指名された
         // ヘッダも上流へ渡さない。
-        let mut drop_named: Vec<String> = Vec::new();
-        for v in headers.get_all("connection") {
-            if let Ok(s) = v.to_str() {
-                drop_named.extend(s.split(',').map(|t| t.trim().to_ascii_lowercase()));
-            }
-        }
+        let drop_named = connection_named(headers);
         for (k, v) in headers.iter() {
             if k == HOST
                 || k == CONTENT_LENGTH
@@ -77,6 +72,32 @@ pub async fn forward(
             .map_err(|_| ZankyoError::Upstream("upstream forward timed out".into()))?
             .map_err(|e| ZankyoError::Upstream(e.to_string())),
         None => call.await.map_err(|e| ZankyoError::Upstream(e.to_string())),
+    }
+}
+
+/// `Connection` ヘッダが指名する追加の hop-by-hop ヘッダ名を集める。
+fn connection_named(headers: &HeaderMap) -> Vec<String> {
+    headers
+        .get_all("connection")
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .flat_map(|s| s.split(','))
+        .map(|t| t.trim().to_ascii_lowercase())
+        .collect()
+}
+
+/// 上流→ランタイム方向の応答ヘッダにも同じ規則を適用する。
+/// 上流が `transfer-encoding` や Connection 指名ヘッダを返した場合、
+/// 素通しするとランタイム側のフレーミングと食い違うため除去する。
+pub fn strip_hop_by_hop(headers: &mut HeaderMap) {
+    let drop_named = connection_named(headers);
+    let drop: Vec<http::HeaderName> = headers
+        .keys()
+        .filter(|k| HOP_BY_HOP.contains(&k.as_str()) || drop_named.iter().any(|n| n == k.as_str()))
+        .cloned()
+        .collect();
+    for k in drop {
+        headers.remove(k);
     }
 }
 

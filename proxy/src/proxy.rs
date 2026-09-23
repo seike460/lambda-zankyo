@@ -10,7 +10,9 @@ use crate::record::{
     error_context_from_body, init_request_id, response_error_context, ErrorContext, FailureType,
 };
 use crate::store::Recorder;
-use crate::upstream::{collect_bounded, forward, plain, CollectError, FORWARD_TIMEOUT};
+use crate::upstream::{
+    collect_bounded, forward, plain, strip_hop_by_hop, CollectError, FORWARD_TIMEOUT,
+};
 use bytes::Bytes;
 use http::{HeaderMap, Method, Request, Response, StatusCode};
 use http_body_util::{BodyExt, Full};
@@ -44,6 +46,10 @@ pub fn new_client() -> HttpClient {
     Client::builder(TokioExecutor::new()).build(HttpConnector::new())
 }
 
+/// 非同期で投げたレコード保存タスク。プロセス終了前に
+/// orchestrate がドレインするため、fire-and-forget で捨てない。
+pub type PendingSaves = tokio::sync::Mutex<tokio::task::JoinSet<()>>;
+
 pub struct ProxyState {
     /// 本来の Runtime API（`AWS_LAMBDA_RUNTIME_API` 原本の host:port）。
     pub upstream: String,
@@ -52,6 +58,8 @@ pub struct ProxyState {
     pub recorder: Arc<Recorder>,
     /// ボディ上限などの動作ノブ。env / SSM 由来の値をそのまま使う。
     pub cfg: crate::config::Config,
+    /// 進行中の save タスク。子終了時に残っていれば drain される。
+    pub pending: PendingSaves,
 }
 
 /// 接続を受け付け続けるサーバループ。ランタイムは /next のロングポーリングと
@@ -153,7 +161,7 @@ async fn handle(req: Request<Incoming>, st: &ProxyState) -> Response<BoxedBody> 
                 "upstream",
             )
             .await
-            .map(|r| r.map(|b| b.boxed()))
+            .map(boxed_response)
             .unwrap_or_else(|r| *r)
         }
     }
@@ -183,19 +191,30 @@ async fn forward_or_502(
     }
 }
 
-/// ランタイムへの応答を遅らせないよう、レコード保存は非同期で行う。
-fn spawn_save(
-    recorder: Arc<Recorder>,
+/// `Recorder::save` へ渡すレコード一式。
+struct SaveJob {
     request_id: String,
     invoked_at: OffsetDateTime,
     failure: FailureType,
     event: Option<Value>,
     response: Option<Value>,
     ctx: ErrorContext,
-) {
-    tokio::spawn(async move {
+}
+
+/// ランタイムへの応答を遅らせないよう、レコード保存は非同期で行う。
+/// タスクは `pending` に積まれ、プロセス終了前に orchestrate が
+/// ドレインする（投げっぱなしにすると init_error 等の記録が消える）。
+async fn spawn_save(pending: &PendingSaves, recorder: Arc<Recorder>, job: SaveJob) {
+    pending.lock().await.spawn(async move {
         recorder
-            .save(&request_id, invoked_at, failure, event, response, ctx)
+            .save(
+                &job.request_id,
+                job.invoked_at,
+                job.failure,
+                job.event,
+                job.response,
+                job.ctx,
+            )
             .await;
     });
 }
@@ -215,7 +234,9 @@ async fn handle_next(
         Ok(r) => r,
         Err(r) => return *r,
     };
-    let (parts, resp_body) = resp.into_parts();
+    let (mut parts, resp_body) = resp.into_parts();
+    // 上流の応答ヘッダにも hop-by-hop 規則を適用してからランタイムへ返す
+    strip_hop_by_hop(&mut parts.headers);
     let bytes = match collect_bounded(resp_body, body_limit).await {
         Ok(b) => b,
         Err(CollectError::TooLarge) => {
@@ -271,7 +292,7 @@ async fn handle_completion(
     // 失敗時に残すと、完了した呼び出しが shutdown で timeout として
     // 二重記録される（再配達されれば別 requestId で来る）。
     let inv = st.inflight.remove(rid);
-    let resp = match forward_or_502(
+    let resp = forward_or_502(
         st,
         method,
         pq,
@@ -280,27 +301,29 @@ async fn handle_completion(
         Some(FORWARD_TIMEOUT),
         "completion",
     )
-    .await
-    {
-        Ok(r) => r,
-        Err(r) => return *r,
-    };
+    .await;
+    // 失敗文脈は転送の成否に関わらず記録する。/error を受け取った事実が
+    // 証跡そのものであり、上流断で 502 を返す場合も捨てない。
     if let Some(ctx) = ctx {
         let (event, invoked_at, request_id) = match inv {
             Some(i) => (Some(i.event), i.invoked_at, i.request_id),
             None => (None, OffsetDateTime::now_utc(), rid.to_string()),
         };
         spawn_save(
+            &st.pending,
             st.recorder.clone(),
-            request_id,
-            invoked_at,
-            FailureType::HandlerError,
-            event,
-            serde_json::from_slice::<Value>(&body).ok(),
-            ctx,
-        );
+            SaveJob {
+                request_id,
+                invoked_at,
+                failure: FailureType::HandlerError,
+                event,
+                response: serde_json::from_slice::<Value>(&body).ok(),
+                ctx,
+            },
+        )
+        .await;
     }
-    resp.map(|b| b.boxed())
+    resp.map(boxed_response).unwrap_or_else(|r| *r)
 }
 
 /// `/init/error`: 対応するイベントが存在しないため event は null。
@@ -316,7 +339,7 @@ async fn handle_init_error(
         .and_then(|v| v.to_str().ok())
         .map(String::from);
     let ctx = error_context_from_body(&body, header_type);
-    let resp = match forward_or_502(
+    let resp = forward_or_502(
         st,
         method,
         pq,
@@ -325,21 +348,29 @@ async fn handle_init_error(
         Some(FORWARD_TIMEOUT),
         "init/error",
     )
-    .await
-    {
-        Ok(r) => r,
-        Err(r) => return *r,
-    };
+    .await;
+    // init error は転送できなくても記録する（このイベントは他経路では拾えない）
     let now = OffsetDateTime::now_utc();
     spawn_save(
+        &st.pending,
         st.recorder.clone(),
-        init_request_id(&now),
-        now,
-        FailureType::InitError,
-        None,
-        None,
-        ctx,
-    );
+        SaveJob {
+            request_id: init_request_id(&now),
+            invoked_at: now,
+            failure: FailureType::InitError,
+            event: None,
+            response: None,
+            ctx,
+        },
+    )
+    .await;
+    resp.map(boxed_response).unwrap_or_else(|r| *r)
+}
+
+/// 上流の応答をランタイムへ返す形へ整える。hop-by-hop ヘッダを落とし、
+/// ボディをバッファ済みに揃える。
+fn boxed_response(mut resp: Response<Incoming>) -> Response<BoxedBody> {
+    strip_hop_by_hop(resp.headers_mut());
     resp.map(|b| b.boxed())
 }
 

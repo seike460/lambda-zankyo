@@ -6,8 +6,8 @@ use crate::config::Config;
 use crate::error::{Result, ZankyoError};
 use crate::inflight::Invocation;
 use crate::record::{
-    s3_key, to_json_bytes, truncate_event, ErrorContext, FailureRecord, FailureType,
-    ScrubReportJson, RECORD_VERSION,
+    s3_key, s3_key_from_parts, to_json_bytes, truncate_event, ErrorContext, FailureRecord,
+    FailureType, ScrubReportJson, RECORD_VERSION,
 };
 use crate::scrub::{ScrubReport, Scrubber};
 use aws_sdk_s3::primitives::ByteStream;
@@ -92,14 +92,16 @@ impl Recorder {
         }
     }
 
-    /// SHUTDOWN（timeout）経路。まず /tmp へ同期退避してから、
+    /// SHUTDOWN 経路。まず /tmp へ同期退避してから、
     /// 残りの shutdown ウィンドウ内で S3 を試す（ベストエフォート）。
-    pub async fn save_during_shutdown(&self, inv: Invocation) {
+    /// `reason` は Extensions API の shutdownReason（timeout/failure/spindown）。
+    pub async fn save_during_shutdown(&self, inv: Invocation, reason: Option<&str>) {
         let ctx = ErrorContext {
-            error_type: Some("Timeout".to_string()),
-            error_message: Some(
-                "function did not respond before execution environment shutdown".to_string(),
-            ),
+            error_type: Some(shutdown_error_type(reason).to_string()),
+            error_message: Some(format!(
+                "function did not respond before execution environment shutdown (reason: {})",
+                reason.unwrap_or("unknown")
+            )),
             stack_trace: None,
         };
         let (rec, key) = self.build_record(
@@ -118,7 +120,12 @@ impl Recorder {
         self.spill(&inv.request_id, &body);
         match tokio::time::timeout(self.flush_budget(), self.put(&key, body)).await {
             Ok(Ok(())) => {
-                info!(request_id = %inv.request_id, key, "timeout record saved during shutdown")
+                info!(request_id = %inv.request_id, key, "timeout record saved during shutdown");
+                // S3 へ届いた spill は保険の役目を終えたので消す。
+                // 残すと次回 init で同一キーへ冗長な PUT が走る。
+                let spill_path =
+                    Path::new(&self.cfg.spill_dir).join(spill_filename(&inv.request_id));
+                let _ = std::fs::remove_file(spill_path);
             }
             Ok(Err(e)) => warn!(request_id = %inv.request_id, error = %e, "shutdown flush failed"),
             Err(_) => warn!(request_id = %inv.request_id, "shutdown flush exceeded budget"),
@@ -187,6 +194,8 @@ impl Recorder {
     /// 元の S3 キーを再構成する。送れたものだけ削除するため冪等に再実行できる。
     pub async fn recover_spills(&self) {
         let dir = Path::new(&self.cfg.spill_dir);
+        // 前回までの蓄積が上限を超えていても、新規 spill を待たずに先に絞る
+        enforce_spill_cap(dir, self.cfg.spill_max_files);
         let Ok(entries) = std::fs::read_dir(dir) else {
             return; // ディレクトリ自体が無い = 退避なし
         };
@@ -280,19 +289,30 @@ fn spill_filename(request_id: &str) -> String {
     format!("{name}.json")
 }
 
+/// Extensions API の shutdownReason を記録上の errorType へ写す。
+fn shutdown_error_type(reason: Option<&str>) -> &'static str {
+    match reason {
+        Some("timeout") => "Timeout",
+        Some("failure") => "Failure",
+        Some("spindown") => "Spindown",
+        _ => "Shutdown",
+    }
+}
+
 /// spill した record JSON から S3 キーを再構成する。
 /// invokedAt は `yyyy-mm-ddTHH:MM:SSZ` 固定長なので日付部分だけ切り出す。
+/// レイアウト本体は record::s3_key_from_parts と共有する。
 fn key_for_spilled(body: &[u8]) -> Option<String> {
     let v: Value = serde_json::from_slice(body).ok()?;
     let function = v.get("functionName")?.as_str()?;
     let request_id = v.get("requestId")?.as_str()?;
     let invoked_at = v.get("invokedAt")?.as_str()?;
     let (y, m, d) = (
-        invoked_at.get(0..4)?,
-        invoked_at.get(5..7)?,
-        invoked_at.get(8..10)?,
+        invoked_at.get(0..4)?.parse::<i32>().ok()?,
+        invoked_at.get(5..7)?.parse::<u8>().ok()?,
+        invoked_at.get(8..10)?.parse::<u8>().ok()?,
     );
-    Some(format!("zankyo/{function}/{y}/{m}/{d}/{request_id}.json"))
+    Some(s3_key_from_parts(function, y, m, d, request_id))
 }
 
 #[cfg(test)]

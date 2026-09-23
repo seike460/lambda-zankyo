@@ -11,7 +11,8 @@
     "format": "biome check --write .",
     "typecheck": "pnpm -r run typecheck",
     "test": "pnpm -r run test",
-    "gate": "pnpm lint && pnpm typecheck && pnpm test"
+    "build": "pnpm -r --if-present run build",
+    "gate": "pnpm lint && pnpm typecheck && pnpm test && pnpm build"
   },
   "devDependencies": {
     "@biomejs/biome": "2.2.4",

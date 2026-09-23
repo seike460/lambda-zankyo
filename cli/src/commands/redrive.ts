@@ -1,12 +1,13 @@
 import { parseCliArgs, requirePositional, resolveBucket, SHARED_OPTIONS, strVal } from '../args.ts';
 import { type AwsClients, makeClients } from '../aws.ts';
+import { buildFixtureEvent } from '../fixture.ts';
 import { invokeFunction, qualifiedName } from '../invoke.ts';
 import { jsonOut } from '../output.ts';
 import { loadRecord } from '../store.ts';
 
 const USAGE = `zankyo redrive — re-invoke the production function with the recorded event
 
-usage: zankyo redrive <requestId> [--alias NAME] [--confirm] [--bucket B] [--json]
+usage: zankyo redrive <requestId> [--function NAME] [--alias NAME] [--confirm] [--bucket B] [--json]
 default is dry-run; pass --confirm to actually invoke
 `;
 
@@ -40,7 +41,7 @@ export async function run(argv: string[], deps?: AwsClients): Promise<number> {
     console.log(values.json ? jsonOut(summary) : formatSummary(summary));
     return 0;
   }
-  const out = await invokeFunction(lambda, target, rec.event);
+  const out = await invokeFunction(lambda, target, buildFixtureEvent(rec));
   if (values.json) {
     console.log(
       jsonOut({
@@ -51,11 +52,12 @@ export async function run(argv: string[], deps?: AwsClients): Promise<number> {
         payload: out.payload,
       }),
     );
-    return 0;
+  } else {
+    console.log(`redrove ${rec.requestId} -> ${target}`);
+    console.log(`status: ${out.statusCode}${out.functionError ? ` (${out.functionError})` : ''}`);
+    console.log(out.payloadText);
   }
-  console.log(`redrove ${rec.requestId} -> ${target}`);
-  console.log(`status: ${out.statusCode}${out.functionError ? ` (${out.functionError})` : ''}`);
-  console.log(out.payloadText);
+  // replay と同じく、関数が今回もエラーを返したら非ゼロ
   return out.functionError ? 1 : 0;
 }
 

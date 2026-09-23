@@ -26,7 +26,7 @@ fn init_tracing() {
 fn usage() -> ExitCode {
     eprintln!("zankyo: exec wrapper for AWS Lambda.");
     eprintln!("usage: zankyo <runtime command> [args...]");
-    eprintln!("(set AWS_LAMBDA_EXEC_WRAPPER=/opt/zankyo on the function)");
+    eprintln!("(set AWS_LAMBDA_EXEC_WRAPPER=/opt/zankyo-wrapper on the function)");
     ExitCode::from(EX_USAGE)
 }
 

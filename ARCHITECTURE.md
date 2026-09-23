@@ -28,7 +28,7 @@ zankyo バイナリを起動し、zankyo が実際の runtime を子プロセス
 | `orchestrate.rs` | Record 確定後の配線。listen・子プロセス・extension・spill 回復を直線で起動 |
 | `proxy.rs` | Runtime API の経路判定。イベント観測と失敗確定 |
 | `upstream.rs` | 上流 Runtime API への転送。hop-by-hop 除去と上限付きボディ読み |
-| `extension.rs` | Extensions API。SHUTDOWN(timeout) で in-flight を flush |
+| `extension.rs` | Extensions API。SHUTDOWN で in-flight を flush（reason ごとに errorType を分ける） |
 | `inflight.rs` | `/next`〜確定までのイベント保持（Mutex<HashMap>） |
 | `store.rs` | S3 への PutObject。失敗時は spill_dir 退避＋起動時の再送＋保持数上限 |
 | `record.rs` | 保存レコードのスキーマ生成（serde） |
@@ -52,8 +52,8 @@ zankyo バイナリを起動し、zankyo が実際の runtime を子プロセス
   `store.ts` / `invoke.ts` の薄い層に閉じているため、コマンド本体は
   純粋な変換ロジックとして書ける。
 - **テスト**: Rust は `proxy/tests/` が mock Runtime API + mock S3 で
-  実経路を検証。CLI は `S3Like` / `LambdaLike` の構造的最小
-  インターフェイスにフェイクを差し込む。AWS 非依存。
+  実経路を検証。CLI はコマンドの `deps` 引数へ `tests/helpers.ts`
+  のフェイクを差し込む（SDK 型への cast は helper 内に限定）。AWS 非依存。
 
 ## データフロー
 
@@ -63,8 +63,9 @@ zankyo バイナリを起動し、zankyo が実際の runtime を子プロセス
 3. 失敗時: イベントを scrub → レコード JSON を生成 →
    `s3://{ZANKYO_BUCKET}/zankyo/{function}/{yyyy}/{mm}/{dd}/{requestId}.json`
    に PutObject。
-4. SHUTDOWN reason=timeout: `InFlight` を drain して残りを
-   「応答が返らなかった失敗」として flush。残り時間内に終わらなければ
-   `/tmp/zankyo` に退避（取りこぼしうる、既知制約）。spill した
-   レコードは次回起動時に `recover_spills` が S3 へ再送し、
-   成功したものだけ削除する（冪等に再実行可能）。
+4. SHUTDOWN（reason: timeout/failure/spindown）: `InFlight` を drain
+   して残りを「応答が返らなかった失敗」として flush。errorType は
+   reason から写す。残り時間内に終わらなければ `/tmp/zankyo` に
+   退避（取りこぼしうる、既知制約）。spill したレコードは次回起動時に
+   `recover_spills` が S3 へ再送し、成功したものだけ削除する
+   （冪等に再実行可能）。

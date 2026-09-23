@@ -14,7 +14,7 @@ use tracing::{info, warn};
 
 use crate::extension;
 use crate::inflight::InFlight;
-use crate::proxy::{new_client, HttpClient, ProxyState};
+use crate::proxy::{new_client, HttpClient, PendingSaves, ProxyState};
 use crate::runtime::{exit_code, passthrough, spawn_via_proxy};
 use crate::setup::{self, RecordPlan, StartupPlan};
 use crate::store::Recorder;
@@ -52,16 +52,24 @@ pub async fn run(argv: &[OsString]) -> u8 {
     let shutdown =
         start_extension(&client, &upstream, register_timeout, &inflight, &recorder).await;
 
+    let pending: PendingSaves = tokio::sync::Mutex::new(tokio::task::JoinSet::new());
+    let drain_budget = std::time::Duration::from_millis(cfg.put_timeout_ms.saturating_add(1_000));
     let state = Arc::new(ProxyState {
         upstream,
         client,
         inflight,
         recorder,
         cfg,
+        pending,
     });
-    tokio::spawn(crate::proxy::serve(listener, state));
+    tokio::spawn(crate::proxy::serve(listener, state.clone()));
 
-    wait_for_exit(&mut child, shutdown).await
+    let code = wait_for_exit(&mut child, shutdown).await;
+    // 応答は返したが save が未完了のレコードを、runtime 解体前に
+    // 一定時間だけ待って拾い切る（init_error は POST 直後に子が
+    // 終了するため、ここを設けないと構造的に記録が失われる）。
+    drain_pending(&state.pending, drain_budget).await;
+    code
 }
 
 /// 自分自身を Runtime API として listen する。
@@ -140,5 +148,17 @@ async fn wait_for_exit(child: &mut Child, shutdown: Option<JoinHandle<bool>>) ->
             },
         },
         None => exit_code(child.wait().await),
+    }
+}
+
+/// 積まれた save タスクが空になるまで待つ。全体で `budget` まで —
+/// S3 が応答しない環境で子プロセスの終了を無制限に遅らせない。
+async fn drain_pending(pending: &PendingSaves, budget: std::time::Duration) {
+    let drain = async {
+        let mut set = pending.lock().await;
+        while set.join_next().await.is_some() {}
+    };
+    if tokio::time::timeout(budget, drain).await.is_err() {
+        warn!("pending record saves did not finish before exit");
     }
 }

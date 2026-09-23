@@ -1,7 +1,6 @@
 import { writeFile } from 'node:fs/promises';
-import { parseCliArgs, resolveBucket, SHARED_OPTIONS, strVal } from '../args.ts';
+import { parseCliArgs, requirePositional, resolveBucket, SHARED_OPTIONS, strVal } from '../args.ts';
 import { type AwsClients, makeClients } from '../aws.ts';
-import { CliError } from '../errors.ts';
 import { fixtureJson } from '../fixture.ts';
 import { loadRecord } from '../store.ts';
 
@@ -22,10 +21,7 @@ export async function run(argv: string[], deps?: AwsClients): Promise<number> {
     return 0;
   }
   const last = values.last === true;
-  const requestId = last ? undefined : positionals[0];
-  if (!last && !requestId) {
-    throw new CliError('usage: zankyo fixture <requestId|--last> [--out file]');
-  }
+  const requestId = last ? undefined : requirePositional(positionals, 0, 'requestId|--last');
   const bucket = resolveBucket(values);
   const { s3 } = deps ?? makeClients(values);
   const rec = await loadRecord(s3, bucket, {

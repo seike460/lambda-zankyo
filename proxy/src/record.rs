@@ -87,21 +87,32 @@ pub fn format_ts(t: &OffsetDateTime) -> String {
 
 /// `zankyo/{function}/{yyyy}/{mm}/{dd}/{requestId}.json`
 pub fn s3_key(function_name: &str, invoked_at: &OffsetDateTime, request_id: &str) -> String {
-    format!(
-        "zankyo/{}/{:04}/{:02}/{:02}/{}.json",
+    s3_key_from_parts(
         function_name,
         invoked_at.year(),
         u8::from(invoked_at.month()),
         invoked_at.day(),
-        request_id
+        request_id,
     )
+}
+
+/// キー設計の唯一の実装。spill 復旧など文字列日付しか持たない経路も
+/// ここを通るため、レイアウト変更は 1 箇所で済む。
+pub fn s3_key_from_parts(
+    function_name: &str,
+    year: i32,
+    month: u8,
+    day: u8,
+    request_id: &str,
+) -> String {
+    format!("zankyo/{function_name}/{year:04}/{month:02}/{day:02}/{request_id}.json")
 }
 
 /// イベントが上限を超える場合、先頭 N KB のみ残す。
 /// fixture 再現性より「イベントの断片が残ること」を優先する（SPEC 決定事項）。
 /// JSON 構造は保てなくなるため文字列として格納し `truncated: true` を付ける。
 pub fn truncate_event(event: &Value, max_kb: usize) -> (Value, bool) {
-    let limit = max_kb * 1024;
+    let limit = max_kb.saturating_mul(1024);
     let rendered = match event {
         Value::String(s) => s.clone(),
         other => other.to_string(),
@@ -155,12 +166,13 @@ pub fn error_context_from_body(body: &[u8], header_error_type: Option<String>) -
 }
 
 /// `/response` に流れたボディがエラー形か判定する。
-/// 正常応答の JSON に `errorType` キーが混入するケースは稀なので、
-/// トップレベルに `errorType` か `errorMessage` がある場合のみ失敗扱い。
+/// SPEC は「errorType 含有」を失敗と定める。errorMessage 単独で
+/// 発火すると、正常応答にエラー形フィールドを返す API（GraphQL 等）を
+/// 失敗として誤記録するため、errorType の存在だけを見る。
 pub fn response_error_context(body: &[u8]) -> Option<ErrorContext> {
     let v = serde_json::from_slice::<Value>(body).ok()?;
     let obj = v.as_object()?;
-    if !(obj.contains_key("errorType") || obj.contains_key("errorMessage")) {
+    if !obj.contains_key("errorType") {
         return None;
     }
     Some(error_context_from_body(body, None))

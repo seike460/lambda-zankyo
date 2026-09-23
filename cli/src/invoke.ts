@@ -27,7 +27,6 @@ export async function invokeFunction(
     new InvokeCommand({
       FunctionName: functionTarget,
       Payload: new TextEncoder().encode(JSON.stringify(event ?? {})),
-      LogType: 'Tail',
     }),
     { abortSignal: requestSignal() },
   );

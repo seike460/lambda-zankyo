@@ -114,9 +114,10 @@ pub async fn run_event_loop(
                 // フラッシュ予算は設定値と、イベントが示す凍結期限の残時間の小さい方。
                 // deadlineMs が来ない環境では設定値のみで判断する。
                 let budget = flush_budget_for(ev.deadline_ms, recorder.flush_budget());
+                let reason = ev.shutdown_reason.clone();
                 let flush = async {
                     for inv in pending {
-                        recorder.save_during_shutdown(inv).await;
+                        recorder.save_during_shutdown(inv, reason.as_deref()).await;
                     }
                 };
                 if tokio::time::timeout(budget, flush).await.is_err() {

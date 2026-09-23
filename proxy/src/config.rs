@@ -98,14 +98,28 @@ fn parse_fields(v: &str) -> BTreeSet<String> {
         .collect()
 }
 
+/// 0 を拒否する正整数パーサ。0 値の上限・タイムアウトは設定ミスで
+/// 関数本体まで壊す（MAX_BODY_KB=0 で全 POST が 413 になる等）。
 fn parse_usize(key: &str, v: &str) -> Result<usize> {
-    v.parse::<usize>()
-        .map_err(|_| ZankyoError::Config(format!("{key} must be a positive integer, got {v:?}")))
+    parse_u64(key, v).map(|n| n as usize)
 }
 
 fn parse_u64(key: &str, v: &str) -> Result<u64> {
-    v.parse::<u64>()
-        .map_err(|_| ZankyoError::Config(format!("{key} must be a positive integer, got {v:?}")))
+    match v.parse::<u64>() {
+        Ok(n) if n > 0 => Ok(n),
+        _ => Err(ZankyoError::Config(format!(
+            "{key} must be a positive integer, got {v:?}"
+        ))),
+    }
+}
+
+fn parse_u32(key: &str, v: &str) -> Result<u32> {
+    match v.parse::<u32>() {
+        Ok(n) if n > 0 => Ok(n),
+        _ => Err(ZankyoError::Config(format!(
+            "{key} must be a positive integer, got {v:?}"
+        ))),
+    }
 }
 
 impl Config {
@@ -166,11 +180,7 @@ impl Config {
             cfg.ext_retry_ms = parse_u64("ZANKYO_EXT_RETRY_MS", v)?;
         }
         if let Some(v) = get("ZANKYO_EXT_MAX_POLL_FAILURES") {
-            cfg.ext_max_poll_failures = v.parse::<u32>().map_err(|_| {
-                ZankyoError::Config(format!(
-                    "ZANKYO_EXT_MAX_POLL_FAILURES must be a positive integer, got {v:?}"
-                ))
-            })?;
+            cfg.ext_max_poll_failures = parse_u32("ZANKYO_EXT_MAX_POLL_FAILURES", v)?;
         }
         if let Some(v) = get("ZANKYO_SSM_TIMEOUT_MS") {
             cfg.ssm_timeout_ms = parse_u64("ZANKYO_SSM_TIMEOUT_MS", v)?;

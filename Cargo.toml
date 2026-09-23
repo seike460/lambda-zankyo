@@ -8,8 +8,9 @@ license = "MIT"
 repository = "https://github.com/seike460/lambda-zankyo"
 
 [profile.release]
-# Layer バイナリはサイズと起動速度が効く。lto + strip + panic=abort で小さく保つ。
+# Layer バイナリはサイズと起動速度が効く。lto + strip で小さく保つ。
+# panic=abort は意図的に使わない: リクエスト処理タスクのパニックが
+# wrapper 全体（=子ランタイム）を道連れにすると fail-open が破綻するため。
 lto = true
 codegen-units = 1
 strip = true
-panic = "abort"

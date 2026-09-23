@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { CliError, requireRecord } from '../src/errors.ts';
+import { CliError } from '../src/errors.ts';
 
 describe('CliError', () => {
   it('carries exitCode and optional hint', () => {
@@ -15,14 +15,5 @@ describe('CliError', () => {
     const e = new CliError('bad args');
     assert.equal(e.exitCode, 2);
     assert.equal(e.hint, undefined);
-  });
-});
-
-describe('requireRecord', () => {
-  it('throws CliError with exit code 4', () => {
-    assert.throws(
-      () => requireRecord('req-1'),
-      (e: unknown) => e instanceof CliError && e.exitCode === 4,
-    );
   });
 });
