@@ -3,6 +3,7 @@ node_modules/
 dist/
 *.tsbuildinfo
 target/
+target-*/
 cdk.out/
 .cdk.staging/
 
