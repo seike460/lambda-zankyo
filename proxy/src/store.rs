@@ -194,7 +194,13 @@ impl Recorder {
         let event_is_raw = event.encoding == EventEncoding::RawText && has_event;
         let event_is_b64 = event.encoding == EventEncoding::Base64 && has_event;
         let mut event_v = event.value.unwrap_or(Value::Null);
-        self.scrubber.scrub(&mut event_v, &mut report);
+        // Base64 イベントは opaque なので scrub しない。
+        // base64 alphabet 上の数字列等がパターンに偶然一致すると
+        // 置換で元バイト列を壊し、replay が別ペイロードを送ってしまう。
+        // （base64 内の PII はそもそも検出不能で、実害は誤爆のみ）
+        if !event_is_b64 {
+            self.scrubber.scrub(&mut event_v, &mut report);
+        }
         let mut response_v = response;
         if let Some(r) = response_v.as_mut() {
             self.scrubber.scrub(r, &mut report);

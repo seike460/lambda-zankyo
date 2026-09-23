@@ -98,21 +98,19 @@ pub async fn run(argv: &[OsString]) -> u8 {
     // 子が先に落ちた場合、Lambda がランタイム死亡を検知して SHUTDOWN を
     // 配信するまで数十〜数百 ms ある。in-flight が残っているなら
     // bounded に待って、extension 側の正式なフラッシュ（spill+PUT）に任せる。
-    // SHUTDOWN が来ない場合でも、次の spill で /tmp にだけは残す。
     if let Some(h) = pending_shutdown {
         if !state.inflight.is_empty() {
             let grace = state.cfg.flush_budget_ms.min(1_000);
             let _ = tokio::time::timeout(std::time::Duration::from_millis(grace), h).await;
         }
-        // それでも残った呼び出し（ランタイムクラッシュ等）は
-        // SHUTDOWN 未到着でも /tmp へ同期退避する。
-        // PUT は試さない — プロセス終了が目前で、次回 init の
-        // recover_spills が回収する方が確実。
-        for inv in state.inflight.drain() {
-            if state.inflight.claim_record(&inv.request_id) {
-                state.recorder.stage_timeout(&inv, None);
-            }
-        }
+    }
+    // 残った呼び出し（ランタイムクラッシュ・SHUTDOWN 未到着・
+    // extension 死亡）は /tmp へ同期退避する。
+    // PUT は試さない — プロセス終了が目前で、次回 init の
+    // recover_spills が回収する方が確実。
+    // drain_and_claim で SHUTDOWN フラッシュとの取り合いも一意に決まる。
+    for inv in state.inflight.drain_and_claim() {
+        let _ = state.recorder.stage_timeout(&inv, None);
     }
     // 新規接続を止めてから、残ったハンドラと save を待つ。
     // 応答は返したが save が未完了のレコードを、runtime 解体前に
@@ -206,7 +204,12 @@ async fn drain_pending(state: &ProxyState, budget: std::time::Duration) {
         {
             let mut p = state.pending.lock().await;
             p.closed = true;
-            while p.set.join_next().await.is_some() {}
+            while let Some(res) = p.set.join_next().await {
+                // panic した save はレコードを失う — 数えて警告に残す
+                if let Err(e) = res {
+                    warn!(error = %e, "pending record save panicked");
+                }
+            }
         }
         // closed 以後にインライン化した save はハンドラの仕事として
         // 残っているので、ハンドラが居なくなるまで待つ。

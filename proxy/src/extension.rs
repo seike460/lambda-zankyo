@@ -107,7 +107,7 @@ pub async fn run_event_loop(
                     pending = inflight.len(),
                     "shutdown received; flushing in-flight invocations"
                 );
-                let pending = inflight.drain();
+                let pending = inflight.drain_and_claim();
                 if pending.is_empty() {
                     return true;
                 }
@@ -119,13 +119,13 @@ pub async fn run_event_loop(
                 // 食い潰すと 2 件目以降が spill すらされず消えるため、
                 // 書き込みが速い spill を先に済ませてから PUT に入る。
                 let mut jobs = Vec::new();
+                // drain と記録権確保を原子的に行う — 隙間に到着した
+                // /error が event 欠落のまま記録権を取る競合を防ぐ。
+                // （/error が先ならイベント付き handler_error が記録され、
+                // こちらは drain に残らないので両方ともイベントが残る）
                 for inv in pending {
-                    // /error 処理が先行して記録済みの呼び出しは
-                    // 飛ばす — 同一 S3 キーへの二重記録を防ぐ。
-                    if inflight.claim_record(&inv.request_id) {
-                        if let Some(j) = recorder.stage_timeout(&inv, reason.as_deref()) {
-                            jobs.push(j);
-                        }
+                    if let Some(j) = recorder.stage_timeout(&inv, reason.as_deref()) {
+                        jobs.push(j);
                     }
                 }
                 // パス2: 残予算内で PUT。間に合わない分は spill が残り、

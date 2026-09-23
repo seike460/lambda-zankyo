@@ -120,6 +120,30 @@ impl InFlight {
         st.map.drain().map(|(_, v)| v).collect()
     }
 
+    /// drain と記録権の一括確保を 1 回のロックで行う。
+    /// 別呼び出しだと、その隙間に到着した /error が event 欠落のまま
+    /// 記録権を取り、イベント保持側（timeout 記録）を捨てさせうる。
+    /// 戻り値は記録権を得た呼び出しだけ — 先に記録済みのものは含まない。
+    pub fn drain_and_claim(&self) -> Vec<Invocation> {
+        let mut st = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let items: Vec<Invocation> = st.map.drain().map(|(_, v)| v).collect();
+        items
+            .into_iter()
+            .filter(|inv| {
+                let claimed = st.recorded.insert(inv.request_id.clone());
+                if claimed {
+                    st.recorded_order.push_back(inv.request_id.clone());
+                    while st.recorded_order.len() > RECORDED_CAP {
+                        if let Some(old) = st.recorded_order.pop_front() {
+                            st.recorded.remove(&old);
+                        }
+                    }
+                }
+                claimed
+            })
+            .collect()
+    }
+
     pub fn len(&self) -> usize {
         self.state
             .lock()
