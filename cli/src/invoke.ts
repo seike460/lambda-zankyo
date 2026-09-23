@@ -2,8 +2,7 @@
  * Lambda invoke の薄いラッパー。応答ペイロードを JSON として解釈しつつ、
  * JSON でない応答も失わないように生テキストを併せて返す。
  */
-import { InvokeCommand, type LambdaClient } from '@aws-sdk/client-lambda';
-import { requestSignal } from './aws.ts';
+import type { FunctionInvoker } from './ports.ts';
 
 export interface InvokeOutcome {
   statusCode: number | undefined;
@@ -19,17 +18,14 @@ export function qualifiedName(functionName: string, alias?: string): string {
 }
 
 export async function invokeFunction(
-  lambda: LambdaClient,
+  lambda: FunctionInvoker,
   functionTarget: string,
   event: unknown,
 ): Promise<InvokeOutcome> {
-  const out = await lambda.send(
-    new InvokeCommand({
-      FunctionName: functionTarget,
-      Payload: new TextEncoder().encode(JSON.stringify(event ?? {})),
-    }),
-    { abortSignal: requestSignal() },
-  );
+  const out = await lambda.invoke({
+    FunctionName: functionTarget,
+    Payload: new TextEncoder().encode(JSON.stringify(event ?? {})),
+  });
   const payloadText = out.Payload ? new TextDecoder().decode(out.Payload) : '';
   let payload: unknown = payloadText;
   try {

@@ -31,6 +31,9 @@ pub const DEFAULT_EXT_RETRY_MS: u64 = 500;
 pub const DEFAULT_EXT_MAX_POLL_FAILURES: u32 = 120;
 /// SSM get_parameter の上限時間（ms）。
 pub const DEFAULT_SSM_TIMEOUT_MS: u64 = 10_000;
+/// `/next` 以外の上流転送の上限時間（ms）。localhost 上の Runtime API が
+/// 60 秒応えない状況は実行環境の異常とみなす。
+pub const DEFAULT_FORWARD_TIMEOUT_MS: u64 = 60_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ScrubMode {
@@ -73,6 +76,8 @@ pub struct Config {
     pub ext_max_poll_failures: u32,
     /// SSM get_parameter の上限時間（ms）。
     pub ssm_timeout_ms: u64,
+    /// `/next` 以外の上流転送の上限時間（ms）。
+    pub forward_timeout_ms: u64,
     pub disabled: bool,
 }
 
@@ -144,6 +149,7 @@ impl Config {
             ext_retry_ms: DEFAULT_EXT_RETRY_MS,
             ext_max_poll_failures: DEFAULT_EXT_MAX_POLL_FAILURES,
             ssm_timeout_ms: DEFAULT_SSM_TIMEOUT_MS,
+            forward_timeout_ms: DEFAULT_FORWARD_TIMEOUT_MS,
             disabled: false,
         };
         if let Some(v) = get("ZANKYO_SCRUB_FIELDS") {
@@ -184,6 +190,9 @@ impl Config {
         }
         if let Some(v) = get("ZANKYO_SSM_TIMEOUT_MS") {
             cfg.ssm_timeout_ms = parse_u64("ZANKYO_SSM_TIMEOUT_MS", v)?;
+        }
+        if let Some(v) = get("ZANKYO_FORWARD_TIMEOUT_MS") {
+            cfg.forward_timeout_ms = parse_u64("ZANKYO_FORWARD_TIMEOUT_MS", v)?;
         }
         if let Some(v) = get("ZANKYO_DISABLED") {
             cfg.disabled = parse_bool(v);
@@ -242,6 +251,9 @@ impl Config {
         if let Some(v) = p.ssm_timeout_ms {
             self.ssm_timeout_ms = v;
         }
+        if let Some(v) = p.forward_timeout_ms {
+            self.forward_timeout_ms = v;
+        }
         if let Some(v) = p.disabled {
             self.disabled = v;
         }
@@ -282,6 +294,8 @@ struct Partial {
     ext_max_poll_failures: Option<u32>,
     #[serde(rename = "ZANKYO_SSM_TIMEOUT_MS")]
     ssm_timeout_ms: Option<u64>,
+    #[serde(rename = "ZANKYO_FORWARD_TIMEOUT_MS")]
+    forward_timeout_ms: Option<u64>,
     #[serde(rename = "ZANKYO_DISABLED")]
     disabled: Option<bool>,
 }

@@ -45,10 +45,9 @@ describe('invokeFunction', () => {
   it('sends an InvokeCommand with the target and event', async () => {
     let seenName: string | undefined;
     let seenPayload: string | undefined;
-    const lambda = fakeLambdaHandler((command) => {
-      seenName = command.input.FunctionName;
-      const p = command.input.Payload;
-      seenPayload = p instanceof Uint8Array ? new TextDecoder().decode(p) : undefined;
+    const lambda = fakeLambdaHandler((input) => {
+      seenName = input.FunctionName;
+      seenPayload = new TextDecoder().decode(input.Payload);
       return { StatusCode: 200, Payload: new TextEncoder().encode('{}') };
     });
     await invokeFunction(lambda, 'fn:prod', { ping: 1 });

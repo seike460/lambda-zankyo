@@ -23,12 +23,6 @@ const HOP_BY_HOP: [&str; 8] = [
     "upgrade",
 ];
 
-/// `/next` 以外の転送に掛ける上限。`/next` はイベント到着まで
-/// ブロックするロングポーリングなのでタイムアウトを付けない
-/// （呼び出し側で None を渡す）。localhost 上の Runtime API が
-/// 60 秒応えない状況は実行環境の異常とみなす。
-pub const FORWARD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
-
 /// 本来の Runtime API へ転送する。host/content-length はこちらの値に
 /// 張り替え、hop-by-hop ヘッダ（connection 等）は上流へ渡さない。
 /// ボディは collect 済みなので chunked 関連ヘッダは意味を失う。

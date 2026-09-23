@@ -10,9 +10,7 @@ use crate::record::{
     error_context_from_body, init_request_id, response_error_context, ErrorContext, FailureType,
 };
 use crate::store::Recorder;
-use crate::upstream::{
-    collect_bounded, forward, plain, strip_hop_by_hop, CollectError, FORWARD_TIMEOUT,
-};
+use crate::upstream::{collect_bounded, forward, plain, strip_hop_by_hop, CollectError};
 use bytes::Bytes;
 use http::{HeaderMap, Method, Request, Response, StatusCode};
 use http_body_util::{BodyExt, Full};
@@ -157,7 +155,7 @@ async fn handle(req: Request<Incoming>, st: &ProxyState) -> Response<BoxedBody> 
                 &path_and_query,
                 &parts.headers,
                 body_bytes,
-                Some(FORWARD_TIMEOUT),
+                Some(std::time::Duration::from_millis(st.cfg.forward_timeout_ms)),
                 "upstream",
             )
             .await
@@ -298,7 +296,7 @@ async fn handle_completion(
         pq,
         headers,
         body.clone(),
-        Some(FORWARD_TIMEOUT),
+        Some(std::time::Duration::from_millis(st.cfg.forward_timeout_ms)),
         "completion",
     )
     .await;
@@ -345,7 +343,7 @@ async fn handle_init_error(
         pq,
         headers,
         body.clone(),
-        Some(FORWARD_TIMEOUT),
+        Some(std::time::Duration::from_millis(st.cfg.forward_timeout_ms)),
         "init/error",
     )
     .await;

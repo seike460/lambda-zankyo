@@ -14,6 +14,7 @@ pub mod runtime;
 pub mod scrub;
 mod scrub_data;
 pub mod setup;
+pub mod spill;
 pub mod ssm;
 pub mod store;
 pub mod upstream;
