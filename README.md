@@ -191,6 +191,15 @@ s3://{ZANKYO_BUCKET}/zankyo/{function-name}/{yyyy}/{mm}/{dd}/{requestId}.json
   成功しているケース）は正式保証外（SPEC Open Questions）。
 - timeout フラッシュはベストエフォート（shutdown ウィンドウ制約あり）。
 
+## 保守性の指針
+
+設定は env → SSM overlay → 既定値の順で解決され、動作ノブはすべて
+`ZANKYO_*` 環境変数で外から変えられます（一覧は上の表）。拡張は
+データの 1 エントリ追加で済みます: scrub パターン・CLI コマンド・
+SSM キー・build arch。spill は atomic 書き込み・上限・定期回収・
+全件回収時の dir 削除までライフサイクルが閉じており、rerun で
+残滓が増えません。不変条件の全体は ARCHITECTURE.md を参照してください。
+
 ## リポジトリ構成
 
 ```
