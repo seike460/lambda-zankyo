@@ -50,6 +50,8 @@ pub struct ProxyState {
     pub client: HttpClient,
     pub inflight: Arc<InFlight>,
     pub recorder: Arc<Recorder>,
+    /// ボディ上限などの動作ノブ。env / SSM 由来の値をそのまま使う。
+    pub cfg: crate::config::Config,
 }
 
 /// 接続を受け付け続けるサーバループ。ランタイムは /next のロングポーリングと
@@ -87,7 +89,8 @@ async fn handle(req: Request<Incoming>, st: &ProxyState) -> Response<BoxedBody> 
         .unwrap_or("/")
         .to_string();
     let path = parts.uri.path().to_string();
-    let body_bytes = match collect_bounded(body).await {
+    let body_limit = st.cfg.max_body_kb.saturating_mul(1024);
+    let body_bytes = match collect_bounded(body, body_limit).await {
         Ok(b) => b,
         Err(CollectError::TooLarge) => {
             return plain(StatusCode::PAYLOAD_TOO_LARGE, "zankyo: body too large");
@@ -110,6 +113,7 @@ async fn handle(req: Request<Incoming>, st: &ProxyState) -> Response<BoxedBody> 
                 &path_and_query,
                 &parts.headers,
                 body_bytes,
+                body_limit,
             )
             .await
         }
@@ -204,6 +208,7 @@ async fn handle_next(
     pq: &str,
     headers: &HeaderMap,
     body: Bytes,
+    body_limit: usize,
 ) -> Response<BoxedBody> {
     // /next の転送はランタイムのロングポーリングを壊さないよう無制限に待つ
     let resp = match forward_or_502(st, method, pq, headers, body, None, "invocation/next").await {
@@ -211,7 +216,7 @@ async fn handle_next(
         Err(r) => return *r,
     };
     let (parts, resp_body) = resp.into_parts();
-    let bytes = match collect_bounded(resp_body).await {
+    let bytes = match collect_bounded(resp_body, body_limit).await {
         Ok(b) => b,
         Err(CollectError::TooLarge) => {
             warn!("next response body exceeded limit; forwarding is skipped");

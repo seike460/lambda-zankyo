@@ -45,17 +45,17 @@ describe('invokeFunction', () => {
 
   it('sends an InvokeCommand with the target and event', async () => {
     let seenName: string | undefined;
-    let seenPayload: Uint8Array | undefined;
+    let seenPayload: string | undefined;
     const lambda = {
-      send: async (command: unknown) => {
-        const input = (command as InvokeCommand).input;
-        seenName = input.FunctionName;
-        seenPayload = input.Payload as Uint8Array | undefined;
+      send: async (command: InvokeCommand) => {
+        seenName = command.input.FunctionName;
+        const p = command.input.Payload;
+        seenPayload = p instanceof Uint8Array ? new TextDecoder().decode(p) : undefined;
         return { StatusCode: 200, Payload: new TextEncoder().encode('{}') };
       },
     } as unknown as LambdaClient;
     await invokeFunction(lambda, 'fn:prod', { ping: 1 });
     assert.equal(seenName, 'fn:prod');
-    assert.equal(new TextDecoder().decode(seenPayload), '{"ping":1}');
+    assert.equal(seenPayload, '{"ping":1}');
   });
 });

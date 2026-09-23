@@ -10,10 +10,6 @@ use hyper::body::Incoming;
 
 use crate::proxy::{boxed_full, BoxedBody, ProxyState};
 
-/// 中継するボディの上限。Lambda の同期呼び出しペイロード上限（6MiB）に
-/// 余裕を持たせた値で、異常な巨大ボディによるメモリ圧迫を防ぐ。
-const MAX_BODY_BYTES: usize = 8 * 1024 * 1024;
-
 /// RFC 9110 §7.6.1 の hop-by-hop ヘッダ。プロキシがそのまま転送すると
 /// 上流の接続管理を壊すため必ず落とす。
 const HOP_BY_HOP: [&str; 8] = [
@@ -89,10 +85,13 @@ pub enum CollectError {
     Read(Box<dyn std::error::Error + Send + Sync>),
 }
 
-/// 上限付きでボディを読む。`http_body_util::Limited` は超過時に
+/// `limit` バイトまでボディを読む。`http_body_util::Limited` は超過時に
 /// `LengthLimitError` を返すので、通常の読み取り失敗と分けて扱う。
-pub async fn collect_bounded(body: Incoming) -> std::result::Result<Bytes, CollectError> {
-    http_body_util::Limited::new(body, MAX_BODY_BYTES)
+pub async fn collect_bounded(
+    body: Incoming,
+    limit: usize,
+) -> std::result::Result<Bytes, CollectError> {
+    http_body_util::Limited::new(body, limit)
         .collect()
         .await
         .map(|c| c.to_bytes())

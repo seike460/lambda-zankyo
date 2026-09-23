@@ -15,13 +15,6 @@ use std::time::Duration;
 use tracing::{info, warn};
 
 const EXT_BASE: &str = "/2020-01-01/extension";
-const REGISTER_TIMEOUT: Duration = Duration::from_secs(10);
-/// event/next が切れたときの再ポーリング間隔
-const RETRY_DELAY: Duration = Duration::from_millis(500);
-/// ポーリング連続失敗の上限（500ms × 120 ≒ 60 秒）。これだけ失敗が
-/// 続く実行環境は Extensions API 自体が死んでいるとみなし、
-/// ループを抜ける（fail-open: timeout 捕捉だけを諦める）。
-const MAX_POLL_FAILURES: u32 = 120;
 
 #[derive(Debug, Deserialize)]
 pub struct ExtensionEvent {
@@ -37,14 +30,19 @@ pub struct ExtensionEvent {
 
 /// `/extension/register`。成功すると extension identifier が返る。
 /// 登録に失敗しても proxy 機能は残るので、呼び出し側は warn のみで続行する。
-pub async fn register(client: &HttpClient, upstream_api: &str) -> Result<String> {
+/// `timeout` は実行環境の初期化を遅らせないための上限。
+pub async fn register(
+    client: &HttpClient,
+    upstream_api: &str,
+    timeout: Duration,
+) -> Result<String> {
     let req = Request::builder()
         .method(Method::POST)
         .uri(format!("http://{upstream_api}{EXT_BASE}/register"))
         .header("Lambda-Extension-Name", "zankyo")
         .header("content-type", "application/json")
         .body(boxed_full(r#"{"events":["INVOKE","SHUTDOWN"]}"#))?;
-    let resp = tokio::time::timeout(REGISTER_TIMEOUT, client.request(req))
+    let resp = tokio::time::timeout(timeout, client.request(req))
         .await
         .map_err(|_| ZankyoError::Upstream("extension register timed out".into()))?
         .map_err(|e| ZankyoError::Upstream(e.to_string()))?;
@@ -57,17 +55,14 @@ pub async fn register(client: &HttpClient, upstream_api: &str) -> Result<String>
         })
 }
 
-/// Extensions API のイベントボディ上限。INVOKE/SHUTDOWN 通知は
-/// 数百バイトのメタデータだけなので 1MiB あれば十分。
-const EVENT_BODY_LIMIT: usize = 1024 * 1024;
-
 /// `/event/next` はイベント到着までブロックするロングポーリング。
 /// タイムアウトを付けない（イベントなし＝正常な待機）。
-/// ボディは異常なサイズを読まないよう上限付きで読む。
+/// ボディは異常なサイズを読まないよう `body_limit` バイトで切る。
 pub async fn next_event(
     client: &HttpClient,
     upstream_api: &str,
     ext_id: &str,
+    body_limit: usize,
 ) -> Result<ExtensionEvent> {
     let req = Request::builder()
         .method(Method::GET)
@@ -78,7 +73,7 @@ pub async fn next_event(
         .request(req)
         .await
         .map_err(|e| ZankyoError::Upstream(e.to_string()))?;
-    let body = http_body_util::Limited::new(resp.into_body(), EVENT_BODY_LIMIT)
+    let body = http_body_util::Limited::new(resp.into_body(), body_limit)
         .collect()
         .await
         .map_err(|e| ZankyoError::Upstream(format!("event body read failed: {e}")))?
@@ -99,9 +94,13 @@ pub async fn run_event_loop(
     inflight: Arc<InFlight>,
     recorder: Arc<Recorder>,
 ) -> bool {
+    let cfg = recorder.config();
+    let retry_delay = Duration::from_millis(cfg.ext_retry_ms);
+    let max_failures = cfg.ext_max_poll_failures;
+    let body_limit = cfg.ext_body_kb.saturating_mul(1024);
     let mut failures: u32 = 0;
     loop {
-        match next_event(&client, &upstream_api, &ext_id).await {
+        match next_event(&client, &upstream_api, &ext_id, body_limit).await {
             Ok(ev) if ev.event_type == "SHUTDOWN" => {
                 info!(
                     reason = ev.shutdown_reason.as_deref().unwrap_or("unknown"),
@@ -135,12 +134,12 @@ pub async fn run_event_loop(
                 // ただし連続失敗が上限を超えたら Extensions API の障害と
                 // みなしてループを抜ける（無限リトライで zombie 化しない）。
                 failures += 1;
-                if failures >= MAX_POLL_FAILURES {
+                if failures >= max_failures {
                     warn!(failures, "extension event poll keeps failing; giving up");
                     return false;
                 }
                 warn!(error = %e, failures, "extension event poll failed; retrying");
-                tokio::time::sleep(RETRY_DELAY).await;
+                tokio::time::sleep(retry_delay).await;
             }
         }
     }

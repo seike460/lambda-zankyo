@@ -9,7 +9,8 @@ function run(...args: string[]): Promise<{ code: number; stdout: string; stderr:
   return new Promise((resolvePromise) => {
     execFile(process.execPath, [BIN, ...args], (error, stdout, stderr) => {
       resolvePromise({
-        code: error ? ((error as { code?: number }).code ?? 1) : 0,
+        // ExecFileException.code は number か errno 文字列。数値だけを採用
+        code: error && typeof error.code === 'number' ? error.code : error ? 1 : 0,
         stdout,
         stderr,
       });

@@ -70,7 +70,8 @@ pub async fn apply_ssm_overlay(shared: &aws_config::SdkConfig, cfg: &mut Config)
     let Some(param) = cfg.ssm_param.clone() else {
         return;
     };
-    match crate::ssm::load_config_json(shared, &param).await {
+    let timeout = std::time::Duration::from_millis(cfg.ssm_timeout_ms);
+    match crate::ssm::load_config_json(shared, &param, timeout).await {
         Ok(json) => {
             if let Err(e) = cfg.overlay_ssm_json(&json) {
                 warn!(error = %e, param, "invalid SSM config JSON; using env config");

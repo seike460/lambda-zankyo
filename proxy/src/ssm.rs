@@ -5,15 +5,17 @@
 use crate::error::{Result, ZankyoError};
 use std::time::Duration;
 
-/// init 経路を遅らせないための取得上限。
-const GET_TIMEOUT: Duration = Duration::from_secs(10);
-
 /// SecureString 想定で復号付き取得。値が空のパラメータはエラーにする
-/// （設定ミスの黙殺を防ぐ）。呼び出しはタイムアウト付き。
-pub async fn load_config_json(shared: &aws_config::SdkConfig, name: &str) -> Result<String> {
+/// （設定ミスの黙殺を防ぐ）。`timeout` は init 経路を遅らせないための
+/// 取得上限（`ZANKYO_SSM_TIMEOUT_MS` 由来）。
+pub async fn load_config_json(
+    shared: &aws_config::SdkConfig,
+    name: &str,
+    timeout: Duration,
+) -> Result<String> {
     let ssm = aws_sdk_ssm::Client::new(shared);
     let out = tokio::time::timeout(
-        GET_TIMEOUT,
+        timeout,
         ssm.get_parameter().name(name).with_decryption(true).send(),
     )
     .await

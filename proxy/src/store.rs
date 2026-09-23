@@ -47,6 +47,11 @@ impl Recorder {
         }
     }
 
+    /// 起動時に確定した設定。extension 側のポーリングノブもここから読む。
+    pub fn config(&self) -> &Config {
+        &self.cfg
+    }
+
     pub fn flush_budget(&self) -> Duration {
         Duration::from_millis(self.cfg.flush_budget_ms)
     }

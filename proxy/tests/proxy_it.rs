@@ -140,6 +140,7 @@ async fn spawn_proxy(upstream: &str, inflight: Arc<InFlight>, recorder: Arc<Reco
         upstream: upstream.to_string(),
         client: new_client(),
         inflight,
+        cfg: recorder.config().clone(),
         recorder,
     });
     tokio::spawn(serve(listener, state));

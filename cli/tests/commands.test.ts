@@ -30,8 +30,11 @@ describe('zankyo list', () => {
       runList(['--bucket', 'b', '--json'], deps(s3())),
     );
     assert.equal(code, 0);
-    const parsed = JSON.parse(out) as { key: string }[];
-    assert.equal(parsed[0]?.key, KEY);
+    const parsed: unknown = JSON.parse(out);
+    assert(Array.isArray(parsed) && parsed.length === 1);
+    const first = parsed[0];
+    assert(typeof first === 'object' && first !== null && 'key' in first);
+    assert.equal(first.key, KEY);
   });
 });
 
@@ -45,7 +48,8 @@ describe('zankyo fixture', () => {
       runFixture(['r1', '--bucket', 'b', '--out', outFile], deps(s3)),
     );
     assert.equal(code, 0);
-    const written = JSON.parse(await readFile(outFile, 'utf8')) as Record<string, unknown>;
+    const written: unknown = JSON.parse(await readFile(outFile, 'utf8'));
+    assert(typeof written === 'object' && written !== null && 'user' in written);
     assert.equal(written.user, 'alice');
   });
 

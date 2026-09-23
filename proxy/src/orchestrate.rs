@@ -39,7 +39,8 @@ pub async fn run(argv: &[OsString]) -> u8 {
         return passthrough(argv).await;
     };
 
-    let recorder = Arc::new(setup::build_recorder(&shared, cfg, &env_map));
+    let register_timeout = std::time::Duration::from_millis(cfg.register_timeout_ms);
+    let recorder = Arc::new(setup::build_recorder(&shared, cfg.clone(), &env_map));
     let inflight = Arc::new(InFlight::new());
     let client: HttpClient = new_client();
 
@@ -48,13 +49,15 @@ pub async fn run(argv: &[OsString]) -> u8 {
     let rec = recorder.clone();
     tokio::spawn(async move { rec.recover_spills().await });
 
-    let shutdown = start_extension(&client, &upstream, &inflight, &recorder).await;
+    let shutdown =
+        start_extension(&client, &upstream, register_timeout, &inflight, &recorder).await;
 
     let state = Arc::new(ProxyState {
         upstream,
         client,
         inflight,
         recorder,
+        cfg,
     });
     tokio::spawn(crate::proxy::serve(listener, state));
 
@@ -96,10 +99,11 @@ fn spawn_child(argv: &[OsString], listener: &TcpListener) -> Option<Child> {
 async fn start_extension(
     client: &HttpClient,
     upstream: &str,
+    register_timeout: std::time::Duration,
     inflight: &Arc<InFlight>,
     recorder: &Arc<Recorder>,
 ) -> Option<JoinHandle<bool>> {
-    match extension::register(client, upstream).await {
+    match extension::register(client, upstream, register_timeout).await {
         Ok(ext_id) => {
             info!("registered as external extension");
             let (c, api, inf, rec) = (

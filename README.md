@@ -108,6 +108,12 @@ env を部分上書きします。複数関数で設定を一元管理するた�
 | `ZANKYO_PUT_TIMEOUT_MS` | `5000` | 通常経路の PutObject 上限時間 |
 | `ZANKYO_SPILL_DIR` | `/tmp/zankyo` | S3 失敗時・SHUTDOWN 時のローカル退避先 |
 | `ZANKYO_SPILL_MAX_FILES` | `64` | spill 保持数の上限。超過分は古いものから破棄 |
+| `ZANKYO_MAX_BODY_KB` | `8192` | Runtime API が受け付けるボディ上限（KiB） |
+| `ZANKYO_EXT_BODY_KB` | `1024` | Extensions API イベントボディ上限（KiB） |
+| `ZANKYO_REGISTER_TIMEOUT_MS` | `10000` | extension 登録の上限時間 |
+| `ZANKYO_EXT_RETRY_MS` | `500` | event/next ポーリング失敗時の再試行間隔 |
+| `ZANKYO_EXT_MAX_POLL_FAILURES` | `120` | ポーリング連続失敗の上限（超過でループを抜ける） |
+| `ZANKYO_SSM_TIMEOUT_MS` | `10000` | SSM get_parameter の上限時間 |
 | `ZANKYO_DISABLED` | `false` | 緊急停止スイッチ（passthrough） |
 
 ※「必須」は記録を有効にする条件です。未設定でも関数は正常に動きます。

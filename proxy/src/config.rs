@@ -16,6 +16,21 @@ pub const DEFAULT_SPILL_DIR: &str = "/tmp/zankyo";
 /// spill dir に残すレコードの最大数。S3 が届かない状態が続いても
 /// /tmp を使い尽くさないよう、古いものから捨てる。
 pub const DEFAULT_SPILL_MAX_FILES: usize = 64;
+/// Runtime API が受け付けるボディの上限（KiB）。Lambda の同期
+/// ペイロード上限 6MiB に余裕を持たせた既定。
+pub const DEFAULT_MAX_BODY_KB: usize = 8192;
+/// Extensions API のイベントボディ上限（KiB）。通知はメタデータだけ
+/// なので 1MiB で十分。
+pub const DEFAULT_EXT_BODY_KB: usize = 1024;
+/// extension 登録の上限時間（ms）。
+pub const DEFAULT_REGISTER_TIMEOUT_MS: u64 = 10_000;
+/// event/next ポーリング失敗時の再試行間隔（ms）。
+pub const DEFAULT_EXT_RETRY_MS: u64 = 500;
+/// ポーリング連続失敗の上限。既定では 500ms × 120 ≒ 60 秒失敗が
+/// 続いたら Extensions API の障害とみなしてループを抜ける。
+pub const DEFAULT_EXT_MAX_POLL_FAILURES: u32 = 120;
+/// SSM get_parameter の上限時間（ms）。
+pub const DEFAULT_SSM_TIMEOUT_MS: u64 = 10_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ScrubMode {
@@ -46,6 +61,18 @@ pub struct Config {
     pub spill_dir: String,
     /// spill dir に保持するファイル数の上限。超過分は古いものから破棄。
     pub spill_max_files: usize,
+    /// Runtime API 経由で受け付けるボディの上限（KiB）。
+    pub max_body_kb: usize,
+    /// Extensions API イベントボディの上限（KiB）。
+    pub ext_body_kb: usize,
+    /// extension 登録リクエストの上限時間（ms）。
+    pub register_timeout_ms: u64,
+    /// event/next ポーリング失敗時の再試行間隔（ms）。
+    pub ext_retry_ms: u64,
+    /// ポーリング連続失敗の上限。超えると extension ループを抜ける。
+    pub ext_max_poll_failures: u32,
+    /// SSM get_parameter の上限時間（ms）。
+    pub ssm_timeout_ms: u64,
     pub disabled: bool,
 }
 
@@ -97,6 +124,12 @@ impl Config {
             put_timeout_ms: DEFAULT_PUT_TIMEOUT_MS,
             spill_dir: DEFAULT_SPILL_DIR.to_string(),
             spill_max_files: DEFAULT_SPILL_MAX_FILES,
+            max_body_kb: DEFAULT_MAX_BODY_KB,
+            ext_body_kb: DEFAULT_EXT_BODY_KB,
+            register_timeout_ms: DEFAULT_REGISTER_TIMEOUT_MS,
+            ext_retry_ms: DEFAULT_EXT_RETRY_MS,
+            ext_max_poll_failures: DEFAULT_EXT_MAX_POLL_FAILURES,
+            ssm_timeout_ms: DEFAULT_SSM_TIMEOUT_MS,
             disabled: false,
         };
         if let Some(v) = get("ZANKYO_SCRUB_FIELDS") {
@@ -119,6 +152,28 @@ impl Config {
         }
         if let Some(v) = get("ZANKYO_SPILL_MAX_FILES") {
             cfg.spill_max_files = parse_usize("ZANKYO_SPILL_MAX_FILES", v)?;
+        }
+        if let Some(v) = get("ZANKYO_MAX_BODY_KB") {
+            cfg.max_body_kb = parse_usize("ZANKYO_MAX_BODY_KB", v)?;
+        }
+        if let Some(v) = get("ZANKYO_EXT_BODY_KB") {
+            cfg.ext_body_kb = parse_usize("ZANKYO_EXT_BODY_KB", v)?;
+        }
+        if let Some(v) = get("ZANKYO_REGISTER_TIMEOUT_MS") {
+            cfg.register_timeout_ms = parse_u64("ZANKYO_REGISTER_TIMEOUT_MS", v)?;
+        }
+        if let Some(v) = get("ZANKYO_EXT_RETRY_MS") {
+            cfg.ext_retry_ms = parse_u64("ZANKYO_EXT_RETRY_MS", v)?;
+        }
+        if let Some(v) = get("ZANKYO_EXT_MAX_POLL_FAILURES") {
+            cfg.ext_max_poll_failures = v.parse::<u32>().map_err(|_| {
+                ZankyoError::Config(format!(
+                    "ZANKYO_EXT_MAX_POLL_FAILURES must be a positive integer, got {v:?}"
+                ))
+            })?;
+        }
+        if let Some(v) = get("ZANKYO_SSM_TIMEOUT_MS") {
+            cfg.ssm_timeout_ms = parse_u64("ZANKYO_SSM_TIMEOUT_MS", v)?;
         }
         if let Some(v) = get("ZANKYO_DISABLED") {
             cfg.disabled = parse_bool(v);
@@ -159,6 +214,24 @@ impl Config {
         if let Some(v) = p.spill_max_files {
             self.spill_max_files = v;
         }
+        if let Some(v) = p.max_body_kb {
+            self.max_body_kb = v;
+        }
+        if let Some(v) = p.ext_body_kb {
+            self.ext_body_kb = v;
+        }
+        if let Some(v) = p.register_timeout_ms {
+            self.register_timeout_ms = v;
+        }
+        if let Some(v) = p.ext_retry_ms {
+            self.ext_retry_ms = v;
+        }
+        if let Some(v) = p.ext_max_poll_failures {
+            self.ext_max_poll_failures = v;
+        }
+        if let Some(v) = p.ssm_timeout_ms {
+            self.ssm_timeout_ms = v;
+        }
         if let Some(v) = p.disabled {
             self.disabled = v;
         }
@@ -187,6 +260,18 @@ struct Partial {
     spill_dir: Option<String>,
     #[serde(rename = "ZANKYO_SPILL_MAX_FILES")]
     spill_max_files: Option<usize>,
+    #[serde(rename = "ZANKYO_MAX_BODY_KB")]
+    max_body_kb: Option<usize>,
+    #[serde(rename = "ZANKYO_EXT_BODY_KB")]
+    ext_body_kb: Option<usize>,
+    #[serde(rename = "ZANKYO_REGISTER_TIMEOUT_MS")]
+    register_timeout_ms: Option<u64>,
+    #[serde(rename = "ZANKYO_EXT_RETRY_MS")]
+    ext_retry_ms: Option<u64>,
+    #[serde(rename = "ZANKYO_EXT_MAX_POLL_FAILURES")]
+    ext_max_poll_failures: Option<u32>,
+    #[serde(rename = "ZANKYO_SSM_TIMEOUT_MS")]
+    ssm_timeout_ms: Option<u64>,
     #[serde(rename = "ZANKYO_DISABLED")]
     disabled: Option<bool>,
 }
@@ -219,9 +304,15 @@ mod tests {
             ("ZANKYO_SCRUB_FIELDS", "my-secret,Other_Key"),
             ("ZANKYO_SCRUB_MODE", "hash"),
             ("ZANKYO_MAX_EVENT_KB", "64"),
+            ("ZANKYO_MAX_BODY_KB", "4096"),
+            ("ZANKYO_EXT_MAX_POLL_FAILURES", "10"),
+            ("ZANKYO_SSM_TIMEOUT_MS", "3000"),
             ("ZANKYO_DISABLED", "true"),
         ]))
         .unwrap();
+        assert_eq!(cfg.max_body_kb, 4096);
+        assert_eq!(cfg.ext_max_poll_failures, 10);
+        assert_eq!(cfg.ssm_timeout_ms, 3000);
         assert_eq!(cfg.scrub_mode, ScrubMode::Hash);
         assert!(cfg.scrub_fields.contains("mysecret"));
         assert!(cfg.scrub_fields.contains("otherkey"));
