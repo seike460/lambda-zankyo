@@ -4,7 +4,7 @@
  * 値の型付き取り出しをここに集約する。
  */
 import { type ParseArgsConfig, parseArgs } from 'node:util';
-import { CliError } from './errors.ts';
+import { CliError, errMessage } from './errors.ts';
 
 export type OptionDefs = ParseArgsConfig['options'];
 
@@ -32,7 +32,7 @@ export function parseCliArgs(argv: string[], options: OptionDefs): Parsed {
     });
     return { values, positionals };
   } catch (e) {
-    throw new CliError(e instanceof Error ? e.message : String(e), 2, 'run with --help');
+    throw new CliError(errMessage(e), 2, 'run with --help');
   }
 }
 

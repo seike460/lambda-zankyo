@@ -9,7 +9,7 @@ import { run as runFixture } from './commands/fixture.ts';
 import { run as runList } from './commands/list.ts';
 import { run as runRedrive } from './commands/redrive.ts';
 import { run as runReplay } from './commands/replay.ts';
-import { CliError } from './errors.ts';
+import { CliError, errMessage } from './errors.ts';
 
 const VERSION = '0.1.0';
 
@@ -64,7 +64,7 @@ main().then(
       if (err.hint) console.error(`hint: ${err.hint}`);
       process.exit(err.exitCode);
     }
-    console.error(err instanceof Error ? `error: ${err.message}` : String(err));
+    console.error(`error: ${errMessage(err)}`);
     process.exit(2);
   },
 );

@@ -3,7 +3,7 @@
  * キー規約の解釈は record.ts の純粋関数に寄せ、ここは取得だけを担う。
  */
 import { GetObjectCommand, ListObjectsV2Command, type S3Client } from '@aws-sdk/client-s3';
-import { CliError } from './errors.ts';
+import { CliError, errMessage } from './errors.ts';
 import { keyMatchesRequestId, parseRecord, type ZankyoRecord } from './record.ts';
 
 const RECORD_PREFIX = 'zankyo/';
@@ -35,9 +35,7 @@ export async function listRecordKeys(
   const refs: RecordRef[] = [];
   let token: string | undefined;
   do {
-    const out = await s3.send(
-      new ListObjectsV2Command({ Bucket: bucket, Prefix: prefix, ContinuationToken: token }),
-    );
+    const out = await listPage(s3, bucket, prefix, token);
     for (const o of out.Contents ?? []) {
       if (!o.Key) continue;
       if (opts.since && o.LastModified && o.LastModified < opts.since) continue;
@@ -54,12 +52,25 @@ export async function listRecordKeys(
   return opts.limit ? refs.slice(0, opts.limit) : refs;
 }
 
+/** ListObjectsV2 1 ページ分。SDK 例外は CliError に写して上位で一貫処理する。 */
+async function listPage(s3: S3Client, bucket: string, prefix: string, token: string | undefined) {
+  try {
+    return await s3.send(
+      new ListObjectsV2Command({ Bucket: bucket, Prefix: prefix, ContinuationToken: token }),
+    );
+  } catch (e) {
+    throw new CliError(`failed to list s3://${bucket}/${prefix}: ${errMessage(e)}`, 5);
+  }
+}
+
 export async function fetchRecord(
   s3: S3Client,
   bucket: string,
   key: string,
 ): Promise<ZankyoRecord> {
-  const out = await s3.send(new GetObjectCommand({ Bucket: bucket, Key: key }));
+  const out = await s3.send(new GetObjectCommand({ Bucket: bucket, Key: key })).catch((e) => {
+    throw new CliError(`failed to read s3://${bucket}/${key}: ${errMessage(e)}`, 4);
+  });
   if (out.ContentLength !== undefined && out.ContentLength > MAX_RECORD_BYTES) {
     throw new CliError(
       `record too large (${out.ContentLength} bytes): s3://${bucket}/${key}`,
@@ -105,9 +116,7 @@ export async function resolveRecordKey(s3: S3Client, bucket: string, q: KeyQuery
   let token: string | undefined;
   let pages = 0;
   do {
-    const out = await s3.send(
-      new ListObjectsV2Command({ Bucket: bucket, Prefix: prefix, ContinuationToken: token }),
-    );
+    const out = await listPage(s3, bucket, prefix, token);
     const hit = (out.Contents ?? []).find((o) => o.Key && keyMatchesRequestId(o.Key, requestId));
     if (hit?.Key) return hit.Key;
     token = out.IsTruncated ? out.NextContinuationToken : undefined;

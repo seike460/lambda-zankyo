@@ -15,3 +15,4 @@ mod scrub_data;
 pub mod setup;
 pub mod ssm;
 pub mod store;
+pub mod upstream;

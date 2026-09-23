@@ -5,15 +5,14 @@
 //! それ以外のパスは一切触らず中継する（成功呼び出しの観測コストを
 //! ゼロに近づけるため、ボディを読むのは失敗判定が必要な経路だけ）。
 
-use crate::error::{Result, ZankyoError};
 use crate::inflight::{InFlight, Invocation};
 use crate::record::{
     error_context_from_body, init_request_id, response_error_context, FailureType,
 };
 use crate::store::Recorder;
+use crate::upstream::{collect_bounded, forward, plain, CollectError};
 use bytes::Bytes;
-use http::header::{CONTENT_LENGTH, HOST};
-use http::{HeaderMap, Method, Request, Response, StatusCode, Uri};
+use http::{HeaderMap, Method, Request, Response, StatusCode};
 use http_body_util::{BodyExt, Full};
 use hyper::body::Incoming;
 use hyper::server::conn::http1;
@@ -33,10 +32,6 @@ pub type HttpClient = Client<HttpConnector, BoxedBody>;
 
 /// accept 失敗時の再試行間隔。一時的な FD 枯渇等での busy loop を避ける。
 const ACCEPT_BACKOFF: std::time::Duration = std::time::Duration::from_millis(50);
-
-/// 中継するボディの上限。Lambda の同期呼び出しペイロード上限（6MiB）に
-/// 余裕を持たせた値で、異常な巨大ボディによるメモリ圧迫を防ぐ。
-const MAX_BODY_BYTES: usize = 8 * 1024 * 1024;
 
 /// 空 or バッファ済みボディを BoxedBody に揃える。
 pub fn boxed_full<B: Into<Bytes>>(b: B) -> BoxedBody {
@@ -302,79 +297,6 @@ async fn handle_init_error(
             .await;
     });
     resp.map(|b| b.boxed())
-}
-
-/// 本来の Runtime API へ転送する。host/content-length はこちらの値に
-/// 張り替え、hop-by-hop ヘッダ（connection 等）は上流へ渡さない。
-/// ボディは collect 済みなので chunked 関連ヘッダは意味を失う。
-async fn forward(
-    st: &ProxyState,
-    method: &Method,
-    pq: &str,
-    headers: &HeaderMap,
-    body: Bytes,
-) -> Result<Response<Incoming>> {
-    let uri: Uri = format!("http://{}{}", st.upstream, pq)
-        .parse()
-        .map_err(|e| ZankyoError::Config(format!("bad upstream uri: {e}")))?;
-    let mut builder = Request::builder().method(method).uri(uri);
-    if let Some(h) = builder.headers_mut() {
-        for (k, v) in headers.iter() {
-            if k == HOST || k == CONTENT_LENGTH || HOP_BY_HOP.contains(&k.as_str()) {
-                continue;
-            }
-            h.append(k.clone(), v.clone());
-        }
-        if let Ok(v) = body.len().to_string().parse() {
-            h.insert(CONTENT_LENGTH, v);
-        }
-    }
-    let req = builder.body(boxed_full(body))?;
-    st.client
-        .request(req)
-        .await
-        .map_err(|e| ZankyoError::Upstream(e.to_string()))
-}
-
-/// RFC 9110 §7.6.1 の hop-by-hop ヘッダ。プロキシがそのまま転送すると
-/// 上流の接続管理を壊すため必ず落とす。
-const HOP_BY_HOP: [&str; 8] = [
-    "connection",
-    "keep-alive",
-    "proxy-authenticate",
-    "proxy-authorization",
-    "te",
-    "trailer",
-    "transfer-encoding",
-    "upgrade",
-];
-
-enum CollectError {
-    TooLarge,
-    Read(Box<dyn std::error::Error + Send + Sync>),
-}
-
-/// 上限付きでボディを読む。`http_body_util::Limited` は超過時に
-/// `LengthLimitError` を返すので、通常の読み取り失敗と分けて扱う。
-async fn collect_bounded(body: Incoming) -> std::result::Result<Bytes, CollectError> {
-    http_body_util::Limited::new(body, MAX_BODY_BYTES)
-        .collect()
-        .await
-        .map(|c| c.to_bytes())
-        .map_err(|e| {
-            if e.is::<http_body_util::LengthLimitError>() {
-                CollectError::TooLarge
-            } else {
-                CollectError::Read(e)
-            }
-        })
-}
-
-fn plain(status: StatusCode, msg: &'static str) -> Response<BoxedBody> {
-    Response::builder()
-        .status(status)
-        .body(boxed_full(Bytes::from(msg)))
-        .unwrap_or_else(|_| Response::new(boxed_full(Bytes::new())))
 }
 
 #[cfg(test)]

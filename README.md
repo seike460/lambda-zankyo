@@ -194,7 +194,21 @@ cargo fmt --all -- --check && cargo clippy -- -D warnings
 - TS: strict + `noUncheckedIndexedAccess` + `exactOptionalPropertyTypes`、
   Biome でフォーマット統一。テストは `node --test`（外部サービス不要）。
 - Rust: ロジック（scrub/record/config/inflight）は IO と分離した
-  ユニットテスト。proxy/extension 経路は E2E（examples/）で検証。
+  ユニットテスト。proxy/extension 経路はモック Runtime API/S3 への
+  統合テスト（`proxy/tests/`）で検証。
+
+### 再現性（reproducibility）
+
+- 依存は lockfile 固定: `Cargo.lock`（Rust）と `pnpm-lock.yaml`（JS/TS）
+  をコミット済み。`pnpm install --frozen-lockfile` / `cargo build --locked`
+  で同一依存が解決されます。
+- ツールチェーンも固定: `rust-toolchain.toml`（Rust 1.98.1）、`.nvmrc`
+  （Node 24）、`package.json` の `packageManager`（pnpm 10.13.1）。
+- CI の全 GitHub Actions はコミット SHA でピン留めしています
+  （`.github/workflows/ci.yml` の `@<sha> # vN` コメント参照）。
+- `scripts/build-layer.sh` は決定的 zip を生成します: エントリの
+  mtime を epoch 0 に固定し、`zip -X` で拡張属性を捨て、エントリ順を
+  `LC_ALL=C sort` で安定化。同一バイナリからは同一 zip が出ます。
 
 ## License
 

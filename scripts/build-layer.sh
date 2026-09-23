@@ -31,7 +31,10 @@ for arch in $ARCHES; do
   cp "target/$target/release/zankyo" "$stage/bin/zankyo"
   cp proxy/layer/zankyo-wrapper "$stage/zankyo-wrapper"
   chmod +x "$stage/bin/zankyo" "$stage/zankyo-wrapper"
-  (cd "$stage" && zip -qr "$OLDPWD/$OUT_DIR/zankyo-$arch.zip" .)
+  # 決定的 zip: mtime を epoch 固定、-X で拡張属性を捨て、
+  # エントリ順を sort で安定化する（同一バイナリなら同一 zip になる）
+  find "$stage" -exec touch -t 197001010000.00 {} +
+  (cd "$stage" && find . -type f -print | LC_ALL=C sort | zip -qX "$OLDPWD/$OUT_DIR/zankyo-$arch.zip" -@)
   rm -rf "$stage"
   echo "wrote $OUT_DIR/zankyo-$arch.zip"
 done
