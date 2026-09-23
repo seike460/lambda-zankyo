@@ -6,6 +6,7 @@
 pub mod config;
 pub mod error;
 pub mod extension;
+pub(crate) mod handlers;
 pub mod inflight;
 pub mod orchestrate;
 pub mod proxy;
@@ -16,5 +17,6 @@ mod scrub_data;
 pub mod setup;
 pub mod spill;
 pub mod ssm;
+mod ssm_overlay;
 pub mod store;
 pub mod upstream;

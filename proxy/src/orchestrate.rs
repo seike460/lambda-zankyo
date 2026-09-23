@@ -19,6 +19,15 @@ use crate::runtime::{exit_code, passthrough, spawn_via_proxy};
 use crate::setup::{self, RecordPlan, StartupPlan};
 use crate::store::Recorder;
 
+/// pending drain 中に新たな save が増えないか確認する待機間隔。
+const DRAIN_POLL: std::time::Duration = std::time::Duration::from_millis(10);
+/// drain 用の時間枠に加える余白。put_timeout ちょうどだと
+/// 最後の 1 件が送信完了前に打ち切られうるため。
+const DRAIN_SLACK_MS: u64 = 1_000;
+/// 子終了後に extension の SHUTDOWN 処理を待つ猶予の上限。
+/// Lambda の sandbox 凍結までに残る時間は限られるため上限を設ける。
+const SHUTDOWN_GRACE_CAP_MS: u64 = 1_000;
+
 /// 実行本体。子プロセスの終了コードをそのまま返す。
 /// どのステップで失敗しても zankyo を噛まない passthrough に落ちる。
 pub async fn run(argv: &[OsString]) -> u8 {
@@ -71,7 +80,8 @@ pub async fn run(argv: &[OsString]) -> u8 {
         });
     }
 
-    let drain_budget = std::time::Duration::from_millis(cfg.put_timeout_ms.saturating_add(1_000));
+    let drain_budget =
+        std::time::Duration::from_millis(cfg.put_timeout_ms.saturating_add(DRAIN_SLACK_MS));
     let state = Arc::new(ProxyState {
         upstream: upstream.clone(),
         client: client.clone(),
@@ -100,7 +110,7 @@ pub async fn run(argv: &[OsString]) -> u8 {
     // bounded に待って、extension 側の正式なフラッシュ（spill+PUT）に任せる。
     if let Some(h) = pending_shutdown {
         if !state.inflight.is_empty() {
-            let grace = state.cfg.flush_budget_ms.min(1_000);
+            let grace = state.cfg.flush_budget_ms.min(SHUTDOWN_GRACE_CAP_MS);
             let _ = tokio::time::timeout(std::time::Duration::from_millis(grace), h).await;
         }
     }
@@ -214,7 +224,7 @@ async fn drain_pending(state: &ProxyState, budget: std::time::Duration) {
         // closed 以後にインライン化した save はハンドラの仕事として
         // 残っているので、ハンドラが居なくなるまで待つ。
         while state.active.load(std::sync::atomic::Ordering::SeqCst) > 0 {
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            tokio::time::sleep(DRAIN_POLL).await;
         }
     };
     if tokio::time::timeout(budget, drain).await.is_err() {

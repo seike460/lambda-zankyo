@@ -91,11 +91,11 @@ pub struct Config {
     pub disabled: bool,
 }
 
-fn parse_bool(v: &str) -> bool {
+pub(crate) fn parse_bool(v: &str) -> bool {
     matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on")
 }
 
-fn parse_mode(v: &str) -> Result<ScrubMode> {
+pub(crate) fn parse_mode(v: &str) -> Result<ScrubMode> {
     match v.to_ascii_lowercase().as_str() {
         "mask" => Ok(ScrubMode::Mask),
         "hash" => Ok(ScrubMode::Hash),
@@ -106,7 +106,7 @@ fn parse_mode(v: &str) -> Result<ScrubMode> {
     }
 }
 
-fn parse_fields(v: &str) -> BTreeSet<String> {
+pub(crate) fn parse_fields(v: &str) -> BTreeSet<String> {
     v.split(',')
         .map(crate::scrub::normalize_field)
         .filter(|s| !s.is_empty())
@@ -224,160 +224,13 @@ impl Config {
         }
         Ok(cfg)
     }
-
-    /// SSM Parameter の JSON で上書きする。JSON に存在したキーだけが
-    /// env 由来の値を置き換える（部分上書き）。
-    /// パースはキーごとに行い、型が合わない値はそのキーだけ警告して
-    /// 飛ばす — 1 フィールドの書き損じで設定全体（bucket 含む）を
-    /// 失い、記録が無断停止する事態を避ける。
-    /// 数値・真偽値は JSON ネイティブ型に加えて文字列形式も受理する
-    /// （env 経路との対称性）。0 値は env と同じく拒否する
-    /// （0 の上限・タイムアウトは設定ミスで関数本体まで壊す）。
-    pub fn overlay_ssm_json(&mut self, json: &str) -> Result<()> {
-        let v: serde_json::Value = serde_json::from_str(json).map_err(|e| {
-            ZankyoError::Config(format!("ZANKYO_SSM_PARAM is not valid config JSON: {e}"))
-        })?;
-        let Some(obj) = v.as_object() else {
-            return Err(ZankyoError::Config(
-                "ZANKYO_SSM_PARAM must be a JSON object".into(),
-            ));
-        };
-        for (key, val) in obj {
-            match key.as_str() {
-                "ZANKYO_BUCKET" => {
-                    if let Some(s) = ssm_str(key, val) {
-                        if s.is_empty() {
-                            // "" で env 側のバケットを消さない
-                            tracing::warn!(key, "empty bucket ignored");
-                        } else {
-                            self.bucket = s;
-                        }
-                    }
-                }
-                "ZANKYO_KMS_KEY" => {
-                    if let Some(s) = ssm_str(key, val) {
-                        if s.is_empty() {
-                            tracing::warn!(key, "empty KMS key id ignored");
-                        } else {
-                            self.kms_key = Some(s);
-                        }
-                    }
-                }
-                "ZANKYO_SCRUB_FIELDS" => {
-                    if let Some(s) = ssm_str(key, val) {
-                        self.scrub_fields = parse_fields(&s);
-                    }
-                }
-                "ZANKYO_SCRUB_MODE" => {
-                    if let Some(s) = ssm_str(key, val) {
-                        match parse_mode(&s) {
-                            Ok(m) => self.scrub_mode = m,
-                            Err(e) => {
-                                tracing::warn!(error = %e, key, "invalid SSM config value; ignored")
-                            }
-                        }
-                    }
-                }
-                "ZANKYO_DISABLED" => {
-                    if let Some(b) = ssm_bool(key, val) {
-                        self.disabled = b;
-                    }
-                }
-                "ZANKYO_SPILL_DIR" => {
-                    if let Some(s) = ssm_str(key, val) {
-                        if let Some(d) = valid_spill_dir(&s) {
-                            self.spill_dir = d;
-                        }
-                    }
-                }
-                "ZANKYO_MAX_EVENT_KB" => {
-                    if let Some(n) = ssm_u64(key, val) {
-                        self.max_event_kb = n as usize;
-                    }
-                }
-                "ZANKYO_FLUSH_BUDGET_MS" => {
-                    if let Some(n) = ssm_u64(key, val) {
-                        self.flush_budget_ms = n;
-                    }
-                }
-                "ZANKYO_PUT_TIMEOUT_MS" => {
-                    if let Some(n) = ssm_u64(key, val) {
-                        self.put_timeout_ms = n;
-                    }
-                }
-                "ZANKYO_SPILL_MAX_FILES" => {
-                    if let Some(n) = ssm_u64(key, val) {
-                        self.spill_max_files = n as usize;
-                    }
-                }
-                "ZANKYO_SPILL_RETRY_MS" => {
-                    if let Some(n) = ssm_u64(key, val) {
-                        self.spill_retry_ms = n;
-                    }
-                }
-                "ZANKYO_SPILL_MAX_AGE_SECS" => {
-                    if let Some(n) = ssm_u64(key, val) {
-                        self.spill_max_age_secs = n;
-                    }
-                }
-                "ZANKYO_MAX_BODY_KB" => {
-                    if let Some(n) = ssm_u64(key, val) {
-                        self.max_body_kb = n as usize;
-                    }
-                }
-                "ZANKYO_EXT_BODY_KB" => {
-                    if let Some(n) = ssm_u64(key, val) {
-                        self.ext_body_kb = n as usize;
-                    }
-                }
-                "ZANKYO_REGISTER_TIMEOUT_MS" => {
-                    if let Some(n) = ssm_u64(key, val) {
-                        self.register_timeout_ms = n;
-                    }
-                }
-                "ZANKYO_EXT_RETRY_MS" => {
-                    if let Some(n) = ssm_u64(key, val) {
-                        self.ext_retry_ms = n;
-                    }
-                }
-                "ZANKYO_EXT_MAX_POLL_FAILURES" => {
-                    if let Some(n) = ssm_u64(key, val) {
-                        self.ext_max_poll_failures = n as u32;
-                    }
-                }
-                "ZANKYO_SSM_TIMEOUT_MS" => {
-                    if let Some(n) = ssm_u64(key, val) {
-                        self.ssm_timeout_ms = n;
-                    }
-                }
-                "ZANKYO_FORWARD_TIMEOUT_MS" => {
-                    if let Some(n) = ssm_u64(key, val) {
-                        self.forward_timeout_ms = n;
-                    }
-                }
-                other => tracing::warn!(key = other, "unknown ZANKYO_SSM_PARAM key; ignored"),
-            }
-        }
-        Ok(())
-    }
-}
-
-/// SSM 値から文字列を取る。型違いは警告して None。
-fn ssm_str(key: &str, v: &serde_json::Value) -> Option<String> {
-    match v.as_str() {
-        Some(s) => Some(s.to_string()),
-        None => {
-            tracing::warn!(key, "SSM config value is not a string; ignored");
-            None
-        }
-    }
 }
 
 /// spill ディレクトリ値の検証。空文字と相対パスを弾く。
 /// Lambda の CWD（/var/task）は read-only で、相対パスは
 /// create_dir_all が必ず失敗して spill が毎回 warn で落ちるため、
 /// 絶対パスだけを受理する。
-fn valid_spill_dir(v: &str) -> Option<String> {
+pub(crate) fn valid_spill_dir(v: &str) -> Option<String> {
     if v.is_empty() || !std::path::Path::new(v).is_absolute() {
         tracing::warn!(
             value = v,
@@ -386,35 +239,6 @@ fn valid_spill_dir(v: &str) -> Option<String> {
         return None;
     }
     Some(v.to_string())
-}
-
-/// SSM 値から真偽値を取る。bool のほか env と同じ文字列形式も受理。
-fn ssm_bool(key: &str, v: &serde_json::Value) -> Option<bool> {
-    match v {
-        serde_json::Value::Bool(b) => Some(*b),
-        serde_json::Value::String(s) => Some(parse_bool(s)),
-        _ => {
-            tracing::warn!(key, "SSM config value is not a boolean; ignored");
-            None
-        }
-    }
-}
-
-/// SSM 値から正整数を取る。JSON 数値のほか数値文字列も受理。
-/// 0・非数値・負数は警告して None（そのキーだけ無効）。
-fn ssm_u64(key: &str, v: &serde_json::Value) -> Option<u64> {
-    let n = match v {
-        serde_json::Value::Number(n) => n.as_u64(),
-        serde_json::Value::String(s) => s.parse::<u64>().ok(),
-        _ => None,
-    };
-    match n {
-        Some(n) if n > 0 => Some(n),
-        _ => {
-            tracing::warn!(key, "SSM config value is not a positive integer; ignored");
-            None
-        }
-    }
 }
 
 #[cfg(test)]
@@ -464,41 +288,5 @@ mod tests {
     #[test]
     fn rejects_bad_mode() {
         assert!(Config::from_env_map(&env(&[("ZANKYO_SCRUB_MODE", "yes")])).is_err());
-    }
-
-    #[test]
-    fn ssm_overrides_env_only_when_key_present() {
-        let mut cfg = Config::from_env_map(&env(&[
-            ("ZANKYO_BUCKET", "env-bucket"),
-            ("ZANKYO_MAX_EVENT_KB", "64"),
-        ]))
-        .unwrap();
-        cfg.overlay_ssm_json(r#"{"ZANKYO_BUCKET":"ssm-bucket"}"#)
-            .unwrap();
-        assert_eq!(cfg.bucket, "ssm-bucket");
-        assert_eq!(cfg.max_event_kb, 64); // env 側の値が残る
-    }
-
-    #[test]
-    fn ssm_rejects_invalid_json() {
-        let mut cfg = Config::from_env_map(&env(&[])).unwrap();
-        assert!(cfg.overlay_ssm_json("not json").is_err());
-        assert!(cfg.overlay_ssm_json("[1,2]").is_err());
-    }
-
-    #[test]
-    fn ssk_bad_field_does_not_drop_whole_overlay() {
-        // 1 フィールドの型違いで overlay 全体が捨てられると、
-        // SSM 側にしか無い bucket まで失って記録が止まる。
-        let mut cfg = Config::from_env_map(&env(&[])).unwrap();
-        cfg.overlay_ssm_json(
-            r#"{"ZANKYO_BUCKET":"b","ZANKYO_DISABLED":"true","ZANKYO_MAX_EVENT_KB":"64","ZANKYO_PUT_TIMEOUT_MS":"oops","ZANKYO_FLUSH_BUDGET_MS":0}"#,
-        )
-        .unwrap();
-        assert_eq!(cfg.bucket, "b");
-        assert!(cfg.disabled); // 文字列 "true" も受理
-        assert_eq!(cfg.max_event_kb, 64); // 文字列数値も受理
-        assert_eq!(cfg.put_timeout_ms, DEFAULT_PUT_TIMEOUT_MS); // 型違いは既定値のまま
-        assert_eq!(cfg.flush_budget_ms, DEFAULT_FLUSH_BUDGET_MS); // 0 は拒否
     }
 }

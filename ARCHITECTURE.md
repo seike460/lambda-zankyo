@@ -26,7 +26,8 @@ zankyo バイナリを起動し、zankyo が実際の runtime を子プロセス
 | `main.rs` | exec wrapper 起点。argv 解釈と logging 初期化のみ |
 | `setup.rs` | 起動判定（env + SSM overlay → `StartupPlan`）と Recorder 構築 |
 | `orchestrate.rs` | Record 確定後の配線。listen・子プロセス・extension・spill 回復を直線で起動 |
-| `proxy.rs` | Runtime API の経路判定。イベント観測と失敗確定 |
+| `proxy.rs` | Runtime API の listen・経路判定・接続管理 |
+| `handlers.rs` | `/next`・`/response`・`/error`・`/init/error` の個別処理。イベント観測と失敗記録の起動 |
 | `upstream.rs` | 上流 Runtime API への転送。hop-by-hop 除去と上限付きボディ読み |
 | `extension.rs` | Extensions API。SHUTDOWN で in-flight を flush（reason ごとに errorType を分ける） |
 | `inflight.rs` | `/next`〜確定までのイベント保持（Mutex<HashMap>） |
@@ -35,7 +36,8 @@ zankyo バイナリを起動し、zankyo が実際の runtime を子プロセス
 | `record.rs` | 保存レコードのスキーマ生成（serde） |
 | `scrub.rs` | PII マスキング。denylist + パターンの純粋ロジック |
 | `scrub_data.rs` | scrub の判定データ。denylist と検出パターンをコードから分離し、追加はテーブルの 1 エントリで完結させる |
-| `config.rs` | env / SSM JSON の設定解決。env 名はここに集約 |
+| `config.rs` | env 由来の設定解決と既定値。env 名はここに集約 |
+| `ssm_overlay.rs` | SSM JSON overlay。数値キーはテーブル駆動でキー追加は 1 行 |
 | `runtime.rs` | 子プロセス起動（passthrough / proxy 経由）と終了コード変換 |
 | `ssm.rs` | SSM Parameter Store 取得（10s timeout、fail-open） |
 | `error.rs` | `ZankyoError` と `Result` の統一型 |
@@ -46,9 +48,10 @@ zankyo バイナリを起動し、zankyo が実際の runtime を子プロセス
 - **scrub 対象を増やす**: `ZANKYO_SCRUB_FIELDS` にフィールド名を足す
   （コード不要）。パターン自体を足す場合は `scrub_data.rs` の
   テーブルに 1 エントリ追加するだけ。
-- **設定項目を増やす**: `config.rs` の `Config` と env 読み取り、
-  `overlay_ssm_json` の per-key ディスパッチに 1 項目追加
-  （SSM overlay はフィールド単位でパースするため、
+- **設定項目を増やす**: `config.rs` の `Config` と env 読み取りに
+  追加。SSM overlay 側は数値キーなら `ssm_overlay.rs` の
+  `SSM_NUM_FIELDS` に 1 行、それ以外は match に 1 アーム追加
+  （フィールド単位でパースするため、
   1 キーの書き損じで設定全体が捨てられない）。
 - **CLI コマンドを増やす**: `cli/src/commands/` に 1 ファイル追加し、
   `bin.ts` のディスパッチに 1 行登録。AWS 境界は `ports.ts` の
