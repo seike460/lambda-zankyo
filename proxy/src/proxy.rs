@@ -228,6 +228,37 @@ pub(crate) fn boxed_response(mut resp: Response<Incoming>) -> Response<BoxedBody
     resp.map(|b| b.boxed())
 }
 
+/// drain 中に新たな save が増えないか確認する待機間隔。
+const DRAIN_POLL: std::time::Duration = std::time::Duration::from_millis(10);
+
+/// 積まれた save タスクが空になるまで待つ。全体で `budget` まで —
+/// S3 が応答しない環境で子プロセスの終了を無制限に遅らせない。
+/// pending を closed にしてから join するので、drain 中に到着した
+/// save は JoinSet ではなくハンドラ側のインライン実行になり、
+/// それらも `active` が 0 になるまで待ち合わせる。
+pub(crate) async fn drain_pending(state: &ProxyState, budget: std::time::Duration) {
+    let drain = async {
+        {
+            let mut p = state.pending.lock().await;
+            p.closed = true;
+            while let Some(res) = p.set.join_next().await {
+                // panic した save はレコードを失う — 数えて警告に残す
+                if let Err(e) = res {
+                    warn!(error = %e, "pending record save panicked");
+                }
+            }
+        }
+        // closed 以後にインライン化した save はハンドラの仕事として
+        // 残っているので、ハンドラが居なくなるまで待つ。
+        while state.active.load(std::sync::atomic::Ordering::SeqCst) > 0 {
+            tokio::time::sleep(DRAIN_POLL).await;
+        }
+    };
+    if tokio::time::timeout(budget, drain).await.is_err() {
+        warn!("pending record saves did not finish before exit");
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #[test]

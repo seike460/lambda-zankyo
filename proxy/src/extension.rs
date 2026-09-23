@@ -124,8 +124,11 @@ pub async fn run_event_loop(
                 // （/error が先ならイベント付き handler_error が記録され、
                 // こちらは drain に残らないので両方ともイベントが残る）
                 for inv in pending {
+                    // None はシリアライズ失敗＝残せない。warn に残す。
                     if let Some(j) = recorder.stage_timeout(&inv, reason.as_deref()) {
                         jobs.push(j);
+                    } else {
+                        warn!(request_id = %inv.request_id, "failed to stage timed-out record");
                     }
                 }
                 // パス2: 残予算内で PUT。間に合わない分は spill が残り、

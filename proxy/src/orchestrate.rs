@@ -10,7 +10,7 @@ use std::sync::Arc;
 use tokio::net::TcpListener;
 use tokio::process::Child;
 use tokio::task::JoinHandle;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use crate::extension;
 use crate::inflight::InFlight;
@@ -19,8 +19,6 @@ use crate::runtime::{exit_code, passthrough, spawn_via_proxy};
 use crate::setup::{self, RecordPlan, StartupPlan};
 use crate::store::Recorder;
 
-/// pending drain 中に新たな save が増えないか確認する待機間隔。
-const DRAIN_POLL: std::time::Duration = std::time::Duration::from_millis(10);
 /// drain 用の時間枠に加える余白。put_timeout ちょうどだと
 /// 最後の 1 件が送信完了前に打ち切られうるため。
 const DRAIN_SLACK_MS: u64 = 1_000;
@@ -111,7 +109,14 @@ pub async fn run(argv: &[OsString]) -> u8 {
     if let Some(h) = pending_shutdown {
         if !state.inflight.is_empty() {
             let grace = state.cfg.flush_budget_ms.min(SHUTDOWN_GRACE_CAP_MS);
-            let _ = tokio::time::timeout(std::time::Duration::from_millis(grace), h).await;
+            // 猶予切れは想定内: extension 側がまだ処理中なら
+            // そのまま drain_and_claim 側で拾う。
+            if tokio::time::timeout(std::time::Duration::from_millis(grace), h)
+                .await
+                .is_err()
+            {
+                debug!("shutdown grace elapsed; spilling remaining in-flight");
+            }
         }
     }
     // 残った呼び出し（ランタイムクラッシュ・SHUTDOWN 未到着・
@@ -120,14 +125,17 @@ pub async fn run(argv: &[OsString]) -> u8 {
     // recover_spills が回収する方が確実。
     // drain_and_claim で SHUTDOWN フラッシュとの取り合いも一意に決まる。
     for inv in state.inflight.drain_and_claim() {
-        let _ = state.recorder.stage_timeout(&inv, None);
+        // None はシリアライズ失敗＝このレコードは残せない。warn に残す。
+        if state.recorder.stage_timeout(&inv, None).is_none() {
+            warn!(request_id = %inv.request_id, "failed to stage timed-out record");
+        }
     }
     // 新規接続を止めてから、残ったハンドラと save を待つ。
     // 応答は返したが save が未完了のレコードを、runtime 解体前に
     // 一定時間だけ待って拾い切る（init_error は POST 直後に子が
     // 終了するため、ここを設けないと構造的に記録が失われる）。
     server.abort();
-    drain_pending(&state, drain_budget).await;
+    crate::proxy::drain_pending(&state, drain_budget).await;
     code
 }
 
@@ -201,33 +209,5 @@ async fn wait_for_exit(
                 (exit_code(child.wait().await), None)
             }
         },
-    }
-}
-
-/// 積まれた save タスクが空になるまで待つ。全体で `budget` まで —
-/// S3 が応答しない環境で子プロセスの終了を無制限に遅らせない。
-/// pending を closed にしてから join するので、drain 中に到着した
-/// save は JoinSet ではなくハンドラ側のインライン実行になり、
-/// それらも `active` が 0 になるまで待ち合わせる。
-async fn drain_pending(state: &ProxyState, budget: std::time::Duration) {
-    let drain = async {
-        {
-            let mut p = state.pending.lock().await;
-            p.closed = true;
-            while let Some(res) = p.set.join_next().await {
-                // panic した save はレコードを失う — 数えて警告に残す
-                if let Err(e) = res {
-                    warn!(error = %e, "pending record save panicked");
-                }
-            }
-        }
-        // closed 以後にインライン化した save はハンドラの仕事として
-        // 残っているので、ハンドラが居なくなるまで待つ。
-        while state.active.load(std::sync::atomic::Ordering::SeqCst) > 0 {
-            tokio::time::sleep(DRAIN_POLL).await;
-        }
-    };
-    if tokio::time::timeout(budget, drain).await.is_err() {
-        warn!("pending record saves did not finish before exit");
     }
 }
