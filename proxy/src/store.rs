@@ -198,7 +198,8 @@ impl Recorder {
     /// 元の S3 キーを再構成する。送れたものだけ削除するため冪等に再実行できる。
     pub async fn recover_spills(&self) {
         let dir = Path::new(&self.cfg.spill_dir);
-        for (path, body, key) in spill::pending(dir) {
+        let max_age = Duration::from_secs(self.cfg.spill_max_age_secs);
+        for (path, body, key) in spill::pending(dir, max_age) {
             match tokio::time::timeout(self.put_timeout(), self.put(&key, body)).await {
                 Ok(Ok(())) => {
                     let _ = std::fs::remove_file(&path);

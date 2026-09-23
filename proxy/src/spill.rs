@@ -35,7 +35,9 @@ pub fn write(dir: &str, max_files: usize, request_id: &str, body: &[u8]) {
 /// 回収待ちの spill を (path, body, s3_key) で列挙する。
 /// 壊れた JSON や必須フィールド欠落は永遠に復旧できないため、
 /// ここで削除する（残すと rerun のたびに積み上がる stale 残滓になる）。
-pub fn pending(dir: &Path) -> Vec<(PathBuf, Vec<u8>, String)> {
+/// `max_age` を超えたファイルも再送せず破棄する（古い記録の遅れ再送は
+/// 保存先の時系列を混乱させるだけで復旧価値が薄い）。
+pub fn pending(dir: &Path, max_age: Duration) -> Vec<(PathBuf, Vec<u8>, String)> {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return Vec::new(); // ディレクトリ自体が無い = 退避なし
     };
@@ -48,6 +50,12 @@ pub fn pending(dir: &Path) -> Vec<(PathBuf, Vec<u8>, String)> {
             continue;
         }
         if ext != Some("json") {
+            continue;
+        }
+        if is_expired(&path, max_age) {
+            if std::fs::remove_file(&path).is_ok() {
+                warn!(path = %path.display(), "dropping expired spilled record");
+            }
             continue;
         }
         let Ok(body) = std::fs::read(&path) else {
@@ -65,16 +73,20 @@ pub fn pending(dir: &Path) -> Vec<(PathBuf, Vec<u8>, String)> {
     out
 }
 
-/// クラッシュで残った `.part` を消す。猶予時間内のものは
-/// 書き込み途中かもしれないので触らない。
-fn sweep_orphan_part(path: &Path) {
-    let old_enough = path
-        .metadata()
+/// ファイルの経過時間が `max_age` を超えているか。
+/// mtime が取れない/未来の場合は期限切れとみなさない（消しすぎない）。
+fn is_expired(path: &Path, max_age: Duration) -> bool {
+    path.metadata()
         .and_then(|m| m.modified())
         .ok()
         .and_then(|t| t.elapsed().ok())
-        .is_some_and(|age| age > PART_ORPHAN_GRACE);
-    if old_enough && std::fs::remove_file(path).is_ok() {
+        .is_some_and(|age| age > max_age)
+}
+
+/// クラッシュで残った `.part` を消す。猶予時間内のものは
+/// 書き込み途中かもしれないので触らない。
+fn sweep_orphan_part(path: &Path) {
+    if is_expired(path, PART_ORPHAN_GRACE) && std::fs::remove_file(path).is_ok() {
         warn!(path = %path.display(), "dropping orphaned partial spill");
     }
 }
@@ -225,9 +237,46 @@ mod tests {
             .unwrap()
             .set_modified(std::time::SystemTime::UNIX_EPOCH)
             .unwrap();
-        let items = pending(&dir);
+        let items = pending(&dir, Duration::from_secs(3600));
         assert!(items.is_empty());
         assert!(!orphan.exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn pending_drops_expired_records() {
+        let dir = std::env::temp_dir().join(format!("zankyo-exp-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let old = dir.join("old.json");
+        std::fs::write(
+            &old,
+            br#"{"functionName":"fn","requestId":"r1","invokedAt":"2026-09-22T01:02:03Z"}"#,
+        )
+        .unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&old)
+            .unwrap()
+            .set_modified(std::time::SystemTime::UNIX_EPOCH)
+            .unwrap();
+        // max_age 1 時間では期限切れ → 再送対象にならず消える
+        let items = pending(&dir, Duration::from_secs(3600));
+        assert!(items.is_empty());
+        assert!(!old.exists());
+        // max_age が十分大きければ再送対象になる
+        std::fs::write(
+            &old,
+            br#"{"functionName":"fn","requestId":"r1","invokedAt":"2026-09-22T01:02:03Z"}"#,
+        )
+        .unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&old)
+            .unwrap()
+            .set_modified(std::time::SystemTime::UNIX_EPOCH)
+            .unwrap();
+        let items = pending(&dir, Duration::from_secs(u64::MAX / 2));
+        assert_eq!(items.len(), 1);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -247,7 +296,7 @@ mod tests {
         let missing = dir.join("missing.json");
         std::fs::write(&missing, br#"{"functionName":"fn"}"#).unwrap();
 
-        let items = pending(&dir);
+        let items = pending(&dir, Duration::from_secs(3600));
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].2, "zankyo/fn/2026/09/22/r1.json");
         // 復旧不能なものはその場で消え、次回以降残滓として残らない

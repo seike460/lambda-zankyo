@@ -11,11 +11,14 @@ import type {
  * コマンドテスト用フェイク。ports.ts の構造的ポートをそのまま満たす
  * ので SDK 型への cast は一切要らない。
  */
+const EMPTY_PAGE: RecordListPage = {};
+const EMPTY_RESULT: InvokeResult = {};
+
 export function fakeS3(listPages: RecordListPage[], getBody?: string): RecordReader {
   let calls = 0;
   return {
     async listObjectsV2() {
-      const page = listPages[Math.min(calls, listPages.length - 1)] ?? {};
+      const page = listPages[Math.min(calls, listPages.length - 1)] ?? EMPTY_PAGE;
       calls += 1;
       return page;
     },
@@ -47,7 +50,7 @@ export function fakeLambdaSeq(outs: InvokeResult[]): FunctionInvoker {
   let calls = 0;
   return {
     async invoke() {
-      return outs[Math.min(calls++, outs.length - 1)] ?? {};
+      return outs[Math.min(calls++, outs.length - 1)] ?? EMPTY_RESULT;
     },
   };
 }

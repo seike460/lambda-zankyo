@@ -37,6 +37,10 @@ pub const DEFAULT_FORWARD_TIMEOUT_MS: u64 = 60_000;
 /// spill 再送の間隔（ms）。起動時だけでなく生存中も定期的に
 /// /tmp を空に戻し、S3 の一時障害からの回復を早める。
 pub const DEFAULT_SPILL_RETRY_MS: u64 = 60_000;
+/// spill ファイルの有効期間（秒）。sandbox の /tmp は短命なので
+/// 実際にはほぼ発動しないが、古すぎるレコードの遅れ再送で
+/// 記録順を混乱させないための上限。
+pub const DEFAULT_SPILL_MAX_AGE_SECS: u64 = 604_800;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ScrubMode {
@@ -69,6 +73,8 @@ pub struct Config {
     pub spill_max_files: usize,
     /// spill 再送を試みる間隔（ms）。
     pub spill_retry_ms: u64,
+    /// spill ファイルの有効期間（秒）。超過分は再送せず破棄する。
+    pub spill_max_age_secs: u64,
     /// Runtime API 経由で受け付けるボディの上限（KiB）。
     pub max_body_kb: usize,
     /// Extensions API イベントボディの上限（KiB）。
@@ -149,6 +155,7 @@ impl Config {
             spill_dir: DEFAULT_SPILL_DIR.to_string(),
             spill_max_files: DEFAULT_SPILL_MAX_FILES,
             spill_retry_ms: DEFAULT_SPILL_RETRY_MS,
+            spill_max_age_secs: DEFAULT_SPILL_MAX_AGE_SECS,
             max_body_kb: DEFAULT_MAX_BODY_KB,
             ext_body_kb: DEFAULT_EXT_BODY_KB,
             register_timeout_ms: DEFAULT_REGISTER_TIMEOUT_MS,
@@ -181,6 +188,9 @@ impl Config {
         }
         if let Some(v) = get("ZANKYO_SPILL_RETRY_MS") {
             cfg.spill_retry_ms = parse_u64("ZANKYO_SPILL_RETRY_MS", v)?;
+        }
+        if let Some(v) = get("ZANKYO_SPILL_MAX_AGE_SECS") {
+            cfg.spill_max_age_secs = parse_u64("ZANKYO_SPILL_MAX_AGE_SECS", v)?;
         }
         if let Some(v) = get("ZANKYO_MAX_BODY_KB") {
             cfg.max_body_kb = parse_usize("ZANKYO_MAX_BODY_KB", v)?;
@@ -223,6 +233,7 @@ impl Config {
             ("ZANKYO_PUT_TIMEOUT_MS", p.put_timeout_ms == Some(0)),
             ("ZANKYO_SPILL_MAX_FILES", p.spill_max_files == Some(0)),
             ("ZANKYO_SPILL_RETRY_MS", p.spill_retry_ms == Some(0)),
+            ("ZANKYO_SPILL_MAX_AGE_SECS", p.spill_max_age_secs == Some(0)),
             ("ZANKYO_MAX_BODY_KB", p.max_body_kb == Some(0)),
             ("ZANKYO_EXT_BODY_KB", p.ext_body_kb == Some(0)),
             (
@@ -272,6 +283,9 @@ impl Config {
         }
         if let Some(v) = p.spill_retry_ms {
             self.spill_retry_ms = v;
+        }
+        if let Some(v) = p.spill_max_age_secs {
+            self.spill_max_age_secs = v;
         }
         if let Some(v) = p.max_body_kb {
             self.max_body_kb = v;
@@ -324,6 +338,8 @@ struct Partial {
     spill_max_files: Option<usize>,
     #[serde(rename = "ZANKYO_SPILL_RETRY_MS")]
     spill_retry_ms: Option<u64>,
+    #[serde(rename = "ZANKYO_SPILL_MAX_AGE_SECS")]
+    spill_max_age_secs: Option<u64>,
     #[serde(rename = "ZANKYO_MAX_BODY_KB")]
     max_body_kb: Option<usize>,
     #[serde(rename = "ZANKYO_EXT_BODY_KB")]
