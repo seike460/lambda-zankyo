@@ -209,13 +209,32 @@ impl Recorder {
 
     fn spill(&self, request_id: &str, body: &[u8]) {
         let dir = &self.cfg.spill_dir;
-        let path = Path::new(dir).join(format!("{request_id}.json"));
+        let path = Path::new(dir).join(spill_filename(request_id));
         let result = std::fs::create_dir_all(dir).and_then(|_| std::fs::write(&path, body));
         match result {
             Ok(()) => info!(request_id, path = %path.display(), "record spilled to /tmp"),
             Err(e) => warn!(request_id, error = %e, "failed to spill record"),
         }
     }
+}
+
+/// requestId は外部入力（Runtime API ヘッダ）由来なので、ファイル名に
+/// 使える文字だけへ正規化する。`/` や `..` を含む値で spill_dir の
+/// 外へ書き出さないための防御。
+fn spill_filename(request_id: &str) -> String {
+    let clean: String = request_id
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let clean = clean.trim_start_matches('.');
+    let name = if clean.is_empty() { "record" } else { clean };
+    format!("{name}.json")
 }
 
 /// spill した record JSON から S3 キーを再構成する。
@@ -250,5 +269,15 @@ mod tests {
     fn key_for_spilled_rejects_malformed() {
         assert_eq!(key_for_spilled(b"not json"), None);
         assert_eq!(key_for_spilled(br#"{"functionName":"fn"}"#), None);
+    }
+
+    #[test]
+    fn spill_filename_strips_path_separators() {
+        assert_eq!(spill_filename("req-123"), "req-123.json");
+        // `.` `/` `\` は全て `_` へ潰れるので traversal できない
+        assert_eq!(spill_filename("../../etc/passwd"), "______etc_passwd.json");
+        assert_eq!(spill_filename("a/b\\c"), "a_b_c.json");
+        assert_eq!(spill_filename(""), "record.json");
+        assert_eq!(spill_filename("../.."), "_____.json");
     }
 }

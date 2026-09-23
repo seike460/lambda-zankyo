@@ -304,7 +304,9 @@ async fn handle_init_error(
     resp.map(|b| b.boxed())
 }
 
-/// 本来の Runtime API へ転送する。host/content-length はこちらの値に張り替える。
+/// 本来の Runtime API へ転送する。host/content-length はこちらの値に
+/// 張り替え、hop-by-hop ヘッダ（connection 等）は上流へ渡さない。
+/// ボディは collect 済みなので chunked 関連ヘッダは意味を失う。
 async fn forward(
     st: &ProxyState,
     method: &Method,
@@ -318,7 +320,7 @@ async fn forward(
     let mut builder = Request::builder().method(method).uri(uri);
     if let Some(h) = builder.headers_mut() {
         for (k, v) in headers.iter() {
-            if k == HOST || k == CONTENT_LENGTH {
+            if k == HOST || k == CONTENT_LENGTH || HOP_BY_HOP.contains(&k.as_str()) {
                 continue;
             }
             h.append(k.clone(), v.clone());
@@ -333,6 +335,19 @@ async fn forward(
         .await
         .map_err(|e| ZankyoError::Upstream(e.to_string()))
 }
+
+/// RFC 9110 §7.6.1 の hop-by-hop ヘッダ。プロキシがそのまま転送すると
+/// 上流の接続管理を壊すため必ず落とす。
+const HOP_BY_HOP: [&str; 8] = [
+    "connection",
+    "keep-alive",
+    "proxy-authenticate",
+    "proxy-authorization",
+    "te",
+    "trailer",
+    "transfer-encoding",
+    "upgrade",
+];
 
 enum CollectError {
     TooLarge,

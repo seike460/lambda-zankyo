@@ -53,8 +53,13 @@ pub async fn register(client: &HttpClient, upstream_api: &str) -> Result<String>
         })
 }
 
+/// Extensions API のイベントボディ上限。INVOKE/SHUTDOWN 通知は
+/// 数百バイトのメタデータだけなので 1MiB あれば十分。
+const EVENT_BODY_LIMIT: usize = 1024 * 1024;
+
 /// `/event/next` はイベント到着までブロックするロングポーリング。
 /// タイムアウトを付けない（イベントなし＝正常な待機）。
+/// ボディは異常なサイズを読まないよう上限付きで読む。
 pub async fn next_event(
     client: &HttpClient,
     upstream_api: &str,
@@ -69,11 +74,10 @@ pub async fn next_event(
         .request(req)
         .await
         .map_err(|e| ZankyoError::Upstream(e.to_string()))?;
-    let body = resp
-        .into_body()
+    let body = http_body_util::Limited::new(resp.into_body(), EVENT_BODY_LIMIT)
         .collect()
         .await
-        .map_err(ZankyoError::Hyper)?
+        .map_err(|e| ZankyoError::Upstream(format!("event body read failed: {e}")))?
         .to_bytes();
     Ok(serde_json::from_slice(&body)?)
 }

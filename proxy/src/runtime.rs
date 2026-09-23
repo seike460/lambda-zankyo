@@ -28,10 +28,11 @@ pub fn spawn_via_proxy(argv: &[OsString], port: u16) -> std::io::Result<Child> {
 }
 
 /// 子の終了ステータスをプロセスの終了コードに写す。
-/// code を持たない（シグナル終了等）・wait 自体の失敗は 1 に丸める。
+/// code を持たない（シグナル終了等）・wait 自体の失敗・u8 に
+/// 収まらない値は 1 に丸める。
 pub fn exit_code(status: std::io::Result<std::process::ExitStatus>) -> u8 {
     match status {
-        Ok(s) => s.code().map(|c| c as u8).unwrap_or(1),
+        Ok(s) => s.code().and_then(|c| u8::try_from(c).ok()).unwrap_or(1),
         Err(_) => 1,
     }
 }
