@@ -13,6 +13,9 @@ pub const DEFAULT_MAX_EVENT_KB: usize = 256;
 pub const DEFAULT_FLUSH_BUDGET_MS: u64 = 1_200;
 pub const DEFAULT_PUT_TIMEOUT_MS: u64 = 5_000;
 pub const DEFAULT_SPILL_DIR: &str = "/tmp/zankyo";
+/// spill dir に残すレコードの最大数。S3 が届かない状態が続いても
+/// /tmp を使い尽くさないよう、古いものから捨てる。
+pub const DEFAULT_SPILL_MAX_FILES: usize = 64;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ScrubMode {
@@ -41,6 +44,8 @@ pub struct Config {
     pub put_timeout_ms: u64,
     /// S3 失敗時・SHUTDOWN 時のローカル退避先。
     pub spill_dir: String,
+    /// spill dir に保持するファイル数の上限。超過分は古いものから破棄。
+    pub spill_max_files: usize,
     pub disabled: bool,
 }
 
@@ -91,6 +96,7 @@ impl Config {
             flush_budget_ms: DEFAULT_FLUSH_BUDGET_MS,
             put_timeout_ms: DEFAULT_PUT_TIMEOUT_MS,
             spill_dir: DEFAULT_SPILL_DIR.to_string(),
+            spill_max_files: DEFAULT_SPILL_MAX_FILES,
             disabled: false,
         };
         if let Some(v) = get("ZANKYO_SCRUB_FIELDS") {
@@ -110,6 +116,9 @@ impl Config {
         }
         if let Some(v) = get("ZANKYO_SPILL_DIR") {
             cfg.spill_dir = v.to_string();
+        }
+        if let Some(v) = get("ZANKYO_SPILL_MAX_FILES") {
+            cfg.spill_max_files = parse_usize("ZANKYO_SPILL_MAX_FILES", v)?;
         }
         if let Some(v) = get("ZANKYO_DISABLED") {
             cfg.disabled = parse_bool(v);
@@ -147,6 +156,9 @@ impl Config {
         if let Some(v) = p.spill_dir {
             self.spill_dir = v;
         }
+        if let Some(v) = p.spill_max_files {
+            self.spill_max_files = v;
+        }
         if let Some(v) = p.disabled {
             self.disabled = v;
         }
@@ -173,6 +185,8 @@ struct Partial {
     put_timeout_ms: Option<u64>,
     #[serde(rename = "ZANKYO_SPILL_DIR")]
     spill_dir: Option<String>,
+    #[serde(rename = "ZANKYO_SPILL_MAX_FILES")]
+    spill_max_files: Option<usize>,
     #[serde(rename = "ZANKYO_DISABLED")]
     disabled: Option<bool>,
 }

@@ -30,7 +30,7 @@ zankyo バイナリを起動し、zankyo が実際の runtime を子プロセス
 | `upstream.rs` | 上流 Runtime API への転送。hop-by-hop 除去と上限付きボディ読み |
 | `extension.rs` | Extensions API。SHUTDOWN(timeout) で in-flight を flush |
 | `inflight.rs` | `/next`〜確定までのイベント保持（Mutex<HashMap>） |
-| `store.rs` | S3 への PutObject。失敗時は spill_dir 退避＋起動時の再送 |
+| `store.rs` | S3 への PutObject。失敗時は spill_dir 退避＋起動時の再送＋保持数上限 |
 | `record.rs` | 保存レコードのスキーマ生成（serde） |
 | `scrub.rs` | PII マスキング。denylist + パターンの純粋ロジック |
 | `scrub_data.rs` | scrub の判定データ。denylist と検出パターンをコードから分離し、追加はテーブルの 1 エントリで完結させる |

@@ -212,8 +212,41 @@ impl Recorder {
         let path = Path::new(dir).join(spill_filename(request_id));
         let result = std::fs::create_dir_all(dir).and_then(|_| std::fs::write(&path, body));
         match result {
-            Ok(()) => info!(request_id, path = %path.display(), "record spilled to /tmp"),
+            Ok(()) => {
+                info!(request_id, path = %path.display(), "record spilled to /tmp");
+                enforce_spill_cap(Path::new(dir), self.cfg.spill_max_files);
+            }
             Err(e) => warn!(request_id, error = %e, "failed to spill record"),
+        }
+    }
+}
+
+/// spill dir の JSON ファイル数を `cap` 以下に抑える。
+/// S3 が届かない状態が続いても /tmp を使い尽くさないよう、
+/// 更新時刻の古いものから捨てる（新しい記録ほど復旧価値が高い前提）。
+fn enforce_spill_cap(dir: &Path, cap: usize) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let mut files: Vec<(std::time::SystemTime, std::path::PathBuf)> = entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("json"))
+        .map(|p| {
+            let mtime = p
+                .metadata()
+                .and_then(|m| m.modified())
+                .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+            (mtime, p)
+        })
+        .collect();
+    if files.len() <= cap {
+        return;
+    }
+    files.sort_by_key(|(mtime, _)| *mtime);
+    for (_, path) in files.iter().take(files.len() - cap) {
+        if std::fs::remove_file(path).is_ok() {
+            warn!(path = %path.display(), "spill cap reached; dropping oldest record");
         }
     }
 }
@@ -279,5 +312,29 @@ mod tests {
         assert_eq!(spill_filename("a/b\\c"), "a_b_c.json");
         assert_eq!(spill_filename(""), "record.json");
         assert_eq!(spill_filename("../.."), "_____.json");
+    }
+
+    #[test]
+    fn spill_cap_drops_oldest_files() {
+        use std::time::{Duration, SystemTime};
+        let dir = std::env::temp_dir().join(format!("zankyo-cap-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // 古→新の順に 3 ファイル、mtime を明示して順序を確定させる
+        for i in 0..3u64 {
+            let p = dir.join(format!("f{i}.json"));
+            std::fs::write(&p, b"{}").unwrap();
+            std::fs::File::options()
+                .write(true)
+                .open(&p)
+                .unwrap()
+                .set_modified(SystemTime::UNIX_EPOCH + Duration::from_secs(i + 1))
+                .unwrap();
+        }
+        enforce_spill_cap(&dir, 2);
+        // 最古の f0 だけが消え、新しい 2 つが残る
+        assert!(!dir.join("f0.json").exists());
+        assert!(dir.join("f1.json").exists());
+        assert!(dir.join("f2.json").exists());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
