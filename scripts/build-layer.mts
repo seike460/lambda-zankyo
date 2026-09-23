@@ -46,6 +46,12 @@ const builderArgv = () =>
     .split(/\s+/)
     .filter(Boolean);
 const skipBuild = process.env.SKIP_BUILD === '1';
+// 梱包専用（SKIP_BUILD=1）では builder に一切触れない。
+const [builderCmd, ...builderArgs] = skipBuild ? [undefined] : builderArgv();
+if (!skipBuild && !builderCmd) {
+  console.error('BUILDER is empty');
+  process.exit(1);
+}
 const EPOCH = new Date(0);
 
 for (const arch of arches) {
@@ -54,12 +60,7 @@ for (const arch of arches) {
     console.error(`unknown arch: ${arch}`);
     process.exit(1);
   }
-  if (!skipBuild) {
-    const [builderCmd, ...builderArgs] = builderArgv();
-    if (!builderCmd) {
-      console.error('BUILDER is empty');
-      process.exit(1);
-    }
+  if (!skipBuild && builderCmd) {
     console.log(`== building ${target} ==`);
     execFileSync(builderCmd, [...builderArgs, '--release', '--target', target, '-p', 'zankyo'], {
       cwd: ROOT,
