@@ -22,13 +22,14 @@ export async function invokeFunction(
   lambda: FunctionInvoker,
   functionTarget: string,
   /** 送信するペイロード。fixture.ts の eventPayload が作る
-   *  （JSON エンコード済み or 生テキスト）。 */
-  payload: string,
+   *  （JSON エンコード済み文字列・生テキスト・またはバイナリ）。 */
+  payload: string | Uint8Array,
 ): Promise<InvokeOutcome> {
+  const bytes = typeof payload === 'string' ? new TextEncoder().encode(payload) : payload;
   const out = await lambda
     .invoke({
       FunctionName: functionTarget,
-      Payload: new TextEncoder().encode(payload),
+      Payload: bytes,
     })
     .catch((e) => {
       // S3 側と同じく AWS 失敗は exit 3 で統一する（README の exit code 表）

@@ -51,6 +51,13 @@ export async function listRecordKeys(
     // --limit 指定時も新しい順に並べてから切るため、
     // 上限ページまでは必ず走査する。
   } while (token && refs.length < pageSize() * maxPages());
+  if (token) {
+    // 打ち切りを黙らせると --last が実際より古いレコードを
+    // 「最新」と答える。絞り込み手段を添えて stderr へ警告する。
+    console.error(
+      `zankyo: listing truncated at ${refs.length} objects; results may miss newer records — narrow with --function or increase ZANKYO_LIST_MAX_PAGES`,
+    );
+  }
   refs.sort((a, b) => (b.lastModified?.getTime() ?? 0) - (a.lastModified?.getTime() ?? 0));
   return opts.limit ? refs.slice(0, opts.limit) : refs;
 }
@@ -141,7 +148,9 @@ export async function resolveRecordKey(
   throw new CliError(
     `record not found for requestId: ${q.requestId}`,
     4,
-    'check `zankyo list` for available requestIds',
+    token
+      ? `listing was truncated at ${maxPages()} pages — retry with --function to narrow the scan`
+      : 'check `zankyo list` for available requestIds',
   );
 }
 

@@ -18,7 +18,7 @@ use std::time::{Duration, Instant};
 use time::OffsetDateTime;
 use tokio::net::TcpListener;
 use zankyo::config::Config;
-use zankyo::inflight::{InFlight, Invocation};
+use zankyo::inflight::{EventEncoding, InFlight, Invocation};
 use zankyo::proxy::{boxed_full, new_client, serve, BoxedBody, ProxyState};
 use zankyo::store::Recorder;
 
@@ -376,7 +376,7 @@ async fn shutdown_flushes_inflight_as_timeout() {
     inflight.insert(Invocation {
         request_id: "req-timeout".to_string(),
         event: json!({"token": "secret-token-value", "input": 7}),
-        event_is_raw: false,
+        encoding: EventEncoding::Json,
         invoked_at: OffsetDateTime::now_utc(),
     });
     let spill_dir = std::env::temp_dir().join(format!("zankyo-it-shutdown-{}", std::process::id()));
@@ -433,6 +433,159 @@ async fn non_runtime_paths_are_forwarded_without_recording() {
     );
     tokio::time::sleep(Duration::from_millis(300)).await;
     assert!(captured(&s3_hits).is_empty());
+}
+
+#[tokio::test]
+async fn raw_text_event_is_recorded_verbatim() {
+    // 非 JSON だが UTF-8 のイベントは生テキストで保持する
+    let (api_addr, _api) = spawn_mock(|method, path, _h, _b| {
+        if method == "GET" && path == "/2018-06-01/runtime/invocation/next" {
+            return Response::builder()
+                .status(StatusCode::OK)
+                .header("lambda-runtime-aws-request-id", "req-raw")
+                .body(boxed_full(Bytes::from("<xml>not json</xml>")))
+                .unwrap();
+        }
+        ok_empty()
+    })
+    .await;
+    let (s3_addr, s3_hits) = spawn_mock(|_m, _p, _h, _b| ok_empty()).await;
+    let inflight = Arc::new(InFlight::new());
+    let proxy = spawn_proxy(&api_addr, inflight, recorder_to(&s3_addr)).await;
+
+    call(
+        &proxy,
+        Method::GET,
+        "/2018-06-01/runtime/invocation/next",
+        None,
+    )
+    .await;
+    call(
+        &proxy,
+        Method::POST,
+        "/2018-06-01/runtime/invocation/req-raw/error",
+        Some(json!({"errorType": "E", "errorMessage": "x"})),
+    )
+    .await;
+    assert!(wait_for(2_000, || !captured(&s3_hits).is_empty()).await);
+    let (_, _, body) = captured(&s3_hits).remove(0);
+    let rec: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(rec["eventIsRawText"], true);
+    assert_eq!(rec["event"], "<xml>not json</xml>");
+}
+
+#[tokio::test]
+async fn binary_event_is_stored_as_base64() {
+    // UTF-8 でないイベントは base64 で保持し、デコードで元バイト列が復元できる
+    let original: &[u8] = &[0x89, 0x50, 0x4e, 0x47, 0x00, 0xff, 0xfe];
+    let (api_addr, _api) = spawn_mock(move |method, path, _h, _b| {
+        if method == "GET" && path == "/2018-06-01/runtime/invocation/next" {
+            return Response::builder()
+                .status(StatusCode::OK)
+                .header("lambda-runtime-aws-request-id", "req-bin")
+                .body(boxed_full(Bytes::from_static(original)))
+                .unwrap();
+        }
+        ok_empty()
+    })
+    .await;
+    let (s3_addr, s3_hits) = spawn_mock(|_m, _p, _h, _b| ok_empty()).await;
+    let inflight = Arc::new(InFlight::new());
+    let proxy = spawn_proxy(&api_addr, inflight, recorder_to(&s3_addr)).await;
+
+    call(
+        &proxy,
+        Method::GET,
+        "/2018-06-01/runtime/invocation/next",
+        None,
+    )
+    .await;
+    call(
+        &proxy,
+        Method::POST,
+        "/2018-06-01/runtime/invocation/req-bin/error",
+        Some(json!({"errorType": "E", "errorMessage": "x"})),
+    )
+    .await;
+    assert!(wait_for(2_000, || !captured(&s3_hits).is_empty()).await);
+    let (_, _, body) = captured(&s3_hits).remove(0);
+    let rec: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(rec["eventIsBase64"], true);
+    let stored = rec["event"].as_str().expect("base64 event");
+    use base64::Engine;
+    let decoded = base64::engine::general_purpose::STANDARD
+        .decode(stored)
+        .unwrap();
+    assert_eq!(decoded, original);
+}
+
+#[tokio::test]
+async fn error_context_pii_is_scrubbed() {
+    // errorMessage に含まれる PII も scrubReport 集約でマスクされる
+    let (api_addr, _api) = spawn_mock(runtime_api_handler()).await;
+    let (s3_addr, s3_hits) = spawn_mock(|_m, _p, _h, _b| ok_empty()).await;
+    let inflight = Arc::new(InFlight::new());
+    let proxy = spawn_proxy(&api_addr, inflight, recorder_to(&s3_addr)).await;
+
+    call(
+        &proxy,
+        Method::GET,
+        "/2018-06-01/runtime/invocation/next",
+        None,
+    )
+    .await;
+    call(
+        &proxy,
+        Method::POST,
+        "/2018-06-01/runtime/invocation/req-123/error",
+        Some(json!({
+            "errorType": "E",
+            "errorMessage": "duplicate email alice@example.com"
+        })),
+    )
+    .await;
+    assert!(wait_for(2_000, || !captured(&s3_hits).is_empty()).await);
+    let (_, _, body) = captured(&s3_hits).remove(0);
+    let rec: Value = serde_json::from_slice(&body).unwrap();
+    let msg = rec["errorContext"]["errorMessage"].as_str().unwrap();
+    assert!(
+        !msg.contains("alice@example.com"),
+        "errorMessage should be scrubbed: {msg}"
+    );
+    assert!(msg.contains("***"));
+}
+
+#[tokio::test]
+async fn second_error_call_does_not_overwrite_record() {
+    // 同一 requestId の /error 再試行は記録済みフラグで抑止される
+    let (api_addr, _api) = spawn_mock(runtime_api_handler()).await;
+    let (s3_addr, s3_hits) = spawn_mock(|_m, _p, _h, _b| ok_empty()).await;
+    let inflight = Arc::new(InFlight::new());
+    let proxy = spawn_proxy(&api_addr, inflight, recorder_to(&s3_addr)).await;
+
+    call(
+        &proxy,
+        Method::GET,
+        "/2018-06-01/runtime/invocation/next",
+        None,
+    )
+    .await;
+    for _ in 0..2 {
+        call(
+            &proxy,
+            Method::POST,
+            "/2018-06-01/runtime/invocation/req-123/error",
+            Some(json!({"errorType": "E", "errorMessage": "x"})),
+        )
+        .await;
+    }
+    assert!(wait_for(2_000, || !captured(&s3_hits).is_empty()).await);
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let puts = captured(&s3_hits)
+        .into_iter()
+        .filter(|(m, p, _)| m == "PUT" && p.contains("req-123.json"))
+        .count();
+    assert_eq!(puts, 1);
 }
 
 #[tokio::test]

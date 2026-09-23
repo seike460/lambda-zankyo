@@ -47,7 +47,9 @@ zankyo バイナリを起動し、zankyo が実際の runtime を子プロセス
   （コード不要）。パターン自体を足す場合は `scrub_data.rs` の
   テーブルに 1 エントリ追加するだけ。
 - **設定項目を増やす**: `config.rs` の `Config` と env 読み取り、
-  SSM 用 `SsmConfig`（`ZANKYO_*` キー名で serde 対応済み）に 1 項目追加。
+  `overlay_ssm_json` の per-key ディスパッチに 1 項目追加
+  （SSM overlay はフィールド単位でパースするため、
+  1 キーの書き損じで設定全体が捨てられない）。
 - **CLI コマンドを増やす**: `cli/src/commands/` に 1 ファイル追加し、
   `bin.ts` のディスパッチに 1 行登録。AWS 境界は `ports.ts` の
   構造的ポート（`RecordReader`/`FunctionInvoker`）に閉じ、SDK 適合は

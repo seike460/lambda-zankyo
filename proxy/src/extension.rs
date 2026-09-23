@@ -115,13 +115,24 @@ pub async fn run_event_loop(
                 // deadlineMs が来ない環境では設定値のみで判断する。
                 let budget = flush_budget_for(ev.deadline_ms, recorder.flush_budget());
                 let reason = ev.shutdown_reason.clone();
-                let flush = async {
-                    for inv in pending {
-                        // /error 処理が先行して記録済みの呼び出しは
-                        // 飛ばす — 同一 S3 キーへの二重記録を防ぐ。
-                        if inflight.claim_record(&inv.request_id) {
-                            recorder.save_during_shutdown(inv, reason.as_deref()).await;
+                // パス1: 全件を同期で /tmp へ退避する。最初の PUT が予算を
+                // 食い潰すと 2 件目以降が spill すらされず消えるため、
+                // 書き込みが速い spill を先に済ませてから PUT に入る。
+                let mut jobs = Vec::new();
+                for inv in pending {
+                    // /error 処理が先行して記録済みの呼び出しは
+                    // 飛ばす — 同一 S3 キーへの二重記録を防ぐ。
+                    if inflight.claim_record(&inv.request_id) {
+                        if let Some(j) = recorder.stage_timeout(&inv, reason.as_deref()) {
+                            jobs.push(j);
                         }
+                    }
+                }
+                // パス2: 残予算内で PUT。間に合わない分は spill が残り、
+                // 次回 init の recover_spills が回収する。
+                let flush = async {
+                    for job in &jobs {
+                        recorder.commit_staged(job).await;
                     }
                 };
                 if tokio::time::timeout(budget, flush).await.is_err() {

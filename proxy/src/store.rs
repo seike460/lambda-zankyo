@@ -4,7 +4,7 @@
 
 use crate::config::Config;
 use crate::error::{Result, ZankyoError};
-use crate::inflight::Invocation;
+use crate::inflight::{EventEncoding, Invocation};
 use crate::record::{
     s3_key, to_json_bytes, truncate_event, ErrorContext, FailureRecord, FailureType,
     ScrubReportJson, RECORD_VERSION,
@@ -29,12 +29,20 @@ pub struct SaveInput {
     pub ctx: ErrorContext,
 }
 
-/// イベント本体と、それが生テキスト由来かの印。
+/// イベント本体とその保持形式。
 pub struct EventInput {
     pub value: Option<Value>,
-    /// 非 JSON ボディを生テキストで保持した場合 true。
-    /// レコードの eventIsRawText に写される。
-    pub raw_text: bool,
+    /// 非 JSON イベントの保持形式（生テキスト / base64）。
+    /// レコードの eventIsRawText / eventIsBase64 に写される。
+    pub encoding: EventEncoding,
+}
+
+/// `stage_timeout` が返す PUT 待ちジョブ。
+/// spill 済みのため、PUT が間に合わなくてもレコードは残る。
+pub struct StagedRecord {
+    pub request_id: String,
+    pub key: String,
+    pub body: Vec<u8>,
 }
 
 pub struct Recorder {
@@ -111,13 +119,15 @@ impl Recorder {
         }
     }
 
-    /// SHUTDOWN 経路。まず /tmp へ同期退避してから、
-    /// 残りの shutdown ウィンドウ内で S3 を試す（ベストエフォート）。
+    /// SHUTDOWN 経路の第1段。タイムアウトレコードを組み立てて
+    /// /tmp へ同期退避する。戻り値の StagedRecord を `commit_staged`
+    /// で PUT する二段構えにし、フラッシュ予算が尽きても
+    /// spill だけは全件残るようにする。
     /// `reason` は Extensions API の shutdownReason（timeout/failure/spindown）。
     /// failureType は SPEC の enum 3 値（handler_error/init_error/timeout）の
     /// 制約から常に `timeout` とし、「応答が返らないまま shutdown した」の意。
     /// 区別が必要な情報は errorContext.errorType（Timeout/Failure/Spindown）に写す。
-    pub async fn save_during_shutdown(&self, inv: Invocation, reason: Option<&str>) {
+    pub fn stage_timeout(&self, inv: &Invocation, reason: Option<&str>) -> Option<StagedRecord> {
         let ctx = ErrorContext {
             error_type: Some(shutdown_error_type(reason).to_string()),
             error_message: Some(format!(
@@ -131,29 +141,42 @@ impl Recorder {
             inv.invoked_at,
             FailureType::Timeout,
             EventInput {
-                value: Some(inv.event),
-                raw_text: inv.event_is_raw,
+                value: Some(inv.event.clone()),
+                encoding: inv.encoding,
             },
             None,
             ctx,
         );
         let Ok(body) = to_json_bytes(&rec) else {
-            return;
+            return None;
         };
         // 先にローカルへ落とす: PutObject がウィンドウに間に合わなくても
         // 実行環境の /tmp が同一 sandbox で再利用される場合に拾える
         self.spill(&inv.request_id, &body);
-        match tokio::time::timeout(self.flush_budget(), self.put(&key, body)).await {
+        Some(StagedRecord {
+            request_id: inv.request_id.clone(),
+            key,
+            body,
+        })
+    }
+
+    /// `stage_timeout` で spill 済みのレコードを S3 へ PUT する。
+    /// 届いたら spill を消す（残すと次回 init で同一キーへ冗長な PUT が走る）。
+    pub async fn commit_staged(&self, job: &StagedRecord) {
+        match tokio::time::timeout(self.flush_budget(), self.put(&job.key, job.body.clone())).await
+        {
             Ok(Ok(())) => {
-                info!(request_id = %inv.request_id, key, "timeout record saved during shutdown");
-                // S3 へ届いた spill は保険の役目を終えたので消す。
-                // 残すと次回 init で同一キーへ冗長な PUT が走る。
+                info!(request_id = %job.request_id, key = %job.key, "timeout record saved during shutdown");
                 let spill_path =
-                    Path::new(&self.cfg.spill_dir).join(spill::filename(&inv.request_id));
+                    Path::new(&self.cfg.spill_dir).join(spill::filename(&job.request_id));
                 let _ = std::fs::remove_file(spill_path);
             }
-            Ok(Err(e)) => warn!(request_id = %inv.request_id, error = %e, "shutdown flush failed"),
-            Err(_) => warn!(request_id = %inv.request_id, "shutdown flush exceeded budget"),
+            Ok(Err(e)) => {
+                warn!(request_id = %job.request_id, error = %e, "shutdown flush failed; spill kept")
+            }
+            Err(_) => {
+                warn!(request_id = %job.request_id, "shutdown flush exceeded budget; spill kept")
+            }
         }
     }
 
@@ -167,12 +190,27 @@ impl Recorder {
         ctx: ErrorContext,
     ) -> (FailureRecord, String) {
         let mut report = ScrubReport::default();
-        let event_is_raw = event.raw_text && event.value.is_some();
+        let has_event = event.value.is_some();
+        let event_is_raw = event.encoding == EventEncoding::RawText && has_event;
+        let event_is_b64 = event.encoding == EventEncoding::Base64 && has_event;
         let mut event_v = event.value.unwrap_or(Value::Null);
         self.scrubber.scrub(&mut event_v, &mut report);
         let mut response_v = response;
         if let Some(r) = response_v.as_mut() {
             self.scrubber.scrub(r, &mut report);
+        }
+        // errorMessage/stackTrace は自由テキストで、PII を含みうる。
+        // event/response と同じ scrubReport に集約して証跡化する。
+        let mut ctx = ctx;
+        for f in [
+            ctx.error_type.as_mut(),
+            ctx.error_message.as_mut(),
+            ctx.stack_trace.as_mut(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            *f = self.scrubber.scrub_text(f, &mut report);
         }
         let (event_v, truncated) = truncate_event(&event_v, self.cfg.max_event_kb);
         let rec = FailureRecord {
@@ -186,6 +224,7 @@ impl Recorder {
             response: response_v,
             error_context: ctx,
             event_is_raw_text: event_is_raw,
+            event_is_base64: event_is_b64,
             scrub_report: ScrubReportJson {
                 fields_redacted: report.fields_redacted,
                 patterns_applied: report.patterns_applied.into_iter().collect(),
@@ -228,8 +267,17 @@ impl Recorder {
                     let _ = std::fs::remove_file(&path);
                     info!(path = %path.display(), key, "recovered spilled record");
                 }
-                // S3 が届かない状態なら残りも同じ。次の再送に持ち越す
-                _ => break,
+                // 個別の PUT 失敗（当該キー固有の権限不足等）で残り全件を
+                // 試行しないと、1 件の壊れたレコードが後続を塞ぎ続ける。
+                Ok(Err(e)) => {
+                    warn!(path = %path.display(), error = %e, "spill record PUT failed; trying rest")
+                }
+                // タイムアウトは S3 不通の可能性が高く、残りも同じ結果に
+                // なる見込みが強い。次の再送周期に持ち越す。
+                Err(_) => {
+                    warn!(path = %path.display(), "spill PUT timed out; deferring rest");
+                    break;
+                }
             }
         }
         // 再送を試みた後で上限を適用する。先に絞ると、届くはずだった

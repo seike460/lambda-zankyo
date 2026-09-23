@@ -48,7 +48,9 @@ export function strList(v: unknown): string[] {
 export function resolveBucket(values: Record<string, unknown>): string {
   const fromFlag = strVal(values.bucket);
   const fromEnv = process.env.ZANKYO_BUCKET;
-  const bucket = fromFlag ?? fromEnv;
+  // 空文字は「未設定」と同じ扱いにする。"" をそのまま S3 へ
+  // 渡すと、原因の読みづらいエラーになる。
+  const bucket = fromFlag || fromEnv || undefined;
   if (!bucket) {
     throw new CliError(
       'bucket is not specified',

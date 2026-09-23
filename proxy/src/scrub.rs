@@ -186,6 +186,12 @@ impl Scrubber {
         hex::encode(&out[..8])
     }
 
+    /// 自由テキスト（errorMessage 等）に対するパターン置換。
+    /// denylist 照合はフィールド名を持たないテキストには適用しない。
+    pub fn scrub_text(&self, s: &str, report: &mut ScrubReport) -> String {
+        self.scrub_string(s, report)
+    }
+
     /// 文字列値の中に埋まったパターンを置き換える。
     fn scrub_string(&self, s: &str, report: &mut ScrubReport) -> String {
         let mut out = s.to_string();

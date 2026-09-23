@@ -27,16 +27,23 @@ export function fixtureJson(rec: ZankyoRecord): string {
   if (rec.eventIsRawText && typeof event === 'string') {
     return `${event}\n`;
   }
+  if (rec.eventIsBase64 && typeof event === 'string') {
+    return `${event}\n`;
+  }
   return `${JSON.stringify(event, null, 2)}\n`;
 }
 
 /**
- * replay/redrive/diff で Lambda へ送るペイロード文字列。
- * JSON イベントはエンコード、eventIsRawText の生テキストは原文のまま返す
- * （二重引用で包むと元イベントと異なる入力になる）。
+ * replay/redrive/diff で Lambda へ送るペイロード。
+ * JSON イベントはエンコード文字列、eventIsRawText の生テキストは原文のまま、
+ * eventIsBase64 は元のバイト列へデコードして返す
+ * （文字列化すると元イベントと異なる入力になる）。
  */
-export function eventPayload(rec: ZankyoRecord): string {
+export function eventPayload(rec: ZankyoRecord): string | Uint8Array {
   const event = buildFixtureEvent(rec);
+  if (rec.eventIsBase64 && typeof event === 'string') {
+    return Buffer.from(event, 'base64');
+  }
   if (rec.eventIsRawText && typeof event === 'string') {
     return event;
   }

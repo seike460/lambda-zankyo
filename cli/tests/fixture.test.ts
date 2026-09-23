@@ -53,6 +53,18 @@ describe('eventPayload', () => {
     assert.equal(eventPayload(raw), 'hello, world');
   });
 
+  it('decodes base64 events back to the original bytes', () => {
+    const original = new Uint8Array([0x89, 0x50, 0x4e, 0x47]);
+    const rec: ZankyoRecord = {
+      ...base,
+      event: Buffer.from(original).toString('base64'),
+      eventIsBase64: true,
+    };
+    const payload = eventPayload(rec);
+    assert.ok(payload instanceof Uint8Array);
+    assert.deepEqual([...payload], [...original]);
+  });
+
   it('still rejects truncated records', () => {
     assert.throws(() => eventPayload({ ...base, truncated: true }), CliError);
   });

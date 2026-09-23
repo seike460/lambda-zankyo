@@ -143,8 +143,13 @@ impl Config {
     pub fn from_env_map(env: &HashMap<String, String>) -> Result<Self> {
         let get = |k: &str| env.get(k).map(String::as_str);
         let mut cfg = Config {
+            // 空文字は「未設定」と同じ扱いにする。
+            // Some("") の kms_key は全 PutObject を失敗させ、
+            // "" の bucket は SSM 側の値を後から潰すだけになる。
             bucket: get("ZANKYO_BUCKET").unwrap_or_default().to_string(),
-            kms_key: get("ZANKYO_KMS_KEY").map(String::from),
+            kms_key: get("ZANKYO_KMS_KEY")
+                .filter(|s| !s.is_empty())
+                .map(String::from),
             ssm_param: get("ZANKYO_SSM_PARAM").map(String::from),
             scrub_fields: BTreeSet::new(),
             scrub_mode: ScrubMode::Mask,
@@ -180,7 +185,9 @@ impl Config {
             cfg.put_timeout_ms = parse_u64("ZANKYO_PUT_TIMEOUT_MS", v)?;
         }
         if let Some(v) = get("ZANKYO_SPILL_DIR") {
-            cfg.spill_dir = v.to_string();
+            if let Some(d) = valid_spill_dir(v) {
+                cfg.spill_dir = d;
+            }
         }
         if let Some(v) = get("ZANKYO_SPILL_MAX_FILES") {
             cfg.spill_max_files = parse_usize("ZANKYO_SPILL_MAX_FILES", v)?;
@@ -239,12 +246,21 @@ impl Config {
             match key.as_str() {
                 "ZANKYO_BUCKET" => {
                     if let Some(s) = ssm_str(key, val) {
-                        self.bucket = s;
+                        if s.is_empty() {
+                            // "" で env 側のバケットを消さない
+                            tracing::warn!(key, "empty bucket ignored");
+                        } else {
+                            self.bucket = s;
+                        }
                     }
                 }
                 "ZANKYO_KMS_KEY" => {
                     if let Some(s) = ssm_str(key, val) {
-                        self.kms_key = Some(s);
+                        if s.is_empty() {
+                            tracing::warn!(key, "empty KMS key id ignored");
+                        } else {
+                            self.kms_key = Some(s);
+                        }
                     }
                 }
                 "ZANKYO_SCRUB_FIELDS" => {
@@ -269,7 +285,9 @@ impl Config {
                 }
                 "ZANKYO_SPILL_DIR" => {
                     if let Some(s) = ssm_str(key, val) {
-                        self.spill_dir = s;
+                        if let Some(d) = valid_spill_dir(&s) {
+                            self.spill_dir = d;
+                        }
                     }
                 }
                 "ZANKYO_MAX_EVENT_KB" => {
@@ -353,6 +371,21 @@ fn ssm_str(key: &str, v: &serde_json::Value) -> Option<String> {
             None
         }
     }
+}
+
+/// spill ディレクトリ値の検証。空文字と相対パスを弾く。
+/// Lambda の CWD（/var/task）は read-only で、相対パスは
+/// create_dir_all が必ず失敗して spill が毎回 warn で落ちるため、
+/// 絶対パスだけを受理する。
+fn valid_spill_dir(v: &str) -> Option<String> {
+    if v.is_empty() || !std::path::Path::new(v).is_absolute() {
+        tracing::warn!(
+            value = v,
+            "ZANKYO_SPILL_DIR must be an absolute path; ignored"
+        );
+        return None;
+    }
+    Some(v.to_string())
 }
 
 /// SSM 値から真偽値を取る。bool のほか env と同じ文字列形式も受理。

@@ -5,12 +5,13 @@
 //! それ以外のパスは一切触らず中継する（成功呼び出しの観測コストを
 //! ゼロに近づけるため、ボディを読むのは失敗判定が必要な経路だけ）。
 
-use crate::inflight::{InFlight, Invocation};
+use crate::inflight::{EventEncoding, InFlight, Invocation};
 use crate::record::{
     error_context_from_body, init_request_id, response_error_context, FailureType,
 };
 use crate::store::{EventInput, Recorder, SaveInput};
 use crate::upstream::{collect_bounded, forward, plain, strip_hop_by_hop, CollectError};
+use base64::Engine;
 use bytes::Bytes;
 use http::{HeaderMap, Method, Request, Response, StatusCode};
 use http_body_util::{BodyExt, Full};
@@ -280,17 +281,23 @@ async fn handle_next(
             .unwrap_or_default()
             .to_string();
         if !request_id.is_empty() {
-            let (event, event_is_raw) = match serde_json::from_slice::<Value>(&bytes) {
-                Ok(v) => (v, false),
-                Err(_) => (
-                    Value::String(String::from_utf8_lossy(&bytes).into_owned()),
-                    true,
-                ),
+            // JSON でないイベントは UTF-8 なら生テキスト、それ以外は
+            // base64 で保持する。from_utf8_lossy は U+FFFD に潰れて
+            // replay で元イベントと異なる入力になるため使わない。
+            let (event, encoding) = match serde_json::from_slice::<Value>(&bytes) {
+                Ok(v) => (v, EventEncoding::Json),
+                Err(_) => match String::from_utf8(bytes.to_vec()) {
+                    Ok(s) => (Value::String(s), EventEncoding::RawText),
+                    Err(_) => (
+                        Value::String(base64::engine::general_purpose::STANDARD.encode(&bytes)),
+                        EventEncoding::Base64,
+                    ),
+                },
             };
             st.inflight.insert(Invocation {
                 request_id,
                 event,
-                event_is_raw,
+                encoding,
                 invoked_at: OffsetDateTime::now_utc(),
             });
         }
@@ -321,7 +328,14 @@ async fn handle_completion(
     // in-flight から外すのは forward の成否に関わらず行う。
     // 失敗時に残すと、完了した呼び出しが shutdown で timeout として
     // 二重記録される（再配達されれば別 requestId で来る）。
-    let inv = st.inflight.remove(rid);
+    // 失敗経路では remove と記録権の確保を原子的に行う — forward 中に
+    // 到着した 2 回目の /error が event 欠落のまま先に記録権を取り、
+    // イベント保持側の記録を捨てさせる競合を防ぐ。
+    let (inv, claimed) = if ctx.is_some() {
+        st.inflight.remove_and_claim(rid)
+    } else {
+        (st.inflight.remove(rid), false)
+    };
     let resp = forward_or_502(
         st,
         method,
@@ -338,10 +352,15 @@ async fn handle_completion(
         // 同一 requestId の失敗記録は 1 件。上流断で 502 を返した後の
         // ランタイム再試行や、SHUTDOWN drain との競合で event 欠落・
         // errorContext 欠落の記録が同一キーを上書きするのを防ぐ。
-        if st.inflight.claim_record(rid) {
-            let (event, event_is_raw, invoked_at, request_id) = match inv {
-                Some(i) => (Some(i.event), i.event_is_raw, i.invoked_at, i.request_id),
-                None => (None, false, OffsetDateTime::now_utc(), rid.to_string()),
+        if claimed {
+            let (event, encoding, invoked_at, request_id) = match inv {
+                Some(i) => (Some(i.event), i.encoding, i.invoked_at, i.request_id),
+                None => (
+                    None,
+                    EventEncoding::Json,
+                    OffsetDateTime::now_utc(),
+                    rid.to_string(),
+                ),
             };
             spawn_save(
                 &st.pending,
@@ -352,7 +371,7 @@ async fn handle_completion(
                     failure: FailureType::HandlerError,
                     event: EventInput {
                         value: event,
-                        raw_text: event_is_raw,
+                        encoding,
                     },
                     response: serde_json::from_slice::<Value>(&body).ok(),
                     ctx,
@@ -389,22 +408,27 @@ async fn handle_init_error(
     .await;
     // init error は転送できなくても記録する（このイベントは他経路では拾えない）
     let now = OffsetDateTime::now_utc();
-    spawn_save(
-        &st.pending,
-        st.recorder.clone(),
-        SaveInput {
-            request_id: init_request_id(&now),
-            invoked_at: now,
-            failure: FailureType::InitError,
-            event: EventInput {
-                value: None,
-                raw_text: false,
+    let rid = init_request_id(&now);
+    // 擬似 requestId は nanos 粒度だが、万一同じキーが来ても
+    // dedupe 集合で二重記録を防ぐ。
+    if st.inflight.claim_record(&rid) {
+        spawn_save(
+            &st.pending,
+            st.recorder.clone(),
+            SaveInput {
+                request_id: rid,
+                invoked_at: now,
+                failure: FailureType::InitError,
+                event: EventInput {
+                    value: None,
+                    encoding: EventEncoding::Json,
+                },
+                response: None,
+                ctx,
             },
-            response: None,
-            ctx,
-        },
-    )
-    .await;
+        )
+        .await;
+    }
     resp.map(boxed_response).unwrap_or_else(|r| *r)
 }
 

@@ -2529,6 +2529,7 @@ dependencies = [
  "aws-config",
  "aws-sdk-s3",
  "aws-sdk-ssm",
+ "base64",
  "bytes",
  "hex",
  "hmac 0.12.1",

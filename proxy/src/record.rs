@@ -74,6 +74,11 @@ pub struct FailureRecord {
     /// CLI は replay/redrive 時に JSON 再エンコードせず原文を送る。
     #[serde(rename = "eventIsRawText", default, skip_serializing_if = "is_false")]
     pub event_is_raw_text: bool,
+    /// イベントが UTF-8 でないバイナリの場合 true。
+    /// `event` は base64 文字列として保持され、CLI は replay 時に
+    /// デコードして元のバイト列を再送する。
+    #[serde(rename = "eventIsBase64", default, skip_serializing_if = "is_false")]
+    pub event_is_base64: bool,
     #[serde(rename = "scrubReport")]
     pub scrub_report: ScrubReportJson,
     #[serde(default, skip_serializing_if = "is_false")]
@@ -187,8 +192,9 @@ pub fn response_error_context(body: &[u8]) -> Option<ErrorContext> {
 }
 
 /// init error 用の擬似 requestId（実リクエストが存在しないため時刻由来）。
+/// nanos まで使い、同一ミリ秒の init リトライで S3 キーが衝突しないようにする。
 pub fn init_request_id(at: &OffsetDateTime) -> String {
-    format!("init-{}", at.unix_timestamp_nanos() / 1_000_000)
+    format!("init-{}", at.unix_timestamp_nanos())
 }
 
 pub fn to_json_bytes(rec: &FailureRecord) -> Result<Vec<u8>> {

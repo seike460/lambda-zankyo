@@ -142,8 +142,7 @@ s3://{ZANKYO_BUCKET}/zankyo/{function-name}/{yyyy}/{mm}/{dd}/{requestId}.json
   "event": { "…scrub 済みイベント…" },
   "response": { "…scrub 済み応答または error オブジェクト…" },
   "errorContext": { "errorType": "...", "errorMessage": "...", "stackTrace": "..." },
-  "scrubReport": { "fieldsRedacted": 12, "patternsApplied": ["email","jwt"] },
-  "truncated": false
+  "scrubReport": { "fieldsRedacted": 12, "patternsApplied": ["email","jwt"] }
 }
 ```
 
@@ -152,6 +151,9 @@ s3://{ZANKYO_BUCKET}/zankyo/{function-name}/{yyyy}/{mm}/{dd}/{requestId}.json
 - `eventIsRawText: true` — 元イベントが JSON でない生テキストの場合。
   `event` は文字列として保持され、replay/redrive/diff は JSON 再エンコードせず
   原文のままペイロードに使います。fixture はそのまま書き出します。
+- `eventIsBase64: true` — 元イベントが UTF-8 でないバイナリの場合。
+  `event` は base64 文字列として保持され、replay/redrive/diff は
+  デコードして元のバイト列を再送します。
 - `truncated: true` — イベントが `ZANKYO_MAX_EVENT_KB` を超えた場合。
   先頭のみ保持のため fixture/replay/redrive/diff はすべて対象外
   （部分イベントの replay は誤結果を生むため拒否）。

@@ -94,7 +94,26 @@ pub async fn run(argv: &[OsString]) -> u8 {
         state.recorder.clone(),
     ));
 
-    let code = wait_for_exit(&mut child, shutdown).await;
+    let (code, pending_shutdown) = wait_for_exit(&mut child, shutdown).await;
+    // 子が先に落ちた場合、Lambda がランタイム死亡を検知して SHUTDOWN を
+    // 配信するまで数十〜数百 ms ある。in-flight が残っているなら
+    // bounded に待って、extension 側の正式なフラッシュ（spill+PUT）に任せる。
+    // SHUTDOWN が来ない場合でも、次の spill で /tmp にだけは残す。
+    if let Some(h) = pending_shutdown {
+        if !state.inflight.is_empty() {
+            let grace = state.cfg.flush_budget_ms.min(1_000);
+            let _ = tokio::time::timeout(std::time::Duration::from_millis(grace), h).await;
+        }
+        // それでも残った呼び出し（ランタイムクラッシュ等）は
+        // SHUTDOWN 未到着でも /tmp へ同期退避する。
+        // PUT は試さない — プロセス終了が目前で、次回 init の
+        // recover_spills が回収する方が確実。
+        for inv in state.inflight.drain() {
+            if state.inflight.claim_record(&inv.request_id) {
+                state.recorder.stage_timeout(&inv, None);
+            }
+        }
+    }
     // 新規接続を止めてから、残ったハンドラと save を待つ。
     // 応答は返したが save が未完了のレコードを、runtime 解体前に
     // 一定時間だけ待って拾い切る（init_error は POST 直後に子が
@@ -159,14 +178,19 @@ async fn start_extension(
 /// 先に終わる場合は正常終了（0）として抜ける。ただし extension が
 /// SHUTDOWN 以外の理由（ポーリング断等）で終わった場合は、子プロセスの
 /// 完了を待ち続ける — ここで抜けると関数実行中に子を殺してしまう。
-async fn wait_for_exit(child: &mut Child, shutdown: JoinHandle<bool>) -> u8 {
+/// 戻り値の Some(handle) は「子が先に終わり extension が生存中」の場合で、
+/// 呼び出し側が SHUTDOWN 到着を短く待つ判断に使う。
+async fn wait_for_exit(
+    child: &mut Child,
+    mut shutdown: JoinHandle<bool>,
+) -> (u8, Option<JoinHandle<bool>>) {
     tokio::select! {
-        status = child.wait() => exit_code(status),
-        res = shutdown => match res {
-            Ok(true) => 0,
+        status = child.wait() => (exit_code(status), Some(shutdown)),
+        res = &mut shutdown => match res {
+            Ok(true) => (0, None),
             Ok(false) | Err(_) => {
                 warn!("extension loop ended without shutdown; still waiting on runtime");
-                exit_code(child.wait().await)
+                (exit_code(child.wait().await), None)
             }
         },
     }

@@ -48,3 +48,4 @@ thiserror = "2"
 time = { version = "0.3", features = ["formatting", "macros"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
+base64 = "0.22"

@@ -32,6 +32,8 @@ export interface ZankyoRecord {
   errorContext: ErrorContext;
   /** event が非 JSON ボディの生テキストのとき true（proxy が記録）。 */
   eventIsRawText?: boolean;
+  /** event が UTF-8 でないバイナリのとき true。event は base64 文字列。 */
+  eventIsBase64?: boolean;
   scrubReport?: ScrubReport;
   truncated?: boolean;
 }
