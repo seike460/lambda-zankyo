@@ -401,7 +401,7 @@ async fn shutdown_flushes_inflight_as_timeout() {
     // timeout 経路でも scrub は効く
     assert_eq!(rec["event"]["token"], "s***");
     // S3 へ届いた spill は成功時に掃除される（残すと次回 init で冗長 PUT）
-    let spill = spill_dir.join("req-timeout.json");
+    let spill = spill_dir.join("zankyo-req-timeout.json");
     assert!(!spill.exists());
     let _ = std::fs::remove_dir_all(&spill_dir);
 }

@@ -40,7 +40,7 @@ Lambda Service ──Runtime API──▶ zankyo proxy (Rust, Layer) ──▶ �
 in-flight イベントをメモリに保持し、Extensions API の `SHUTDOWN`
 （reason=timeout）受信時に S3 へ**ベストエフォート**でフラッシュします。
 shutdown ウィンドウに PutObject が間に合わない場合は取りこぼします。
-緩衝として `/tmp/zankyo/{requestId}.json` にも同期退避します
+緩衝として `/tmp/zankyo/<function>/{requestId}.json` にも同期退避します
 （取りこぼし頻度は計測・文書化対象。SPEC Open Questions #4）。
 
 ## 使い方
@@ -229,8 +229,9 @@ cargo fmt --all -- --check && cargo clippy -- -D warnings
 - CI の全 GitHub Actions はコミット SHA でピン留めしています
   （`.github/workflows/ci.yml` の `@<sha> # vN` コメント参照）。
 - `scripts/build-layer.mts` は決定的 zip を生成します: エントリの
-  mtime を epoch 0 に固定し、`zip -X` で拡張属性を捨て、エントリ順を
-  `LC_ALL=C sort` で安定化。同一バイナリからは同一 zip が出ます。
+  mtime を最古（zip 表現の下限 1980-01-01）に揃え、`zip -X` で
+  拡張属性を捨て、エントリ順を固定の引数順で渡します。
+  同一バイナリからは同一 zip が出ます。
 
 ## License
 

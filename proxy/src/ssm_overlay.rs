@@ -29,9 +29,6 @@ const SSM_NUM_FIELDS: &[(&str, NumSetter)] = &[
         c.register_timeout_ms = n
     }),
     ("ZANKYO_EXT_RETRY_MS", |c, n| c.ext_retry_ms = n),
-    ("ZANKYO_EXT_MAX_POLL_FAILURES", |c, n| {
-        c.ext_max_poll_failures = n as u32
-    }),
     ("ZANKYO_SSM_TIMEOUT_MS", |c, n| c.ssm_timeout_ms = n),
     ("ZANKYO_FORWARD_TIMEOUT_MS", |c, n| c.forward_timeout_ms = n),
 ];
@@ -104,6 +101,18 @@ impl Config {
                     if let Some(s) = ssm_str(key, val) {
                         if let Some(d) = valid_spill_dir(&s) {
                             self.spill_dir = d;
+                        }
+                    }
+                }
+                "ZANKYO_EXT_MAX_POLL_FAILURES" => {
+                    // u64 → u32 の変換は明示失敗にする。`as` だと
+                    // u32::MAX 超が wrap して意図しない小値になる。
+                    if let Some(n) = ssm_u64(key, val) {
+                        match u32::try_from(n) {
+                            Ok(n) => self.ext_max_poll_failures = n,
+                            Err(_) => {
+                                tracing::warn!(key, "SSM config value exceeds u32 range; ignored")
+                            }
                         }
                     }
                 }
@@ -212,5 +221,20 @@ mod tests {
         assert_eq!(cfg.max_event_kb, 64); // 文字列数値も受理
         assert_eq!(cfg.put_timeout_ms, DEFAULT_PUT_TIMEOUT_MS); // 型違いは既定値のまま
         assert_eq!(cfg.flush_budget_ms, DEFAULT_FLUSH_BUDGET_MS); // 0 は拒否
+    }
+
+    #[test]
+    fn ssm_ext_max_poll_failures_rejects_u32_overflow() {
+        // `as` キャストだと u32::MAX 超が wrap する。明示失敗で既定値を守る。
+        let mut cfg = Config::from_env_map(&env(&[])).unwrap();
+        cfg.overlay_ssm_json(r#"{"ZANKYO_EXT_MAX_POLL_FAILURES":5000000000}"#)
+            .unwrap();
+        assert_eq!(
+            cfg.ext_max_poll_failures,
+            crate::config::DEFAULT_EXT_MAX_POLL_FAILURES
+        );
+        cfg.overlay_ssm_json(r#"{"ZANKYO_EXT_MAX_POLL_FAILURES":42}"#)
+            .unwrap();
+        assert_eq!(cfg.ext_max_poll_failures, 42);
     }
 }

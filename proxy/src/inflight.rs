@@ -35,6 +35,9 @@ pub struct Invocation {
 /// 記録済み requestId の保持上限。長寿命環境で失敗が積み上がっても
 /// 無制限に増えないよう FIFO で間引く。dedupe の効く実用上の窓
 /// （同一 requestId の再試行間隔）より十分に大きい。
+/// 限界: evict された古い rid の /error が遅れて届くと dedupe が効かず
+/// event 欠落レコードで同一キーを上書きしうる。4096 件の失敗を挟んだ
+/// 遅延再送という限定条件のため、実害はほぼ無いが完全ではない。
 const RECORDED_CAP: usize = 4096;
 
 #[derive(Debug, Default)]

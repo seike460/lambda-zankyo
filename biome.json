@@ -4,6 +4,7 @@
   "files": {
     "includes": [
       "**/*.ts",
+      "**/*.mts",
       "**/*.js",
       "**/*.mjs",
       "**/*.json",

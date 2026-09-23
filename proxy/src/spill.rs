@@ -13,6 +13,11 @@ use tracing::{info, warn};
 /// 消さないための猶予（クラッシュ後の孤児だけを拾う）。
 const PART_ORPHAN_GRACE: Duration = Duration::from_secs(60);
 
+/// このツールが管理する spill ファイル名の接頭辞。
+/// ZANKYO_SPILL_DIR を共有ディレクトリ（/tmp 直下等）に向けた設定でも、
+/// 他ツール・他ユーザのファイルを回収・削除対象にしないための印。
+const MANAGED_PREFIX: &str = "zankyo-";
+
 /// 退避ファイルを書き、上限を超えたら古いものから捨てる。
 /// `.part` へ書いてから rename する: 定期回収が書き込み途中の
 /// 半端な JSON を読んで「復旧不能」として消す競合を防ぐ。
@@ -45,11 +50,15 @@ pub fn pending(dir: &Path, max_age: Duration) -> Vec<(PathBuf, Vec<u8>, String)>
     for entry in entries.flatten() {
         let path = entry.path();
         let ext = path.extension().and_then(|e| e.to_str());
+        // 自ツールの接頭辞を持たないファイルは一切触らない
+        // （共有ディレクトリ指定時の他者ファイルを消さない）。
         if ext == Some("part") {
-            sweep_orphan_part(&path);
+            if is_managed_part(&path) {
+                sweep_orphan_part(&path);
+            }
             continue;
         }
-        if ext != Some("json") {
+        if ext != Some("json") || !is_managed(&path) {
             continue;
         }
         if is_expired(&path, max_age) {
@@ -91,9 +100,24 @@ fn sweep_orphan_part(path: &Path) {
     }
 }
 
+/// ファイル名が自ツールの管理対象（spill JSON）か。
+fn is_managed(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|n| n.to_str())
+        .is_some_and(|n| n.starts_with(MANAGED_PREFIX))
+}
+
+/// `.part` 側の管理対象判定。書き込み中名は `.zankyo-*.json.part`。
+fn is_managed_part(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|n| n.to_str())
+        .is_some_and(|n| n.starts_with(&format!(".{MANAGED_PREFIX}")))
+}
+
 /// spill dir の JSON ファイル数を `cap` 以下に抑える。
 /// S3 が届かない状態が続いても /tmp を使い尽くさないよう、
 /// 更新時刻の古いものから捨てる（新しい記録ほど復旧価値が高い前提）。
+/// 接頭辞を持たないファイルは数えも消しもしない。
 pub fn enforce_cap(dir: &Path, cap: usize) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
@@ -101,7 +125,7 @@ pub fn enforce_cap(dir: &Path, cap: usize) {
     let mut files: Vec<(std::time::SystemTime, PathBuf)> = entries
         .flatten()
         .map(|e| e.path())
-        .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("json"))
+        .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("json") && is_managed(p))
         .map(|p| {
             let mtime = p
                 .metadata()
@@ -137,7 +161,7 @@ pub fn filename(request_id: &str) -> String {
         .collect();
     let clean = clean.trim_start_matches('.');
     let name = if clean.is_empty() { "record" } else { clean };
-    format!("{name}.json")
+    format!("{MANAGED_PREFIX}{name}.json")
 }
 
 /// spill した record JSON から S3 キーを再構成する。
@@ -177,12 +201,12 @@ mod tests {
 
     #[test]
     fn spill_filename_strips_path_separators() {
-        assert_eq!(filename("req-123"), "req-123.json");
+        assert_eq!(filename("req-123"), "zankyo-req-123.json");
         // `.` `/` `\` は全て `_` へ潰れるので traversal できない
-        assert_eq!(filename("../../etc/passwd"), "______etc_passwd.json");
-        assert_eq!(filename("a/b\\c"), "a_b_c.json");
-        assert_eq!(filename(""), "record.json");
-        assert_eq!(filename("../.."), "_____.json");
+        assert_eq!(filename("../../etc/passwd"), "zankyo-______etc_passwd.json");
+        assert_eq!(filename("a/b\\c"), "zankyo-a_b_c.json");
+        assert_eq!(filename(""), "zankyo-record.json");
+        assert_eq!(filename("../.."), "zankyo-_____.json");
     }
 
     #[test]
@@ -192,7 +216,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         // 古→新の順に 3 ファイル、mtime を明示して順序を確定させる
         for i in 0..3u64 {
-            let p = dir.join(format!("f{i}.json"));
+            let p = dir.join(format!("zankyo-f{i}.json"));
             std::fs::write(&p, b"{}").unwrap();
             std::fs::File::options()
                 .write(true)
@@ -203,9 +227,9 @@ mod tests {
         }
         enforce_cap(&dir, 2);
         // 最古の f0 だけが消え、新しい 2 つが残る
-        assert!(!dir.join("f0.json").exists());
-        assert!(dir.join("f1.json").exists());
-        assert!(dir.join("f2.json").exists());
+        assert!(!dir.join("zankyo-f0.json").exists());
+        assert!(dir.join("zankyo-f1.json").exists());
+        assert!(dir.join("zankyo-f2.json").exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -214,7 +238,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("zankyo-atomic-{}", std::process::id()));
         write(dir.to_str().unwrap(), 8, "req-9", b"{}");
         // rename 済みなら .json だけが残り .part は残らない
-        assert!(dir.join("req-9.json").exists());
+        assert!(dir.join("zankyo-req-9.json").exists());
         let parts: Vec<_> = std::fs::read_dir(&dir)
             .unwrap()
             .flatten()
@@ -229,7 +253,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("zankyo-part-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         // クラッシュ残滓の .part を古い mtime で置く
-        let orphan = dir.join(".dead.json.part");
+        let orphan = dir.join(".zankyo-dead.json.part");
         std::fs::write(&orphan, b"{\"partial\":").unwrap();
         std::fs::File::options()
             .write(true)
@@ -247,7 +271,7 @@ mod tests {
     fn pending_drops_expired_records() {
         let dir = std::env::temp_dir().join(format!("zankyo-exp-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let old = dir.join("old.json");
+        let old = dir.join("zankyo-old.json");
         std::fs::write(
             &old,
             br#"{"functionName":"fn","requestId":"r1","invokedAt":"2026-09-22T01:02:03Z"}"#,
@@ -285,15 +309,15 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("zankyo-pend-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         // 回収できるもの・壊れた JSON・フィールド欠落の 3 種を置く
-        let good = dir.join("good.json");
+        let good = dir.join("zankyo-good.json");
         std::fs::write(
             &good,
             br#"{"functionName":"fn","requestId":"r1","invokedAt":"2026-09-22T01:02:03Z"}"#,
         )
         .unwrap();
-        let broken = dir.join("broken.json");
+        let broken = dir.join("zankyo-broken.json");
         std::fs::write(&broken, b"not json").unwrap();
-        let missing = dir.join("missing.json");
+        let missing = dir.join("zankyo-missing.json");
         std::fs::write(&missing, br#"{"functionName":"fn"}"#).unwrap();
 
         let items = pending(&dir, Duration::from_secs(3600));
@@ -302,6 +326,31 @@ mod tests {
         // 復旧不能なものはその場で消え、次回以降残滓として残らない
         assert!(!broken.exists());
         assert!(!missing.exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn foreign_files_are_never_touched() {
+        // ZANKYO_SPILL_DIR を共有ディレクトリに向けた設定でも、
+        // 接頭辞を持たない他者のファイルは回収・掃除・cap の対象外。
+        let dir = std::env::temp_dir().join(format!("zankyo-foreign-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let foreign_json = dir.join("other-tool.json");
+        std::fs::write(&foreign_json, b"not json").unwrap();
+        let foreign_part = dir.join(".other.json.part");
+        std::fs::write(&foreign_part, b"{\"partial\":").unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&foreign_part)
+            .unwrap()
+            .set_modified(std::time::SystemTime::UNIX_EPOCH)
+            .unwrap();
+
+        let items = pending(&dir, Duration::from_secs(3600));
+        assert!(items.is_empty());
+        enforce_cap(&dir, 0);
+        assert!(foreign_json.exists());
+        assert!(foreign_part.exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
