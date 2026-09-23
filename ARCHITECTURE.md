@@ -58,6 +58,13 @@ zankyo バイナリを起動し、zankyo が実際の runtime を子プロセス
   構造的ポート（`RecordReader`/`FunctionInvoker`）に閉じ、SDK 適合は
   `aws.ts` のアダプタだけが担うため、コマンド本体は純粋な変換
   ロジックとして書ける。
+- **failure type を増やす**: `record.rs` の `FailureType` enum と
+  シリアライズ値、shutdown reason → errorType の写像、CLI 側の
+  `failureType` 検証リスト、レコードスキーマの doc に追加。
+  wire 上の値は S3 レイアウトと後方互換を保つこと。
+- **build arch を増やす**: `scripts/build-layer.mts` の `TARGETS` に
+  1 行追加し、CI の build ステップと SAR テンプレートの Layer
+  リソースを対に増やす。
 - **テスト**: Rust は `proxy/tests/` が mock Runtime API + mock S3 で
   実経路を検証。CLI はコマンドの `deps` 引数へ `tests/helpers.ts`
   のフェイクを差し込む（ポートを直接実装するため cast 不要）。
