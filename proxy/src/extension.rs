@@ -152,8 +152,13 @@ pub async fn run_event_loop(
 fn flush_budget_for(deadline_ms: Option<i64>, configured: Duration) -> Duration {
     deadline_ms
         .and_then(|d| {
-            let now_ms = time::OffsetDateTime::now_utc().unix_timestamp() * 1000;
-            u64::try_from(d - now_ms - 200).ok()
+            // nanos→ms の切り捨てで秒未満の丸め誤差を抑え、
+            // i64 の減算は saturating でオーバーフローを防ぐ
+            let now_ms = time::OffsetDateTime::now_utc().unix_timestamp_nanos() / 1_000_000;
+            let remaining = d
+                .saturating_sub(i64::try_from(now_ms).unwrap_or(i64::MAX))
+                .saturating_sub(200);
+            u64::try_from(remaining).ok()
         })
         .map(|ms| configured.min(Duration::from_millis(ms)))
         .unwrap_or(configured)
@@ -181,7 +186,8 @@ mod tests {
     fn budget_shrinks_to_remaining_window() {
         let cfg = Duration::from_millis(1200);
         // 凍結期限が 700ms 先 → 残 500ms 程度になるはず
-        let near = time::OffsetDateTime::now_utc().unix_timestamp() * 1000 + 700;
+        let now_ms = time::OffsetDateTime::now_utc().unix_timestamp_nanos() / 1_000_000;
+        let near = (now_ms + 700) as i64;
         let b = flush_budget_for(Some(near), cfg);
         assert!(b < cfg && b <= Duration::from_millis(500));
     }
@@ -190,7 +196,8 @@ mod tests {
     fn past_deadline_falls_back_to_configured() {
         let cfg = Duration::from_millis(1200);
         // 残時間が負 → u64 変換に失敗するので設定予算へ倒れる
-        let past = time::OffsetDateTime::now_utc().unix_timestamp() * 1000 - 1000;
+        let past =
+            (time::OffsetDateTime::now_utc().unix_timestamp_nanos() / 1_000_000 - 1000) as i64;
         assert_eq!(flush_budget_for(Some(past), cfg), cfg);
     }
 

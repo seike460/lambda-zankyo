@@ -96,6 +96,9 @@ impl Recorder {
     /// SHUTDOWN 経路。まず /tmp へ同期退避してから、
     /// 残りの shutdown ウィンドウ内で S3 を試す（ベストエフォート）。
     /// `reason` は Extensions API の shutdownReason（timeout/failure/spindown）。
+    /// failureType は SPEC の enum 3 値（handler_error/init_error/timeout）の
+    /// 制約から常に `timeout` とし、「応答が返らないまま shutdown した」の意。
+    /// 区別が必要な情報は errorContext.errorType（Timeout/Failure/Spindown）に写す。
     pub async fn save_during_shutdown(&self, inv: Invocation, reason: Option<&str>) {
         let ctx = ErrorContext {
             error_type: Some(shutdown_error_type(reason).to_string()),
@@ -195,18 +198,19 @@ impl Recorder {
     /// 元の S3 キーを再構成する。送れたものだけ削除するため冪等に再実行できる。
     pub async fn recover_spills(&self) {
         let dir = Path::new(&self.cfg.spill_dir);
-        // 前回までの蓄積が上限を超えていても、新規 spill を待たずに先に絞る
-        spill::enforce_cap(dir, self.cfg.spill_max_files);
         for (path, body, key) in spill::pending(dir) {
             match tokio::time::timeout(self.put_timeout(), self.put(&key, body)).await {
                 Ok(Ok(())) => {
                     let _ = std::fs::remove_file(&path);
                     info!(path = %path.display(), key, "recovered spilled record");
                 }
-                // S3 が届かない状態なら残りも同じ。次の init に持ち越す
+                // S3 が届かない状態なら残りも同じ。次の再送に持ち越す
                 _ => break,
             }
         }
+        // 再送を試みた後で上限を適用する。先に絞ると、届くはずだった
+        // 古いレコードを試行すらせず捨ててしまう。
+        spill::enforce_cap(dir, self.cfg.spill_max_files);
     }
 
     fn spill(&self, request_id: &str, body: &[u8]) {

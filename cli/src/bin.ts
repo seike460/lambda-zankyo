@@ -58,14 +58,20 @@ async function main(): Promise<number> {
 }
 
 main().then(
-  (code) => process.exit(code),
+  // process.exitCode 代入で終わらせる。process.exit() は
+  // バッファに残った stdout を切り捨てるため、大きな
+  // fixture JSON や list --json の末尾が欠けうる。
+  (code) => {
+    process.exitCode = code;
+  },
   (err: unknown) => {
     if (err instanceof CliError) {
       console.error(`error: ${err.message}`);
       if (err.hint) console.error(`hint: ${err.hint}`);
-      process.exit(err.exitCode);
+      process.exitCode = err.exitCode;
+      return;
     }
     console.error(`error: ${errMessage(err)}`);
-    process.exit(2);
+    process.exitCode = 2;
   },
 );

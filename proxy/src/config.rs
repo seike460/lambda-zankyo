@@ -34,6 +34,9 @@ pub const DEFAULT_SSM_TIMEOUT_MS: u64 = 10_000;
 /// `/next` 以外の上流転送の上限時間（ms）。localhost 上の Runtime API が
 /// 60 秒応えない状況は実行環境の異常とみなす。
 pub const DEFAULT_FORWARD_TIMEOUT_MS: u64 = 60_000;
+/// spill 再送の間隔（ms）。起動時だけでなく生存中も定期的に
+/// /tmp を空に戻し、S3 の一時障害からの回復を早める。
+pub const DEFAULT_SPILL_RETRY_MS: u64 = 60_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ScrubMode {
@@ -64,6 +67,8 @@ pub struct Config {
     pub spill_dir: String,
     /// spill dir に保持するファイル数の上限。超過分は古いものから破棄。
     pub spill_max_files: usize,
+    /// spill 再送を試みる間隔（ms）。
+    pub spill_retry_ms: u64,
     /// Runtime API 経由で受け付けるボディの上限（KiB）。
     pub max_body_kb: usize,
     /// Extensions API イベントボディの上限（KiB）。
@@ -143,6 +148,7 @@ impl Config {
             put_timeout_ms: DEFAULT_PUT_TIMEOUT_MS,
             spill_dir: DEFAULT_SPILL_DIR.to_string(),
             spill_max_files: DEFAULT_SPILL_MAX_FILES,
+            spill_retry_ms: DEFAULT_SPILL_RETRY_MS,
             max_body_kb: DEFAULT_MAX_BODY_KB,
             ext_body_kb: DEFAULT_EXT_BODY_KB,
             register_timeout_ms: DEFAULT_REGISTER_TIMEOUT_MS,
@@ -173,6 +179,9 @@ impl Config {
         if let Some(v) = get("ZANKYO_SPILL_MAX_FILES") {
             cfg.spill_max_files = parse_usize("ZANKYO_SPILL_MAX_FILES", v)?;
         }
+        if let Some(v) = get("ZANKYO_SPILL_RETRY_MS") {
+            cfg.spill_retry_ms = parse_u64("ZANKYO_SPILL_RETRY_MS", v)?;
+        }
         if let Some(v) = get("ZANKYO_MAX_BODY_KB") {
             cfg.max_body_kb = parse_usize("ZANKYO_MAX_BODY_KB", v)?;
         }
@@ -202,10 +211,38 @@ impl Config {
 
     /// SSM Parameter の JSON で上書きする。JSON に存在したキーだけが
     /// env 由来の値を置き換える（部分上書き）。
+    /// 数値キーは env 経路と同じく 0 を拒否する。0 値の上限・
+    /// タイムアウトは設定ミスで関数本体まで壊すため。
     pub fn overlay_ssm_json(&mut self, json: &str) -> Result<()> {
         let p: Partial = serde_json::from_str(json).map_err(|e| {
             ZankyoError::Config(format!("ZANKYO_SSM_PARAM is not valid config JSON: {e}"))
         })?;
+        for (key, zero) in [
+            ("ZANKYO_MAX_EVENT_KB", p.max_event_kb == Some(0)),
+            ("ZANKYO_FLUSH_BUDGET_MS", p.flush_budget_ms == Some(0)),
+            ("ZANKYO_PUT_TIMEOUT_MS", p.put_timeout_ms == Some(0)),
+            ("ZANKYO_SPILL_MAX_FILES", p.spill_max_files == Some(0)),
+            ("ZANKYO_SPILL_RETRY_MS", p.spill_retry_ms == Some(0)),
+            ("ZANKYO_MAX_BODY_KB", p.max_body_kb == Some(0)),
+            ("ZANKYO_EXT_BODY_KB", p.ext_body_kb == Some(0)),
+            (
+                "ZANKYO_REGISTER_TIMEOUT_MS",
+                p.register_timeout_ms == Some(0),
+            ),
+            ("ZANKYO_EXT_RETRY_MS", p.ext_retry_ms == Some(0)),
+            (
+                "ZANKYO_EXT_MAX_POLL_FAILURES",
+                p.ext_max_poll_failures == Some(0),
+            ),
+            ("ZANKYO_SSM_TIMEOUT_MS", p.ssm_timeout_ms == Some(0)),
+            ("ZANKYO_FORWARD_TIMEOUT_MS", p.forward_timeout_ms == Some(0)),
+        ] {
+            if zero {
+                return Err(ZankyoError::Config(format!(
+                    "{key} must be a positive integer"
+                )));
+            }
+        }
         if let Some(v) = p.bucket {
             self.bucket = v;
         }
@@ -232,6 +269,9 @@ impl Config {
         }
         if let Some(v) = p.spill_max_files {
             self.spill_max_files = v;
+        }
+        if let Some(v) = p.spill_retry_ms {
+            self.spill_retry_ms = v;
         }
         if let Some(v) = p.max_body_kb {
             self.max_body_kb = v;
@@ -282,6 +322,8 @@ struct Partial {
     spill_dir: Option<String>,
     #[serde(rename = "ZANKYO_SPILL_MAX_FILES")]
     spill_max_files: Option<usize>,
+    #[serde(rename = "ZANKYO_SPILL_RETRY_MS")]
+    spill_retry_ms: Option<u64>,
     #[serde(rename = "ZANKYO_MAX_BODY_KB")]
     max_body_kb: Option<usize>,
     #[serde(rename = "ZANKYO_EXT_BODY_KB")]

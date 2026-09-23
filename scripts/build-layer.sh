@@ -37,4 +37,10 @@ for arch in $ARCHES; do
   (cd "$stage" && find . -type f -print | LC_ALL=C sort | zip -qX "$OLDPWD/$OUT_DIR/zankyo-$arch.zip" -@)
   rm -rf "$stage"
   echo "wrote $OUT_DIR/zankyo-$arch.zip"
+
+  # SAR テンプレートの ContentUri（sar/dist/layer-*.zip）に合わせて複写する。
+  # sam publish はアプリケーションディレクトリ内のパスしか参照できないため。
+  mkdir -p sar/dist
+  cp "$OUT_DIR/zankyo-$arch.zip" "sar/dist/layer-$arch.zip"
+  echo "wrote sar/dist/layer-$arch.zip (for sam publish)"
 done

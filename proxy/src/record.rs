@@ -168,14 +168,15 @@ pub fn error_context_from_body(body: &[u8], header_error_type: Option<String>) -
 /// `/response` に流れたボディがエラー形か判定する。
 /// SPEC は「errorType 含有」を失敗と定める。errorMessage 単独で
 /// 発火すると、正常応答にエラー形フィールドを返す API（GraphQL 等）を
-/// 失敗として誤記録するため、errorType の存在だけを見る。
+/// 失敗として誤記録するため、errorType の非空文字列だけを見る
+/// （`"errorType": null` を正常応答に載せる API もある）。
 pub fn response_error_context(body: &[u8]) -> Option<ErrorContext> {
     let v = serde_json::from_slice::<Value>(body).ok()?;
     let obj = v.as_object()?;
-    if !obj.contains_key("errorType") {
-        return None;
+    match obj.get("errorType").and_then(|t| t.as_str()) {
+        Some(t) if !t.is_empty() => Some(error_context_from_body(body, None)),
+        _ => None,
     }
-    Some(error_context_from_body(body, None))
 }
 
 /// init error 用の擬似 requestId（実リクエストが存在しないため時刻由来）。
@@ -245,5 +246,8 @@ mod tests {
     fn response_error_requires_error_keys() {
         assert!(response_error_context(br#"{"errorType":"Error","errorMessage":"x"}"#).is_some());
         assert!(response_error_context(br#"{"ok":true,"count":3}"#).is_none());
+        // null・空文字の errorType は失敗とみなさない（正常応答に含めうる）
+        assert!(response_error_context(br#"{"errorType":null,"data":1}"#).is_none());
+        assert!(response_error_context(br#"{"errorType":""}"#).is_none());
     }
 }

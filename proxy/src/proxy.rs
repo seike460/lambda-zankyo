@@ -44,9 +44,30 @@ pub fn new_client() -> HttpClient {
     Client::builder(TokioExecutor::new()).build(HttpConnector::new())
 }
 
-/// 非同期で投げたレコード保存タスク。プロセス終了前に
-/// orchestrate がドレインするため、fire-and-forget で捨てない。
-pub type PendingSaves = tokio::sync::Mutex<tokio::task::JoinSet<()>>;
+/// 非同期で投げたレコード保存タスクの管理状態。
+/// `closed` 後に届いた save は JoinSet へ積んでも誰も await しないため、
+/// spawn 側がインラインで実行する。fire-and-forget で捨てないための仕組み。
+pub struct Pending {
+    pub set: tokio::task::JoinSet<()>,
+    pub closed: bool,
+}
+
+impl Pending {
+    pub fn new() -> Self {
+        Self {
+            set: tokio::task::JoinSet::new(),
+            closed: false,
+        }
+    }
+}
+
+impl Default for Pending {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+pub type PendingSaves = tokio::sync::Mutex<Pending>;
 
 pub struct ProxyState {
     /// 本来の Runtime API（`AWS_LAMBDA_RUNTIME_API` 原本の host:port）。
@@ -58,6 +79,9 @@ pub struct ProxyState {
     pub cfg: crate::config::Config,
     /// 進行中の save タスク。子終了時に残っていれば drain される。
     pub pending: PendingSaves,
+    /// 処理中のハンドラ数。drain が「これ以上 save が増えない」
+    /// 地点を判断するのに使う。
+    pub active: std::sync::atomic::AtomicUsize,
 }
 
 /// 接続を受け付け続けるサーバループ。ランタイムは /next のロングポーリングと
@@ -87,6 +111,8 @@ pub async fn serve(listener: TcpListener, state: Arc<ProxyState>) {
 }
 
 async fn handle(req: Request<Incoming>, st: &ProxyState) -> Response<BoxedBody> {
+    st.active.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let _active = ActiveGuard { count: &st.active };
     let (parts, body) = req.into_parts();
     let path_and_query = parts
         .uri
@@ -189,6 +215,17 @@ async fn forward_or_502(
     }
 }
 
+/// handle() の在席数を戻す RAII ガード。
+struct ActiveGuard<'a> {
+    count: &'a std::sync::atomic::AtomicUsize,
+}
+
+impl Drop for ActiveGuard<'_> {
+    fn drop(&mut self) {
+        self.count.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
 /// `Recorder::save` へ渡すレコード一式。
 struct SaveJob {
     request_id: String,
@@ -202,8 +239,25 @@ struct SaveJob {
 /// ランタイムへの応答を遅らせないよう、レコード保存は非同期で行う。
 /// タスクは `pending` に積まれ、プロセス終了前に orchestrate が
 /// ドレインする（投げっぱなしにすると init_error 等の記録が消える）。
+/// 終了処理で pending が closed 済みなら JoinSet へ積んでも
+/// 誰も await しないため、その場合は呼び出し側で同期的に保存する。
 async fn spawn_save(pending: &PendingSaves, recorder: Arc<Recorder>, job: SaveJob) {
-    pending.lock().await.spawn(async move {
+    let mut p = pending.lock().await;
+    if p.closed {
+        drop(p);
+        recorder
+            .save(
+                &job.request_id,
+                job.invoked_at,
+                job.failure,
+                job.event,
+                job.response,
+                job.ctx,
+            )
+            .await;
+        return;
+    }
+    p.set.spawn(async move {
         recorder
             .save(
                 &job.request_id,

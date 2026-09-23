@@ -142,7 +142,8 @@ async fn spawn_proxy(upstream: &str, inflight: Arc<InFlight>, recorder: Arc<Reco
         inflight,
         cfg: recorder.config().clone(),
         recorder,
-        pending: tokio::sync::Mutex::new(tokio::task::JoinSet::new()),
+        pending: tokio::sync::Mutex::new(zankyo::proxy::Pending::new()),
+        active: std::sync::atomic::AtomicUsize::new(0),
     });
     tokio::spawn(serve(listener, state));
     addr
