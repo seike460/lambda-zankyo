@@ -4,6 +4,10 @@
  */
 import { CliError } from './errors.ts';
 
+/**
+ * proxy が現在書き出す failureType 値。wire 上は opaque string として
+ * 扱い、新バージョンが追加した型も旧 CLI で読める（前方互換）。
+ */
 export type FailureType = 'handler_error' | 'init_error' | 'timeout';
 
 /** S3 キーの先頭セグメント。proxy/src/record.rs の KEY_PREFIX と揃える。 */
@@ -26,7 +30,7 @@ export interface ZankyoRecord {
   functionVersion: string;
   requestId: string;
   invokedAt: string;
-  failureType: FailureType;
+  failureType: string;
   event: unknown;
   response?: unknown;
   errorContext: ErrorContext;
@@ -38,7 +42,16 @@ export interface ZankyoRecord {
   truncated?: boolean;
 }
 
-const FAILURE_TYPES: ReadonlySet<string> = new Set(['handler_error', 'init_error', 'timeout']);
+const KNOWN_FAILURE_TYPES: ReadonlySet<string> = new Set([
+  'handler_error',
+  'init_error',
+  'timeout',
+]);
+
+/** 既知でない failureType は警告対象（読み込み自体は前方互換で通す）。 */
+export function isKnownFailureType(v: string): v is FailureType {
+  return KNOWN_FAILURE_TYPES.has(v);
+}
 
 export function isRecord(v: unknown): v is ZankyoRecord {
   if (typeof v !== 'object' || v === null) return false;
@@ -59,8 +72,7 @@ export function isRecord(v: unknown): v is ZankyoRecord {
     typeof v.functionName === 'string' &&
     typeof v.requestId === 'string' &&
     typeof v.invokedAt === 'string' &&
-    typeof v.failureType === 'string' &&
-    FAILURE_TYPES.has(v.failureType)
+    typeof v.failureType === 'string'
   );
 }
 

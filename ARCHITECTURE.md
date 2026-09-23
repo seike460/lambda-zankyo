@@ -60,8 +60,9 @@ zankyo バイナリを起動し、zankyo が実際の runtime を子プロセス
   ロジックとして書ける。
 - **failure type を増やす**: `record.rs` の `FailureType` enum と
   シリアライズ値、shutdown reason → errorType の写像、CLI 側の
-  `failureType` 検証リスト、レコードスキーマの doc に追加。
-  wire 上の値は S3 レイアウトと後方互換を保つこと。
+  `KNOWN_FAILURE_TYPES`（警告用の既知集合）、レコードスキーマの
+  doc に追加。wire 上は opaque string なので新しい型を書く proxy と
+  旧 CLI の間でも読み書きが壊れない（前方互換）。
 - **build arch を増やす**: `scripts/build-layer.mts` の `TARGETS` に
   1 行追加し、CI の build ステップと SAR テンプレートの Layer
   リソースを対に増やす。

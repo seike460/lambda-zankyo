@@ -5,7 +5,13 @@
 import { envNum } from './aws.ts';
 import { CliError, errMessage } from './errors.ts';
 import type { RecordListPage, RecordReader } from './ports.ts';
-import { keyMatchesRequestId, parseRecord, RECORD_PREFIX, type ZankyoRecord } from './record.ts';
+import {
+  isKnownFailureType,
+  keyMatchesRequestId,
+  parseRecord,
+  RECORD_PREFIX,
+  type ZankyoRecord,
+} from './record.ts';
 
 const RECORD_PREFIX_SLASH = `${RECORD_PREFIX}/`;
 /** ListObjectsV2 の 1 ページあたり取得件数。ZANKYO_LIST_PAGE_SIZE で調整可能。 */
@@ -101,7 +107,15 @@ export async function fetchRecord(
   if (text === undefined) {
     throw new CliError(`empty object: s3://${bucket}/${key}`, 4);
   }
-  return parseRecord(text, `s3://${bucket}/${key}`);
+  const rec = parseRecord(text, `s3://${bucket}/${key}`);
+  if (!isKnownFailureType(rec.failureType)) {
+    // 新しい proxy が追加した failureType も読み進められるが、
+    // ユーザーの解釈を助けるため既知でないことは stderr に出す。
+    console.error(
+      `zankyo: unknown failureType ${JSON.stringify(rec.failureType)} in s3://${bucket}/${key} — newer proxy version?`,
+    );
+  }
+  return rec;
 }
 
 export interface KeyQuery {

@@ -1,7 +1,12 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import { CliError } from '../src/errors.ts';
-import { keyMatchesRequestId, parseRecord, parseRecordKey } from '../src/record.ts';
+import {
+  isKnownFailureType,
+  keyMatchesRequestId,
+  parseRecord,
+  parseRecordKey,
+} from '../src/record.ts';
 
 const VALID = {
   version: '1',
@@ -31,9 +36,12 @@ describe('parseRecord', () => {
     assert.throws(() => parseRecord(JSON.stringify(rest), 'test'), CliError);
   });
 
-  it('rejects unknown failureType', () => {
-    const bad = { ...VALID, failureType: 'exploded' };
-    assert.throws(() => parseRecord(JSON.stringify(bad), 'test'), CliError);
+  it('accepts unknown failureType for forward compatibility', () => {
+    const newer = { ...VALID, failureType: 'exploded' };
+    const rec = parseRecord(JSON.stringify(newer), 'test');
+    assert.equal(rec.failureType, 'exploded');
+    assert.equal(isKnownFailureType(rec.failureType), false);
+    assert.equal(isKnownFailureType('handler_error'), true);
   });
 });
 
