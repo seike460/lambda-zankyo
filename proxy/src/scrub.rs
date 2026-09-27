@@ -9,6 +9,7 @@
 
 use crate::config::ScrubMode;
 use crate::scrub_data::{DEFAULT_DENYLIST, PATTERNS};
+use hmac::digest::KeyInit;
 use hmac::{Hmac, Mac};
 use regex::Regex;
 use serde_json::Value;
@@ -176,7 +177,7 @@ impl Scrubber {
     }
 
     fn hmac(&self, v: &Value) -> String {
-        let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(&self.hash_key)
+        let mut mac = <Hmac<Sha256> as KeyInit>::new_from_slice(&self.hash_key)
             .expect("HMAC accepts any key length");
         match v {
             Value::String(s) => mac.update(s.as_bytes()),
