@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   SSM の取得は子ランタイムの起動と extension の登録より前に待つ。以前の既定値は
   Lambda の Init 上限（10 秒）と同じで、SSM に届かない VPC では Init が
   上限を超えうる
+- **cli** — `fixture --out` は、新しく作るファイルを所有者だけが読める
+  モード（0600）で書く。既存のファイルを上書きするときは、モードを変えない
 
 ### Fixed
 
@@ -38,6 +40,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **proxy** — README と設定の説明で、`ZANKYO_FLUSH_BUDGET_MS` と
   `ZANKYO_PUT_TIMEOUT_MS` の役割を実際の動作に合わせた。失敗レコードの PUT
   （呼び出し中と SHUTDOWN 後）は前者、spill 再送の PUT は後者で打ち切る
+- **cli / construct** — npm の tarball に LICENSE を同梱する。以前は
+  MIT の許諾文が配布物に入っていなかった
+- **cli / construct** — pack と publish の前（`prepack`）に build を実行する。
+  以前は dist が無いまま、または古いまま公開されうる手順だった
+- **cli / construct** — package.json に repository・homepage・bugs・
+  keywords・author を追加した。npm のページから GitHub へたどれる
 
 ### Security
 
@@ -52,6 +60,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **proxy** — JSON を文字列化した値（API Gateway・Function URL の `body` 等）の
   中のフィールドにも denylist を適用する。以前は `password` などがマスクされずに
   残っていた。一致した場合、その文字列は空白なし・キーは辞書順の JSON に書き直す
+- **construct** — `attachTo` が付ける `s3:PutObject` の対象を、`zankyo/*` から
+  関数ごとの `zankyo/{関数名}/*` に絞った。以前は、バケットを共有する別の関数が、
+  この関数を名乗るレコードを置けた。権限は role の DefaultPolicy ではなく、
+  関数ごとの `AWS::IAM::Policy` に入る。既存のスタックを更新すると、デプロイ中の
+  短い間だけ PUT が拒否されることがある。その間のレコードは spill に退避され、
+  後で再送される
+- **cli** — S3 キーの関数名と本文の `functionName` が食い違うレコードを、
+  exit 4 で拒否する。以前は本文の関数名をそのまま replay・diff・redrive の
+  invoke 先にしていた。バケットに書ける別の関数が、運用者の権限で任意の関数へ
+  ペイロードを投入させられた
 
 ## [0.1.0] - 2026-09-23
 
