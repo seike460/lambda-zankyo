@@ -36,8 +36,19 @@ serde_json = "1"
 # S3 PutObject / SSM GetParameter。aws-config の既定 TLS は rustls で
 # musl 静的ビルドから OpenSSL 依存を排除できる
 aws-config = { version = "1", features = ["behavior-version-latest"] }
-aws-sdk-s3 = "1"
-aws-sdk-ssm = "1"
+# default の "rustls" feature は旧 hyper 0.14 + rustls 0.21 + h2 0.3 の
+# レガシーコネクタ（RUSTSEC-2026-0098/0099/0104/0258 の脆弱性対象）を
+# 引き込む。既定 HTTPS client は rustls-aws-lc（hyper 1.x）で代替済み
+aws-sdk-s3 = { version = "1", default-features = false, features = [
+    "sigv4a",
+    "http-1x",
+    "default-https-client",
+    "rt-tokio",
+] }
+aws-sdk-ssm = { version = "1", default-features = false, features = [
+    "default-https-client",
+    "rt-tokio",
+] }
 # PII scrub: denylist 照合とパターン検出
 regex = "1"
 hmac = "0.13"

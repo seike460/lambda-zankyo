@@ -1,3 +1,8 @@
 [toolchain]
 channel = "1.98.1"
 components = ["rustfmt", "clippy"]
+# Lambda layer の静的バイナリは musl でビルドする（CI build-layer / ローカル
+# build-layer.mts の素の cargo build 経路どちらでも rustup が自動取得する）。
+# aarch64 は cross のコンテナ経路だが、コンテナ内でもこの toml は有効なため
+# cross イメージの toolchain 更新時の E0463 再発を防ぐ目的で両方宣言する
+targets = ["x86_64-unknown-linux-musl", "aarch64-unknown-linux-musl"]
