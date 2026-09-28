@@ -31,18 +31,19 @@ export function fixtureJson(rec: ZankyoRecord): string {
 }
 
 /**
- * replay/redrive/diff で Lambda へ送るペイロード。
- * JSON イベントはエンコード文字列、eventIsRawText の生テキストは原文のまま、
- * eventIsBase64 は元のバイト列へデコードして返す
- * （文字列化すると元イベントと異なる入力になる）。
+ * replay/redrive/diff で Lambda へ送るペイロード（JSON エンコード文字列）。
+ * Invoke API は JSON でない本文を InvalidRequestContentException で拒否する。
+ * 非 JSON イベント（eventIsRawText / eventIsBase64）は、文字列へ包むと
+ * 元イベントと異なる入力になるため、invoke の前に止める。
  */
-export function eventPayload(rec: ZankyoRecord): string | Uint8Array {
+export function eventPayload(rec: ZankyoRecord): string {
   const event = buildFixtureEvent(rec);
-  if (rec.eventIsBase64 && typeof event === 'string') {
-    return Buffer.from(event, 'base64');
-  }
-  if (rec.eventIsRawText && typeof event === 'string') {
-    return event;
+  if (rec.eventIsRawText || rec.eventIsBase64) {
+    throw new CliError(
+      'record holds a non-JSON event; the Lambda Invoke API accepts only JSON payloads',
+      4,
+      'use `zankyo fixture` to export the stored event as-is',
+    );
   }
   return JSON.stringify(event);
 }

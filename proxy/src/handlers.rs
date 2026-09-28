@@ -69,7 +69,7 @@ pub(crate) async fn handle_next(
         if !request_id.is_empty() {
             // JSON でないイベントは UTF-8 なら生テキスト、それ以外は
             // base64 で保持する。from_utf8_lossy は U+FFFD に潰れて
-            // replay で元イベントと異なる入力になるため使わない。
+            // fixture で原文を取り出せなくなるため使わない。
             let (event, encoding) = match serde_json::from_slice::<Value>(&bytes) {
                 Ok(v) => (v, EventEncoding::Json),
                 Err(_) => match String::from_utf8(bytes.to_vec()) {

@@ -158,11 +158,13 @@ s3://{ZANKYO_BUCKET}/zankyo/{function-name}/{yyyy}/{mm}/{dd}/{requestId}.json
 補助フィールド（該当時のみ付与）:
 
 - `eventIsRawText: true` — 元イベントが JSON でない生テキストの場合。
-  `event` は文字列として保持され、replay/redrive/diff は JSON 再エンコードせず
-  原文のままペイロードに使います。fixture はそのまま書き出します。
+  `event` は文字列として保持され、fixture はそのまま書き出します。
 - `eventIsBase64: true` — 元イベントが UTF-8 でないバイナリの場合。
-  `event` は base64 文字列として保持され、replay/redrive/diff は
-  デコードして元のバイト列を再送します。
+  `event` は base64 文字列として保持され、fixture はそのまま書き出します。
+- 上の 2 つ（非 JSON イベント）は、replay/redrive/diff の対象外です（exit 4）。
+  Lambda の [Invoke API](https://docs.aws.amazon.com/lambda/latest/api/API_Invoke.html)
+  は JSON のペイロードしか受け付けず、JSON でない本文を
+  `InvalidRequestContentException` で拒否するためです。
 - `truncated: true` — イベントが `ZANKYO_MAX_EVENT_KB` を超えた場合。
   先頭のみ保持のため fixture/replay/redrive/diff はすべて対象外
   （部分イベントの replay は誤結果を生むため拒否）。

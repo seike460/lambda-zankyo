@@ -30,11 +30,11 @@ export async function run(argv: string[], deps?: AwsClients): Promise<number> {
     functionName: strVal(values.function),
   });
   const body = fixtureJson(rec);
-  // 非 JSON イベントは sam local invoke -e（JSON 前提）では使えない。
-  // そのまま書き出すが、用途を誤解させないよう stderr で断っておく。
+  // 非 JSON イベントは sam local invoke -e も Lambda の Invoke API も（JSON 前提）
+  // 受け付けない。そのまま書き出すが、用途を誤解させないよう stderr で断っておく。
   if (rec.eventIsRawText || rec.eventIsBase64) {
     console.error(
-      'note: this record holds a non-JSON event; `sam local invoke -e` expects JSON — use `zankyo replay`/`redrive` to send the original payload',
+      'note: this record holds a non-JSON event, written as-is; `sam local invoke -e` and `zankyo replay`/`diff`/`redrive` accept only JSON events',
     );
   }
   const out = strVal(values.out);

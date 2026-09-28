@@ -26,6 +26,12 @@ const RECORDED_EVENT = { user: 'alice', password: 'x***' };
 
 const isExit = (code: number) => (e: unknown) => e instanceof CliError && e.exitCode === code;
 
+const RAW_TEXT_RECORD = JSON.stringify({
+  ...(JSON.parse(VALID_RECORD) as Record<string, unknown>),
+  event: '<xml>not json</xml>',
+  eventIsRawText: true,
+});
+
 describe('zankyo list', () => {
   const s3 = () =>
     fakeS3([{ Contents: [{ Key: KEY, LastModified: new Date('2026-09-22T00:00:00Z') }] }]);
@@ -124,6 +130,19 @@ describe('zankyo replay', () => {
   it('exits 3 when the Invoke API call fails', async () => {
     const lambda = { invoke: rejecting('AccessDeniedException') };
     await assert.rejects(() => runReplay(['r1', '--bucket', 'b'], deps(s3(), lambda)), isExit(3));
+  });
+
+  it('exits 4 without invoking when the record holds a non-JSON event', async () => {
+    const lambda = fakeLambda({ StatusCode: 200 });
+    await assert.rejects(
+      () =>
+        runReplay(
+          ['r1', '--bucket', 'b'],
+          deps(fakeS3([{ Contents: [{ Key: KEY }] }], RAW_TEXT_RECORD), lambda),
+        ),
+      isExit(4),
+    );
+    assert.deepEqual(lambda.inputs, []);
   });
 });
 

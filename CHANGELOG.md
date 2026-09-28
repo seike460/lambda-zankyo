@@ -40,6 +40,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **proxy** — README と設定の説明で、`ZANKYO_FLUSH_BUDGET_MS` と
   `ZANKYO_PUT_TIMEOUT_MS` の役割を実際の動作に合わせた。失敗レコードの PUT
   （呼び出し中と SHUTDOWN 後）は前者、spill 再送の PUT は後者で打ち切る
+- **cli** — replay・diff・redrive は、非 JSON イベント（`eventIsRawText` /
+  `eventIsBase64`）のレコードを、invoke の前に exit 4 で止める。Lambda の
+  Invoke API は JSON でない本文を `InvalidRequestContentException` で拒否する。
+  以前は原文のまま送り、README もそれで再送できると説明していた。
+  fixture は従来どおり、保存された形のまま書き出す
 - **cli** — `list --since` で古いページがすべて除外されると、
   `ZANKYO_LIST_MAX_PAGES` を超えてバケットを最後まで走査していた。
   走査の上限を、除外後の件数ではなくページ数で数える
