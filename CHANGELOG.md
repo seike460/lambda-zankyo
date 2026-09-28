@@ -11,6 +11,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **proxy** — 宣言する MSRV（`rust-version`）を、ロック済み依存の実際の要件
   1.94.1 に合わせた。CI で宣言値のビルドを検証する
+- **proxy** — denylist に一致した値が配列なら、要素ごとにマスクして配列の形を
+  保つ。以前は配列全体を 1 つの文字列 `"***"` に置き換えていた
 
 ### Fixed
 
@@ -22,6 +24,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   たびに空の名前で SSM を呼び、起動を遅らせていた
 - **proxy** — external extension 構成で、呼び出し中にランタイムがクラッシュすると、
   wrapper の終了が毎回約 1 秒遅れていた
+- **proxy** — 成功呼び出しを含む Runtime API への全リクエストで、info レベルの
+  ログを出していた。debug レベルに下げ、既定では出さない
+- **proxy** — Node.js ランタイムはスタックトレースを `trace` キーで送るため、
+  `errorContext.stackTrace` が空だった。`stackTrace` が無いときは `trace` を読む
 
 ### Security
 
@@ -30,6 +36,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   RUSTSEC-2026-0098 / RUSTSEC-2026-0099 / RUSTSEC-2026-0104 /
   RUSTSEC-2026-0258 の対象。実行時の HTTPS client は従来どおり
   rustls-aws-lc（hyper 1.x）
+- **proxy** — 既定の scrub denylist に `cookie` と `cookies` を追加した。
+  API Gateway・ALB・Function URL のイベントにある `Cookie` ヘッダ、
+  HTTP API v2 の `cookies` 配列、応答の `Set-Cookie` が平文で残っていた
+- **proxy** — JSON を文字列化した値（API Gateway・Function URL の `body` 等）の
+  中のフィールドにも denylist を適用する。以前は `password` などがマスクされずに
+  残っていた。一致した場合、その文字列は空白なし・キーは辞書順の JSON に書き直す
 
 ## [0.1.0] - 2026-09-23
 
