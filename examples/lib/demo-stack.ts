@@ -1,28 +1,12 @@
+import { join } from 'node:path';
 import { Duration, aws_lambda as lambda, Stack, type StackProps } from 'aws-cdk-lib';
 import type { Construct } from 'constructs';
 import { Zankyo } from 'zankyo-cdk';
 
-// ハンドラは検証目的を一目で分かるよう inline で書く。
-// esbuild 等のバンドル依存をデモに持ち込まないための選択。
-const THROWING = `
-exports.handler = async (event) => {
-  // PII 混入イベントで scrub の動作も確認する
-  throw new Error('demo failure for ' + JSON.stringify(event));
-};
-`;
-
-const SLEEPING = `
-exports.handler = async () => {
-  await new Promise((r) => setTimeout(r, 60_000));
-  return 'never reached';
-};
-`;
-
-// モジュール評価時点で投げる = init error の再現
-const INIT_ERROR = `
-throw new Error('demo init failure');
-exports.handler = async () => 'never reached';
-`;
+// ハンドラは handlers/ に素の JS で置き、esbuild 等のバンドル依存をデモに持ち込まない。
+// inline code にしないのは、sam local が inline code を実行しないため
+// （README の手順 4 で fixture を再現する）。
+const HANDLERS_DIR = join(import.meta.dirname, '../handlers');
 
 /**
  * 3 種類の失敗（handler error / timeout / init error）を起こす関数を
@@ -40,24 +24,24 @@ export class DemoStack extends Stack {
 
     const base = {
       runtime: lambda.Runtime.NODEJS_22_X,
-      handler: 'index.handler',
+      code: lambda.Code.fromAsset(HANDLERS_DIR),
       memorySize: 256,
     } as const;
 
     const thrower = new lambda.Function(this, 'Thrower', {
       ...base,
-      code: lambda.Code.fromInline(THROWING),
+      handler: 'thrower.handler',
       timeout: Duration.seconds(10),
     });
     const sleeper = new lambda.Function(this, 'Sleeper', {
       ...base,
-      code: lambda.Code.fromInline(SLEEPING),
+      handler: 'sleeper.handler',
       // timeout を短くして SHUTDOWN フラッシュ経路を踏む
       timeout: Duration.seconds(3),
     });
     const initError = new lambda.Function(this, 'InitError', {
       ...base,
-      code: lambda.Code.fromInline(INIT_ERROR),
+      handler: 'init-error.handler',
       timeout: Duration.seconds(10),
     });
 

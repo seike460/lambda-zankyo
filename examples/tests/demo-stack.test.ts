@@ -1,3 +1,6 @@
+import assert from 'node:assert/strict';
+import { existsSync } from 'node:fs';
+import { join } from 'node:path';
 import { describe, it } from 'node:test';
 import { App } from 'aws-cdk-lib';
 import { Match, Template } from 'aws-cdk-lib/assertions';
@@ -54,5 +57,15 @@ describe('DemoStack', () => {
         },
       ],
     });
+  });
+
+  it('ships the handlers as files, which sam local can run', () => {
+    template.allResourcesProperties('AWS::Lambda::Function', {
+      Code: { S3Key: Match.anyValue(), ZipFile: Match.absent() },
+    });
+    for (const fn of Object.values(template.findResources('AWS::Lambda::Function'))) {
+      const module = String(fn.Properties.Handler).replace(/\.handler$/, '');
+      assert.ok(existsSync(join(import.meta.dirname, '../handlers', `${module}.mjs`)), module);
+    }
   });
 });
