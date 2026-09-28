@@ -32,10 +32,27 @@ describe('DemoStack', () => {
   });
 
   it('grants only s3:PutObject to demo functions', () => {
-    template.hasResourceProperties('AWS::IAM::Policy', {
+    template.resourceCountIs('AWS::IAM::Policy', 3);
+    template.allResourcesProperties('AWS::IAM::Policy', {
       PolicyDocument: {
-        Statement: Match.arrayWith([Match.objectLike({ Action: 's3:PutObject', Effect: 'Allow' })]),
+        Statement: [Match.objectLike({ Action: 's3:PutObject', Effect: 'Allow' })],
       },
+      Roles: [{ Ref: Match.stringLikeRegexp('^(Thrower|Sleeper|InitError)ServiceRole') }],
+    });
+    template.allResourcesProperties('AWS::IAM::Role', {
+      Policies: Match.absent(),
+      ManagedPolicyArns: [
+        {
+          'Fn::Join': [
+            '',
+            [
+              'arn:',
+              { Ref: 'AWS::Partition' },
+              ':iam::aws:policy/service-role/AWSLambdaBasicExecutionRole',
+            ],
+          ],
+        },
+      ],
     });
   });
 });
