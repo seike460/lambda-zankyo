@@ -394,6 +394,44 @@ mod tests {
     }
 
     #[test]
+    fn aws_access_key_keeps_last_four() {
+        let mut v = json!({"k": "AKIAIOSFODNN7EXAMPLE"});
+        let mut r = ScrubReport::default();
+        scrubber().scrub(&mut v, &mut r);
+        assert_eq!(v["k"], "***MPLE");
+        assert!(r.patterns_applied.contains("aws_access_key"));
+    }
+
+    #[test]
+    fn bearer_token_keeps_only_scheme() {
+        let mut v = json!({"note": "Authorization: Bearer abcdefghijk123"});
+        let mut r = ScrubReport::default();
+        scrubber().scrub(&mut v, &mut r);
+        assert_eq!(v["note"], "Authorization: Bearer ***");
+        assert!(r.patterns_applied.contains("bearer_token"));
+    }
+
+    #[test]
+    fn phone_keeps_last_four() {
+        let mut v = json!({"a": "call +81-90-1234-5678", "b": "555-123-4567"});
+        let mut r = ScrubReport::default();
+        scrubber().scrub(&mut v, &mut r);
+        assert_eq!(v["a"], "call ***5678");
+        assert_eq!(v["b"], "***4567");
+        assert!(r.patterns_applied.contains("phone"));
+    }
+
+    #[test]
+    fn ipv4_keeps_last_octet() {
+        let mut v = json!({"src": "from 192.168.10.25", "ver": "999.1.1.1"});
+        let mut r = ScrubReport::default();
+        scrubber().scrub(&mut v, &mut r);
+        assert_eq!(v["src"], "from x.x.x.25");
+        assert_eq!(v["ver"], "999.1.1.1");
+        assert!(r.patterns_applied.contains("ipv4"));
+    }
+
+    #[test]
     fn cookies_are_denied_and_keep_array_shape() {
         let mut v = json!({
             "headers": {"Cookie": "sid=abc123"},

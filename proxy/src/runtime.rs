@@ -73,9 +73,18 @@ mod tests {
     }
 
     #[test]
-    fn exit_code_maps_spawn_failure_to_one() {
+    fn exit_code_maps_wait_error_to_one() {
         let err = std::io::Result::Err(std::io::Error::other("x"));
         assert_eq!(exit_code(err), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn exit_code_maps_signal_to_128_plus_signal() {
+        let status = std::process::Command::new("sh")
+            .args(["-c", "kill -TERM $$"])
+            .status();
+        assert_eq!(exit_code(status), 128 + 15);
     }
 
     fn argv(args: &[&str]) -> Vec<OsString> {
