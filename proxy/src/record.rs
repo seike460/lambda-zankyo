@@ -19,7 +19,8 @@ pub enum FailureType {
     HandlerError,
     /// `/init/error`。イベントは存在しない。
     InitError,
-    /// SHUTDOWN reason=timeout で応答が返らなかった in-flight 呼び出し。
+    /// 応答が返らないまま実行環境が畳まれた in-flight 呼び出し。
+    /// 関数のタイムアウトに限らない（理由は errorContext.errorType）。
     Timeout,
 }
 
@@ -72,16 +73,16 @@ pub struct FailureRecord {
     pub error_context: ErrorContext,
     /// イベントが非 JSON ボディの生テキストで保存されている場合 true。
     /// CLI は replay/redrive 時に JSON 再エンコードせず原文を送る。
-    #[serde(rename = "eventIsRawText", default, skip_serializing_if = "is_false")]
+    #[serde(rename = "eventIsRawText", skip_serializing_if = "is_false")]
     pub event_is_raw_text: bool,
     /// イベントが UTF-8 でないバイナリの場合 true。
     /// `event` は base64 文字列として保持され、CLI は replay 時に
     /// デコードして元のバイト列を再送する。
-    #[serde(rename = "eventIsBase64", default, skip_serializing_if = "is_false")]
+    #[serde(rename = "eventIsBase64", skip_serializing_if = "is_false")]
     pub event_is_base64: bool,
     #[serde(rename = "scrubReport")]
     pub scrub_report: ScrubReportJson,
-    #[serde(default, skip_serializing_if = "is_false")]
+    #[serde(skip_serializing_if = "is_false")]
     pub truncated: bool,
 }
 

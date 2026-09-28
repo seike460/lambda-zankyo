@@ -71,7 +71,8 @@ pub struct ProxyState {
     pub recorder: Arc<Recorder>,
     /// ボディ上限などの動作ノブ。env / SSM 由来の値をそのまま使う。
     pub cfg: crate::config::Config,
-    /// 進行中の save タスク。子終了時に残っていれば drain される。
+    /// 起動時の回収タスク（inflight 変換・spill 再送）。
+    /// 子終了時に残っていれば drain される。
     pub pending: PendingSaves,
     /// 処理中のハンドラ数。drain が「これ以上 save が増えない」
     /// 地点を判断するのに使う。
@@ -242,7 +243,7 @@ pub(crate) async fn drain_pending(state: &ProxyState, budget: std::time::Duratio
             while let Some(res) = p.set.join_next().await {
                 // panic した回収タスクはレコードを失う — 数えて警告に残す
                 if let Err(e) = res {
-                    warn!(error = %e, "pending record save panicked");
+                    warn!(error = %e, "record recovery task panicked");
                 }
             }
         }
@@ -254,24 +255,5 @@ pub(crate) async fn drain_pending(state: &ProxyState, budget: std::time::Duratio
     };
     if tokio::time::timeout(budget, drain).await.is_err() {
         warn!("pending record saves did not finish before exit");
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn route_matching_shapes() {
-        let segs: Vec<&str> = "/2018-06-01/runtime/invocation/next".split('/').collect();
-        assert!(matches!(
-            segs.as_slice(),
-            ["", "2018-06-01", "runtime", "invocation", "next"]
-        ));
-        let segs: Vec<&str> = "/2018-06-01/runtime/invocation/abc/error"
-            .split('/')
-            .collect();
-        assert!(matches!(
-            segs.as_slice(),
-            ["", "2018-06-01", "runtime", "invocation", "abc", "error"]
-        ));
     }
 }

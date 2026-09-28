@@ -223,6 +223,10 @@ fn spawn_child(argv: &[OsString], listener: &TcpListener) -> Option<Child> {
     }
 }
 
+/// exec wrapper プロセス内からの internal register。
+/// `/opt/extensions/zankyo` を含まない独自 Layer 向けのフォールバック。
+/// AWS は internal extension の SHUTDOWN 購読を認めないため、
+/// 実環境では register が拒否されうる。
 /// extension 登録はベストエフォート: 失敗しても proxy 経由の
 /// /error・/response 捕捉は残る（timeout 捕捉だけが失われる）。
 /// SHUTDOWN 受信時に `true`、それ以外で終われば `false` を返す。
@@ -235,7 +239,7 @@ async fn start_extension(
 ) -> bool {
     match extension::register(&client, &upstream, register_timeout).await {
         Ok(ext_id) => {
-            info!("registered as external extension");
+            info!("registered as internal extension");
             extension::run_event_loop(client, upstream, ext_id, inflight, recorder).await
         }
         Err(e) => {

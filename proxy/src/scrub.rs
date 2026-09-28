@@ -261,10 +261,9 @@ impl Scrubber {
 }
 
 fn mask_shape(s: &str) -> String {
-    match s.chars().count() {
-        0 => "***".to_string(),
-        1..=4 => "***".to_string(),
-        _ => format!("{}***", s.chars().next().unwrap_or('*')),
+    match s.chars().next() {
+        Some(c) if s.chars().count() > 4 => format!("{c}***"),
+        _ => "***".to_string(),
     }
 }
 
