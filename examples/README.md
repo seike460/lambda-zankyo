@@ -14,6 +14,9 @@ pnpm build                            # zankyo-cdk の dist を生成（workspac
 pnpm --filter zankyo-examples run deploy
 ```
 
+`cdk synth` のみ試す場合も同じ前提です（`pnpm build` 後に
+`pnpm --filter zankyo-examples run synth`）。
+
 ## 検証の流れ
 
 ```bash
