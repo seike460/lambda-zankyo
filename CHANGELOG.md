@@ -19,6 +19,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   上限を超えうる
 - **cli** — `fixture --out` は、新しく作るファイルを所有者だけが読める
   モード（0600）で書く。既存のファイルを上書きするときは、モードを変えない
+- **cli** — npm の tarball から、使われない型定義（`.d.ts`）と source map を外した。
+  source map は tarball に含まれない `src/` を指していた
 
 ### Fixed
 
