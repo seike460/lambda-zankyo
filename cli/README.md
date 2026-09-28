@@ -32,7 +32,7 @@ AWS API 呼び出しのタイムアウトは env で調整できます
 |---|---|---|
 | `ZANKYO_CONNECT_TIMEOUT_MS` | `5000` | AWS API 接続の打ち切り |
 | `ZANKYO_REQUEST_TIMEOUT_MS` | `30000` | AWS API 応答の打ち切り |
-| `ZANKYO_LIST_PAGE_SIZE` | `200` | ListObjectsV2 の 1 ページ件数 |
+| `ZANKYO_LIST_PAGE_SIZE` | `200` | ListObjectsV2 の 1 ページ件数（S3 は 1000 件までしか返さない） |
 | `ZANKYO_LIST_MAX_PAGES` | `50` | レコード探索のページ走査上限 |
 | `ZANKYO_RECORD_MAX_MB` | `32` | レコード1件の読み取り上限（MiB） |
 

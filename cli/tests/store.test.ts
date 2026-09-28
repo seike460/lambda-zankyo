@@ -90,6 +90,30 @@ describe('listRecordKeys', () => {
     assert.equal(s3.listInputs[0]?.Prefix, 'zankyo/fn/');
   });
 
+  it('stops at ZANKYO_LIST_MAX_PAGES even when --since filters out every page', async (t) => {
+    const saved = process.env.ZANKYO_LIST_MAX_PAGES;
+    process.env.ZANKYO_LIST_MAX_PAGES = '2';
+    const warnings: string[] = [];
+    t.mock.method(console, 'error', (...args: unknown[]) => warnings.push(args.join(' ')));
+    t.after(() => {
+      if (saved === undefined) {
+        delete process.env.ZANKYO_LIST_MAX_PAGES;
+      } else {
+        process.env.ZANKYO_LIST_MAX_PAGES = saved;
+      }
+    });
+    const oldPage = (token: string) => ({
+      Contents: [obj(`zankyo/fn/2026/01/01/${token}.json`, '2026-01-01T00:00:00Z')],
+      IsTruncated: true,
+      NextContinuationToken: token,
+    });
+    const s3 = fakeS3([oldPage('t2'), oldPage('t3'), oldPage('t4'), oldPage('t5'), {}]);
+    const refs = await listRecordKeys(s3, 'bkt', { since: new Date('2026-09-01T00:00:00Z') });
+    assert.deepEqual(refs, []);
+    assert.equal(s3.listInputs.length, 2);
+    assert.ok(warnings.some((w) => w.includes('listing truncated after 2 pages')));
+  });
+
   it('filters by since', async () => {
     const s3 = fakeS3([
       {

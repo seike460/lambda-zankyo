@@ -45,6 +45,7 @@ export async function listRecordKeys(
     : RECORD_PREFIX_SLASH;
   const refs: RecordRef[] = [];
   let token: string | undefined;
+  let pages = 0;
   do {
     const out = await listPage(s3, bucket, prefix, token);
     for (const o of out.Contents ?? []) {
@@ -53,16 +54,18 @@ export async function listRecordKeys(
       refs.push({ key: o.Key, lastModified: o.LastModified });
     }
     token = out.IsTruncated ? out.NextContinuationToken : undefined;
+    pages += 1;
     // S3 の list はキー辞書順（= 日付パーティション昇順）なので、
     // 途中で打ち切ると「最新」の判定が最古側のページだけで決まる。
     // --limit 指定時も新しい順に並べてから切るため、
-    // 上限ページまでは必ず走査する。
-  } while (token && refs.length < pageSize() * maxPages());
+    // 上限ページまでは必ず走査する。上限は --since で除外した分も含めた
+    // ページ数で数える（件数で数えると、古いページが続く限り止まらない）。
+  } while (token && pages < maxPages());
   if (token) {
     // 打ち切りを黙らせると --last が実際より古いレコードを
     // 「最新」と答える。絞り込み手段を添えて stderr へ警告する。
     console.error(
-      `zankyo: listing truncated at ${refs.length} objects; results may miss newer records — narrow with --function or increase ZANKYO_LIST_MAX_PAGES`,
+      `zankyo: listing truncated after ${pages} pages; results may miss newer records — narrow with --function or increase ZANKYO_LIST_MAX_PAGES`,
     );
   }
   refs.sort((a, b) => (b.lastModified?.getTime() ?? 0) - (a.lastModified?.getTime() ?? 0));

@@ -40,6 +40,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **proxy** — README と設定の説明で、`ZANKYO_FLUSH_BUDGET_MS` と
   `ZANKYO_PUT_TIMEOUT_MS` の役割を実際の動作に合わせた。失敗レコードの PUT
   （呼び出し中と SHUTDOWN 後）は前者、spill 再送の PUT は後者で打ち切る
+- **cli** — `list --since` で古いページがすべて除外されると、
+  `ZANKYO_LIST_MAX_PAGES` を超えてバケットを最後まで走査していた。
+  走査の上限を、除外後の件数ではなくページ数で数える
 - **cli / construct** — npm の tarball に LICENSE を同梱する。以前は
   MIT の許諾文が配布物に入っていなかった
 - **cli / construct** — pack と publish の前（`prepack`）に build を実行する。
