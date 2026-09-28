@@ -6,6 +6,7 @@ import {
   RemovalPolicy,
   aws_s3 as s3,
   aws_sam as sam,
+  Token,
 } from 'aws-cdk-lib';
 import { Construct } from 'constructs';
 
@@ -34,7 +35,7 @@ export interface ZankyoProps {
    * 新規作成する。
    */
   readonly bucket?: s3.IBucket;
-  /** 新規バケットのレコード保持日数（既定 30）。bucket 指定時は無関係。 */
+  /** 新規バケットのレコード保持日数（1 以上の整数、既定 30）。bucket 指定時は無関係。 */
   readonly recordRetentionDays?: number;
   /** SSE-KMS に使うキー。未指定なら SSE-S3。 */
   readonly kmsKey?: kms.IKey;
@@ -83,9 +84,7 @@ export class Zankyo extends Construct {
         ...(props.kmsKey
           ? { encryption: s3.BucketEncryption.KMS, encryptionKey: props.kmsKey }
           : { encryption: s3.BucketEncryption.S3_MANAGED }),
-        lifecycleRules: [
-          { expiration: Duration.days(props.recordRetentionDays ?? DEFAULT_RETENTION_DAYS) },
-        ],
+        lifecycleRules: [{ expiration: Duration.days(retentionDays(props.recordRetentionDays)) }],
         // 失敗レコードは監査証跡になりうるため、誤削除より残す方を既定にする
         removalPolicy: RemovalPolicy.RETAIN,
       });
@@ -140,4 +139,13 @@ export class Zankyo extends Construct {
     // SSE-KMS 書き込みに必要なのは Encrypt と GenerateDataKey。Decrypt は不要。
     this.kmsKey?.grant(fn, 'kms:Encrypt', 'kms:GenerateDataKey');
   }
+}
+
+/** S3 のライフサイクルの Days は 1 以上の整数。0 は synth を通り、デプロイで初めて失敗する。 */
+function retentionDays(days: number | undefined): number {
+  const value = days ?? DEFAULT_RETENTION_DAYS;
+  if (!Token.isUnresolved(value) && !(Number.isInteger(value) && value >= 1)) {
+    throw new Error(`Zankyo: recordRetentionDays must be a positive integer (got ${value})`);
+  }
+  return value;
 }

@@ -1,7 +1,14 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { describe, it } from 'node:test';
-import { App, aws_kms as kms, aws_lambda as lambda, Stack, aws_s3 as s3 } from 'aws-cdk-lib';
+import {
+  App,
+  CfnParameter,
+  aws_kms as kms,
+  aws_lambda as lambda,
+  Stack,
+  aws_s3 as s3,
+} from 'aws-cdk-lib';
 import { Match, Template } from 'aws-cdk-lib/assertions';
 import { Zankyo } from '../src/index.ts';
 
@@ -82,6 +89,33 @@ describe('Zankyo', () => {
     assert.match(sarTemplate, /^Outputs:\n(?:.*\n)*? {2}LayerVersionArnArm64:$/m);
     const { appId, layers } = sarWiring(t);
     assert.deepEqual(layers, [{ 'Fn::GetAtt': [appId, 'Outputs.LayerVersionArnArm64'] }]);
+  });
+
+  it('rejects a recordRetentionDays that S3 lifecycle cannot accept', () => {
+    for (const days of [0, -1, 1.5, Number.NaN]) {
+      assert.throws(
+        () => new Zankyo(newStack(), 'Z', { recordRetentionDays: days }),
+        /recordRetentionDays must be a positive integer/,
+      );
+    }
+  });
+
+  it('accepts a recordRetentionDays of 1 and an unresolved token', () => {
+    const t = synth((stack) => {
+      new Zankyo(stack, 'Z', { recordRetentionDays: 1 });
+    });
+    t.hasResourceProperties('AWS::S3::Bucket', {
+      LifecycleConfiguration: { Rules: [Match.objectLike({ ExpirationInDays: 1 })] },
+    });
+    const withToken = synth((stack) => {
+      const days = new CfnParameter(stack, 'Days', { type: 'Number' }).valueAsNumber;
+      new Zankyo(stack, 'Z', { recordRetentionDays: days });
+    });
+    withToken.hasResourceProperties('AWS::S3::Bucket', {
+      LifecycleConfiguration: {
+        Rules: [Match.objectLike({ ExpirationInDays: { Ref: 'Days' } })],
+      },
+    });
   });
 
   it('attachTo wires env, layer and PutObject permission', () => {
