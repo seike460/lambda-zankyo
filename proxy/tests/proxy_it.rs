@@ -654,6 +654,156 @@ async fn leftover_inflight_stage_becomes_timeout_record() {
     let _ = std::fs::remove_dir_all(&spill_dir);
 }
 
+/// Extensions API モックが受けた (path, 登録名 or 識別子ヘッダ)。
+type ExtHeaders = Arc<Mutex<Vec<(String, Option<String>)>>>;
+
+/// `/register` は識別子 `ext-test` を払い出し、`/event/next` は
+/// 1 回目に INVOKE、2 回目以降に SHUTDOWN を返す Extensions API モック。
+async fn spawn_extensions_api(reason: &'static str) -> (String, Captured, ExtHeaders) {
+    let seen: ExtHeaders = Arc::new(Mutex::new(Vec::new()));
+    let polls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let (addr, hits) = spawn_mock({
+        let seen = seen.clone();
+        move |_m, path, headers, _b| {
+            let header = |k: &str| {
+                headers
+                    .get(k)
+                    .and_then(|v| v.to_str().ok())
+                    .map(String::from)
+            };
+            if path == "/2020-01-01/extension/register" {
+                seen.lock()
+                    .unwrap()
+                    .push((path.to_string(), header("lambda-extension-name")));
+                return Response::builder()
+                    .status(StatusCode::OK)
+                    .header("lambda-extension-identifier", "ext-test")
+                    .body(boxed_full(Bytes::new()))
+                    .unwrap();
+            }
+            if path == "/2020-01-01/extension/event/next" {
+                seen.lock()
+                    .unwrap()
+                    .push((path.to_string(), header("lambda-extension-identifier")));
+                let deadline = OffsetDateTime::now_utc().unix_timestamp() * 1000 + 60_000;
+                if polls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+                    return ok_body(json!({"eventType": "INVOKE", "deadlineMs": deadline}));
+                }
+                return ok_body(json!({
+                    "eventType": "SHUTDOWN",
+                    "shutdownReason": reason,
+                    "deadlineMs": deadline
+                }));
+            }
+            Response::builder()
+                .status(StatusCode::NOT_FOUND)
+                .body(boxed_full(Bytes::new()))
+                .unwrap()
+        }
+    })
+    .await;
+    (addr, hits, seen)
+}
+
+fn register_body(hits: &Captured) -> Value {
+    let (_, _, body) = captured(hits)
+        .into_iter()
+        .find(|(m, p, _)| m == "POST" && p == "/2020-01-01/extension/register")
+        .expect("register request");
+    serde_json::from_slice(&body).unwrap()
+}
+
+/// register 1 回 → INVOKE と SHUTDOWN の 2 回ポーリング、の順で
+/// 登録名と識別子が正しく送られたこと。
+fn assert_registered_then_polled_until_shutdown(seen: &ExtHeaders) {
+    let seen = seen.lock().unwrap().clone();
+    let next = "/2020-01-01/extension/event/next".to_string();
+    let id = Some("ext-test".to_string());
+    assert_eq!(
+        seen,
+        vec![
+            (
+                "/2020-01-01/extension/register".to_string(),
+                Some("zankyo".to_string())
+            ),
+            (next.clone(), id.clone()),
+            (next, id),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn external_agent_converts_staged_inflight_on_shutdown() {
+    // 本番の timeout 捕捉経路: register → SHUTDOWN 受信 → .inflight を timeout 記録へ
+    let (api_addr, api_hits, seen) = spawn_extensions_api("timeout").await;
+    let (s3_addr, s3_hits) = spawn_mock(|_m, _p, _h, _b| ok_empty()).await;
+    let spill_dir = std::env::temp_dir().join(format!("zankyo-it-agent-{}", std::process::id()));
+    let recorder = recorder_to_with_spill(&s3_addr, &spill_dir);
+    recorder.stage_inflight(&Invocation {
+        request_id: "req-agent".to_string(),
+        event: json!({"token": "secret-token-value"}),
+        encoding: EventEncoding::Json,
+        invoked_at: OffsetDateTime::now_utc(),
+    });
+
+    assert!(zankyo::extension::run_agent(new_client(), api_addr, recorder).await);
+
+    assert_eq!(
+        register_body(&api_hits),
+        json!({"events": ["INVOKE", "SHUTDOWN"]})
+    );
+    assert_registered_then_polled_until_shutdown(&seen);
+    assert!(wait_for(2_000, || !captured(&s3_hits).is_empty()).await);
+    let (method, path, body) = captured(&s3_hits).remove(0);
+    assert_eq!(method, "PUT");
+    assert!(path.contains("req-agent.json"));
+    let rec: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(rec["failureType"], "timeout");
+    assert_eq!(rec["errorContext"]["errorType"], "Timeout");
+    assert!(!spill_dir.join("zankyo-req-agent.inflight").exists());
+    let _ = std::fs::remove_dir_all(&spill_dir);
+}
+
+#[tokio::test]
+async fn passthrough_agent_stays_registered_until_shutdown() {
+    // 記録しない agent も登録して SHUTDOWN まで待つ。登録前や SHUTDOWN 前に
+    // 終了すると、platform は終了コードに関係なく Init を失敗させるため。
+    for (case, extra) in [
+        (
+            "disabled",
+            vec![("ZANKYO_BUCKET", "b"), ("ZANKYO_DISABLED", "1")],
+        ),
+        ("no bucket", vec![]),
+        (
+            "config error",
+            vec![("ZANKYO_BUCKET", "b"), ("ZANKYO_SCRUB_MODE", "bogus")],
+        ),
+    ] {
+        let (api_addr, api_hits, seen) = spawn_extensions_api("spindown").await;
+        let mut env: HashMap<String, String> = extra
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        env.insert("AWS_LAMBDA_RUNTIME_API".to_string(), api_addr);
+
+        let code = tokio::time::timeout(
+            Duration::from_secs(5),
+            zankyo::orchestrate::run_agent_with_env(&env),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("{case}: agent must return after SHUTDOWN"));
+
+        assert_eq!(code, 0, "{case}");
+        // INVOKE は購読しない（呼び出しごとの往復を増やさない）
+        assert_eq!(
+            register_body(&api_hits),
+            json!({"events": ["SHUTDOWN"]}),
+            "{case}"
+        );
+        assert_registered_then_polled_until_shutdown(&seen);
+    }
+}
+
 #[tokio::test]
 async fn oversized_body_is_rejected_without_forwarding() {
     let (api_addr, api_hits) = spawn_mock(|_m, _p, _h, _b| ok_empty()).await;

@@ -32,6 +32,9 @@ platform が別プロセスで agent を起動する。in-flight イベントは
 `.inflight` ステージを書き、agent が SHUTDOWN で読んで
 timeout レコードへ変換する。完了した呼び出しのステージは
 proxy が即削除する（残存＝未完の証跡）。
+agent は passthrough 判定でも終了せず、`SHUTDOWN` だけを購読して
+待機する。登録前や `SHUTDOWN` 前に extension が終了すると、
+終了コードに関係なく platform が Init を失敗させるため。
 
 ## 品質・保守性の不変条件
 
@@ -63,7 +66,7 @@ proxy が即削除する（残存＝未完の証跡）。
 | `proxy.rs` | Runtime API の listen・経路判定・接続管理 |
 | `handlers.rs` | `/next`・`/response`・`/error`・`/init/error` の個別処理 |
 | `upstream.rs` | 上流 Runtime API への転送。hop-by-hop 除去と上限付きボディ読み |
-| `extension.rs` | Extensions API。internal ループと external agent（`.inflight` 変換） |
+| `extension.rs` | Extensions API。internal ループと external agent（`.inflight` 変換・passthrough 時の待機） |
 | `inflight.rs` | `/next`〜確定までのイベント保持（Mutex<HashMap>） |
 | `store.rs` | S3 PutObject とレコード組み立て（scrub 適用） |
 | `spill.rs` | /tmp 退避の管理。書き込み・回収・保持数上限・廃棄 |

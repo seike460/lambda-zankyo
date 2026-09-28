@@ -47,6 +47,11 @@ layer は `/opt/extensions/zankyo` を配置し、platform が agent を
 timeout レコードへ変換し S3 へフラッシュします（ベストエフォート。
 shutdown ウィンドウに間に合わなければ spill が残り、次回 init が拾います）。
 
+記録しない状態（`ZANKYO_DISABLED`・バケット未設定・設定エラー）でも、
+agent は `SHUTDOWN` だけを購読して待機します。登録前や `SHUTDOWN` 前に
+終了した extension は、終了コードに関係なく Lambda が Init 失敗として
+扱うためです。
+
 ## 使い方
 
 ### 1. Layer の導入

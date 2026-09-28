@@ -35,20 +35,33 @@ const EXTERNAL_EXT_PATH: &str = "/opt/extensions/zankyo";
 /// （main.rs が空 argv をここへ振り分ける）。proxy と別プロセスの
 /// ため Runtime API へ自前で register し、SHUTDOWN で inflight
 /// ステージを timeout 記録へ変換する。
-/// 失敗しても exit 0: extension の非 0 終了は platform にエラーと
-/// 解釈されうるため、記録不能でも静かに畳む（fail-open）。
+/// passthrough でもすぐには終了しない: SHUTDOWN 前に extension が
+/// 終わると、終了コードに関係なく platform は Init を失敗させる。
+/// 記録しない場合も登録して SHUTDOWN まで待つ（fail-open）。
 pub async fn run_agent() -> u8 {
     let env_map: HashMap<String, String> = std::env::vars().collect();
-    let StartupPlan::Record(plan) = setup::resolve_plan(&env_map).await else {
-        return 0;
-    };
-    let RecordPlan {
-        cfg,
-        shared,
-        upstream,
-    } = *plan;
-    let recorder = Arc::new(setup::build_recorder(&shared, cfg, &env_map));
-    extension::run_agent(new_client(), upstream, recorder).await;
+    run_agent_with_env(&env_map).await
+}
+
+/// `run_agent` の本体。env を引数で受け、起動判定からの配線を
+/// プロセスの環境変数に触れずに検証できるようにする。
+pub async fn run_agent_with_env(env_map: &HashMap<String, String>) -> u8 {
+    match setup::resolve_plan(env_map).await {
+        StartupPlan::Record(plan) => {
+            let RecordPlan {
+                cfg,
+                shared,
+                upstream,
+            } = *plan;
+            let recorder = Arc::new(setup::build_recorder(&shared, cfg, env_map));
+            extension::run_agent(new_client(), upstream, recorder).await;
+        }
+        StartupPlan::Passthrough => {
+            if let Some(upstream) = env_map.get("AWS_LAMBDA_RUNTIME_API") {
+                extension::run_passthrough_agent(new_client(), upstream.clone()).await;
+            }
+        }
+    }
     0
 }
 

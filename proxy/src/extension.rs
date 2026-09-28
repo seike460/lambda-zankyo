@@ -1,8 +1,13 @@
 //! Extensions API クライアント。
 //! 単一バイナリが proxy と external extension を兼務するため、
-//! `/register` で INVOKE/SHUTDOWN を購読し、`/event/next` をポーリングする。
+//! `/register` で INVOKE/SHUTDOWN（記録しない場合は SHUTDOWN だけ）を購読し、
+//! `/event/next` をポーリングする。
 //! SHUTDOWN（reason=timeout）を受けたら in-flight 呼び出しをフラッシュする。
 
+use crate::config::{
+    Config, DEFAULT_EXT_BODY_KB, DEFAULT_EXT_MAX_POLL_FAILURES, DEFAULT_EXT_RETRY_MS,
+    DEFAULT_REGISTER_TIMEOUT_MS,
+};
 use crate::error::{Result, ZankyoError};
 use crate::inflight::InFlight;
 use crate::proxy::{boxed_full, HttpClient};
@@ -36,12 +41,22 @@ pub async fn register(
     upstream_api: &str,
     timeout: Duration,
 ) -> Result<String> {
+    register_events(client, upstream_api, timeout, &["INVOKE", "SHUTDOWN"]).await
+}
+
+async fn register_events(
+    client: &HttpClient,
+    upstream_api: &str,
+    timeout: Duration,
+    events: &[&str],
+) -> Result<String> {
+    let body = serde_json::to_vec(&serde_json::json!({ "events": events }))?;
     let req = Request::builder()
         .method(Method::POST)
         .uri(format!("http://{upstream_api}{EXT_BASE}/register"))
         .header("Lambda-Extension-Name", "zankyo")
         .header("content-type", "application/json")
-        .body(boxed_full(r#"{"events":["INVOKE","SHUTDOWN"]}"#))?;
+        .body(boxed_full(body))?;
     let resp = tokio::time::timeout(timeout, client.request(req))
         .await
         .map_err(|_| ZankyoError::Upstream("extension register timed out".into()))?
@@ -105,74 +120,50 @@ pub async fn run_event_loop(
     inflight: Arc<InFlight>,
     recorder: Arc<Recorder>,
 ) -> bool {
-    let cfg = recorder.config();
-    let retry_delay = Duration::from_millis(cfg.ext_retry_ms);
-    let max_failures = cfg.ext_max_poll_failures;
-    let body_limit = cfg.ext_body_kb.saturating_mul(1024);
-    let mut failures: u32 = 0;
-    loop {
-        match next_event(&client, &upstream_api, &ext_id, body_limit).await {
-            Ok(ev) if ev.event_type == "SHUTDOWN" => {
-                info!(
-                    reason = ev.shutdown_reason.as_deref().unwrap_or("unknown"),
-                    pending = inflight.len(),
-                    "shutdown received; flushing in-flight invocations"
-                );
-                let pending = inflight.drain_and_claim();
-                if pending.is_empty() {
-                    return true;
-                }
-                // フラッシュ予算は設定値と、イベントが示す凍結期限の残時間の小さい方。
-                // deadlineMs が来ない環境では設定値のみで判断する。
-                let budget = flush_budget_for(ev.deadline_ms, recorder.flush_budget());
-                let reason = ev.shutdown_reason.clone();
-                // パス1: 全件を同期で /tmp へ退避する。最初の PUT が予算を
-                // 食い潰すと 2 件目以降が spill すらされず消えるため、
-                // 書き込みが速い spill を先に済ませてから PUT に入る。
-                let mut jobs = Vec::new();
-                // drain と記録権確保を原子的に行う — 隙間に到着した
-                // /error が event 欠落のまま記録権を取る競合を防ぐ。
-                // （/error が先ならイベント付き handler_error が記録され、
-                // こちらは drain に残らないので両方ともイベントが残る）
-                for inv in pending {
-                    // None はシリアライズ失敗＝残せない。warn に残す。
-                    if let Some(j) = recorder.stage_timeout(&inv, reason.as_deref()) {
-                        jobs.push(j);
-                    } else {
-                        warn!(request_id = %inv.request_id, "failed to stage timed-out record");
-                    }
-                }
-                // パス2: 残予算内で PUT。間に合わない分は spill が残り、
-                // 次回 init の recover_spills が回収する。
-                let flush = async {
-                    for job in &jobs {
-                        recorder.commit_staged(job).await;
-                    }
-                };
-                if tokio::time::timeout(budget, flush).await.is_err() {
-                    warn!("shutdown flush exceeded total budget");
-                }
-                return true;
-            }
-            Ok(_) => {
-                failures = 0;
-                continue;
-            }
-            Err(e) => {
-                // ネットワーク断・ボディ破損など。ポーリングを諦めると
-                // timeout 捕捉を失うので、短い待機を挟んで再試行する。
-                // ただし連続失敗が上限を超えたら Extensions API の障害と
-                // みなしてループを抜ける（無限リトライで zombie 化しない）。
-                failures += 1;
-                if failures >= max_failures {
-                    warn!(failures, "extension event poll keeps failing; giving up");
-                    return false;
-                }
-                warn!(error = %e, failures, "extension event poll failed; retrying");
-                tokio::time::sleep(retry_delay).await;
-            }
+    let limits = PollLimits::from_config(recorder.config());
+    let Some(ev) = wait_for_shutdown(&client, &upstream_api, &ext_id, &limits).await else {
+        return false;
+    };
+    info!(
+        reason = ev.shutdown_reason.as_deref().unwrap_or("unknown"),
+        pending = inflight.len(),
+        "shutdown received; flushing in-flight invocations"
+    );
+    // drain と記録権確保を原子的に行う — 隙間に到着した
+    // /error が event 欠落のまま記録権を取る競合を防ぐ。
+    // （/error が先ならイベント付き handler_error が記録され、
+    // こちらは drain に残らないので両方ともイベントが残る）
+    let pending = inflight.drain_and_claim();
+    if pending.is_empty() {
+        return true;
+    }
+    // フラッシュ予算は設定値と、イベントが示す凍結期限の残時間の小さい方。
+    // deadlineMs が来ない環境では設定値のみで判断する。
+    let budget = flush_budget_for(ev.deadline_ms, recorder.flush_budget());
+    let reason = ev.shutdown_reason.clone();
+    // パス1: 全件を同期で /tmp へ退避する。最初の PUT が予算を
+    // 食い潰すと 2 件目以降が spill すらされず消えるため、
+    // 書き込みが速い spill を先に済ませてから PUT に入る。
+    let mut jobs = Vec::new();
+    for inv in pending {
+        // None はシリアライズ失敗＝残せない。warn に残す。
+        if let Some(j) = recorder.stage_timeout(&inv, reason.as_deref()) {
+            jobs.push(j);
+        } else {
+            warn!(request_id = %inv.request_id, "failed to stage timed-out record");
         }
     }
+    // パス2: 残予算内で PUT。間に合わない分は spill が残り、
+    // 次回 init の recover_spills が回収する。
+    let flush = async {
+        for job in &jobs {
+            recorder.commit_staged(job).await;
+        }
+    };
+    if tokio::time::timeout(budget, flush).await.is_err() {
+        warn!("shutdown flush exceeded total budget");
+    }
+    true
 }
 
 /// external extension プロセスのイベントループ。
@@ -185,9 +176,7 @@ pub async fn run_event_loop(
 /// 戻り値は「SHUTDOWN を受けてフラッシュまで済ませたか」。
 pub async fn run_agent(client: HttpClient, upstream_api: String, recorder: Arc<Recorder>) -> bool {
     let cfg = recorder.config();
-    let retry_delay = Duration::from_millis(cfg.ext_retry_ms);
-    let max_failures = cfg.ext_max_poll_failures;
-    let body_limit = cfg.ext_body_kb.saturating_mul(1024);
+    let limits = PollLimits::from_config(cfg);
     let ext_id = match register(
         &client,
         &upstream_api,
@@ -202,33 +191,95 @@ pub async fn run_agent(client: HttpClient, upstream_api: String, recorder: Arc<R
         }
     };
     info!("external extension registered; waiting for shutdown events");
+    let Some(ev) = wait_for_shutdown(&client, &upstream_api, &ext_id, &limits).await else {
+        return false;
+    };
+    info!(
+        reason = ev.shutdown_reason.as_deref().unwrap_or("unknown"),
+        "shutdown received; converting staged inflights to timeout records"
+    );
+    let budget = flush_budget_for(ev.deadline_ms, recorder.flush_budget());
+    let flush = recorder.recover_inflights(ev.shutdown_reason.as_deref());
+    if tokio::time::timeout(budget, flush).await.is_err() {
+        warn!("inflight flush exceeded shutdown budget; spills remain for next init");
+    }
+    true
+}
+
+/// 記録しない（passthrough の）external extension プロセス。
+/// 登録前や SHUTDOWN 前に extension が終了すると、終了コードに
+/// 関係なく platform は Extension.Crash として Init を失敗させる。
+/// そのため SHUTDOWN だけを購読して環境の終了まで待つ（fail-open）。
+/// INVOKE は購読しない — 呼び出しごとの往復を増やさないため。
+/// 設定自体が壊れている場合もあるので、ノブは既定値を使う。
+/// 戻り値は「SHUTDOWN を受けたか」。
+pub async fn run_passthrough_agent(client: HttpClient, upstream_api: String) -> bool {
+    let limits = PollLimits {
+        body_limit: DEFAULT_EXT_BODY_KB * 1024,
+        retry_delay: Duration::from_millis(DEFAULT_EXT_RETRY_MS),
+        max_failures: DEFAULT_EXT_MAX_POLL_FAILURES,
+    };
+    let ext_id = match register_events(
+        &client,
+        &upstream_api,
+        Duration::from_millis(DEFAULT_REGISTER_TIMEOUT_MS),
+        &["SHUTDOWN"],
+    )
+    .await
+    {
+        Ok(id) => id,
+        Err(e) => {
+            warn!(error = %e, "external extension register failed");
+            return false;
+        }
+    };
+    info!("recording disabled; external extension idles until shutdown");
+    wait_for_shutdown(&client, &upstream_api, &ext_id, &limits)
+        .await
+        .is_some()
+}
+
+/// `/event/next` ポーリングのノブ。
+struct PollLimits {
+    body_limit: usize,
+    retry_delay: Duration,
+    max_failures: u32,
+}
+
+impl PollLimits {
+    fn from_config(cfg: &Config) -> Self {
+        Self {
+            body_limit: cfg.ext_body_kb.saturating_mul(1024),
+            retry_delay: Duration::from_millis(cfg.ext_retry_ms),
+            max_failures: cfg.ext_max_poll_failures,
+        }
+    }
+}
+
+/// SHUTDOWN が届くまで `/event/next` をポーリングする。INVOKE は読み捨てる。
+/// ネットワーク断・ボディ破損などの失敗は短い待機を挟んで再試行する —
+/// ポーリングを諦めると timeout 捕捉を失うため。ただし連続失敗が上限に
+/// 達したら Extensions API の障害とみなして None を返す（無限リトライで
+/// zombie 化しない）。
+async fn wait_for_shutdown(
+    client: &HttpClient,
+    upstream_api: &str,
+    ext_id: &str,
+    limits: &PollLimits,
+) -> Option<ExtensionEvent> {
     let mut failures: u32 = 0;
     loop {
-        match next_event(&client, &upstream_api, &ext_id, body_limit).await {
-            Ok(ev) if ev.event_type == "SHUTDOWN" => {
-                info!(
-                    reason = ev.shutdown_reason.as_deref().unwrap_or("unknown"),
-                    "shutdown received; converting staged inflights to timeout records"
-                );
-                let budget = flush_budget_for(ev.deadline_ms, recorder.flush_budget());
-                let flush = recorder.recover_inflights(ev.shutdown_reason.as_deref());
-                if tokio::time::timeout(budget, flush).await.is_err() {
-                    warn!("inflight flush exceeded shutdown budget; spills remain for next init");
-                }
-                return true;
-            }
-            Ok(_) => {
-                failures = 0;
-                continue;
-            }
+        match next_event(client, upstream_api, ext_id, limits.body_limit).await {
+            Ok(ev) if ev.event_type == "SHUTDOWN" => return Some(ev),
+            Ok(_) => failures = 0,
             Err(e) => {
                 failures += 1;
-                if failures >= max_failures {
+                if failures >= limits.max_failures {
                     warn!(failures, "extension event poll keeps failing; giving up");
-                    return false;
+                    return None;
                 }
                 warn!(error = %e, failures, "extension event poll failed; retrying");
-                tokio::time::sleep(retry_delay).await;
+                tokio::time::sleep(limits.retry_delay).await;
             }
         }
     }
