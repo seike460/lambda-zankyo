@@ -185,9 +185,10 @@ s3://{ZANKYO_BUCKET}/zankyo/{function-name}/{yyyy}/{mm}/{dd}/{requestId}.json
 - 依存は lockfile で固定（`Cargo.lock` / `pnpm-lock.yaml`）。
   CI で `cargo audit` と `pnpm audit` を実行します。
 - `pnpm.auditConfig.ignoreGhsas` の GHSA-6cpc-mj5c-m9rq は
-  ワークスペース内の `cli/` パッケージ（v0.1.0）が deprecated な同名 npm
-  パッケージと誤検知で衝突するための除外です。実依存に `cli` を追加する
-  場合はこの除外を見直してください。
+  ワークスペースの importer パス `cli/` が deprecated な npm パッケージ
+  `cli`（<1.0.0）と誤照合されるための除外です（中身の package 名は
+  `lambda-zankyo` で、実依存に `cli` は存在しません）。実依存に `cli` を
+  追加する場合はこの除外を見直してください。
 
 ## 制限事項（重要）
 
