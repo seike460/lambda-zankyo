@@ -154,7 +154,8 @@ pub fn error_context_from_body(body: &[u8], header_error_type: Option<String>) -
         if let Some(m) = v.get("errorMessage").and_then(|x| x.as_str()) {
             ctx.error_message = Some(m.to_string());
         }
-        match v.get("stackTrace") {
+        // Node.js ランタイムはスタックを `trace` キーで送る
+        match v.get("stackTrace").or_else(|| v.get("trace")) {
             Some(Value::String(s)) => ctx.stack_trace = Some(s.clone()),
             Some(Value::Array(frames)) => {
                 ctx.stack_trace = Some(
@@ -241,6 +242,17 @@ mod tests {
         assert_eq!(ctx.error_type.as_deref(), Some("Error"));
         assert_eq!(ctx.error_message.as_deref(), Some("boom"));
         assert_eq!(ctx.stack_trace.as_deref(), Some("a\nb"));
+    }
+
+    #[test]
+    fn error_context_reads_nodejs_trace() {
+        let body = br#"{"errorType":"TypeError","errorMessage":"boom","trace":["TypeError: boom","    at handler (/var/task/index.js:3:9)"]}"#;
+        let ctx = error_context_from_body(body, None);
+        assert_eq!(ctx.error_type.as_deref(), Some("TypeError"));
+        assert_eq!(
+            ctx.stack_trace.as_deref(),
+            Some("TypeError: boom\n    at handler (/var/task/index.js:3:9)")
+        );
     }
 
     #[test]
