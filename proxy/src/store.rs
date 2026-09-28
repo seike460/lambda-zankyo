@@ -1,6 +1,6 @@
 //! 失敗レコードの永続化。S3 PutObject が本線、失敗時・SHUTDOWN 時は
 //! /tmp への退避（spill）で取りこぼしを減らす。
-//! このモジュールだけが S3/ファイルシステムに触れる。
+//! S3 PUT と spill 操作の窓口（ファイル名・書き込み・上限の管理は spill.rs）。
 
 use crate::config::Config;
 use crate::error::{Result, ZankyoError};
@@ -19,7 +19,7 @@ use std::time::Duration;
 use time::OffsetDateTime;
 use tracing::{info, warn};
 
-/// `save` へ渡す入力一式。引数束ね。
+/// `stage_save` へ渡す入力一式。引数束ね。
 pub struct SaveInput {
     pub request_id: String,
     pub invoked_at: OffsetDateTime,
@@ -37,7 +37,7 @@ pub struct EventInput {
     pub encoding: EventEncoding,
 }
 
-/// `stage_timeout` が返す PUT 待ちジョブ。
+/// `stage_save` と `stage_timeout` が返す PUT 待ちジョブ。
 /// spill 済みのため、PUT が間に合わなくてもレコードは残る。
 pub struct StagedRecord {
     pub request_id: String,
@@ -129,39 +129,23 @@ impl Recorder {
     /// 制約から常に `timeout` とし、「応答が返らないまま shutdown した」の意。
     /// 区別が必要な情報は errorContext.errorType（Timeout/Failure/Spindown）に写す。
     pub fn stage_timeout(&self, inv: &Invocation, reason: Option<&str>) -> Option<StagedRecord> {
-        let ctx = ErrorContext {
-            error_type: Some(shutdown_error_type(reason).to_string()),
-            error_message: Some(format!(
-                "function did not respond before execution environment shutdown (reason: {})",
-                reason.unwrap_or("unknown")
-            )),
-            stack_trace: None,
-        };
-        let (rec, key) = self.build_record(
-            &inv.request_id,
-            inv.invoked_at,
-            FailureType::Timeout,
-            EventInput {
+        self.stage_save(SaveInput {
+            request_id: inv.request_id.clone(),
+            invoked_at: inv.invoked_at,
+            failure: FailureType::Timeout,
+            event: EventInput {
                 value: Some(inv.event.clone()),
                 encoding: inv.encoding,
             },
-            None,
-            ctx,
-        );
-        let Ok(body) = to_json_bytes(&rec) else {
-            return None;
-        };
-        // 先にローカルへ落とす: PutObject がウィンドウに間に合わなくても
-        // 実行環境の /tmp が同一 sandbox で再利用される場合に拾える。
-        // spill 成功時のみ inflight ステージを消す — 失敗時は残して
-        // init 時の timeout 変換に救いを残す（PUT 成功でも消える）。
-        if self.spill(&inv.request_id, &body) {
-            self.clear_inflight(&inv.request_id);
-        }
-        Some(StagedRecord {
-            request_id: inv.request_id.clone(),
-            key,
-            body,
+            response: None,
+            ctx: ErrorContext {
+                error_type: Some(shutdown_error_type(reason).to_string()),
+                error_message: Some(format!(
+                    "function did not respond before execution environment shutdown (reason: {})",
+                    reason.unwrap_or("unknown")
+                )),
+                stack_trace: None,
+            },
         })
     }
 
@@ -319,7 +303,7 @@ impl Recorder {
             .map_err(|e| ZankyoError::Aws(e.to_string()))
     }
 
-    /// 起動時に前回残った spill を再送する。spill ファイルは record JSON
+    /// 残った spill を再送する（起動時と定期回収）。spill ファイルは record JSON
     /// 本体なので、そこから functionName/invokedAt/requestId を読み
     /// 元の S3 キーを再構成する。送れたものだけ削除するため冪等に再実行できる。
     pub async fn recover_spills(&self) {

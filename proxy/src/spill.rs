@@ -19,26 +19,13 @@ const PART_ORPHAN_GRACE: Duration = Duration::from_secs(60);
 const MANAGED_PREFIX: &str = "zankyo-";
 
 /// 退避ファイルを書き、上限を超えたら古いものから捨てる。
-/// `.part` へ書いてから rename する: 定期回収が書き込み途中の
-/// 半端な JSON を読んで「復旧不能」として消す競合を防ぐ。
-/// .part 名に pid を含めるのは、proxy と external extension agent が
-/// 同一 rid に並行して書き込む際の O_TRUNC 競合を避けるため。
 /// モードは 0600: レコードは scrub 済みだがイベント断片を含みうるため
 /// sandbox 内の他プロセスからも読めない最小権限にする。
 /// 戻り値は書き込み成功可否 — 失敗時は呼び出し側で代替の証跡
 /// （.inflight ステージ等）を消さない判断に使う。
 pub fn write(dir_path: &Path, max_files: usize, request_id: &str, body: &[u8]) -> bool {
-    let path = dir_path.join(filename(request_id));
-    let tmp = dir_path.join(format!(
-        ".{}.{}.part",
-        filename(request_id),
-        std::process::id()
-    ));
-    let result = ensure_dir(dir_path)
-        .and_then(|_| write_mode_600(&tmp, body))
-        .and_then(|_| std::fs::rename(&tmp, &path));
-    match result {
-        Ok(()) => {
+    match write_atomic(dir_path, &filename(request_id), body) {
+        Ok(path) => {
             info!(request_id, path = %path.display(), "record spilled to /tmp");
             enforce_cap(dir_path, max_files);
             true
@@ -48,6 +35,20 @@ pub fn write(dir_path: &Path, max_files: usize, request_id: &str, body: &[u8]) -
             false
         }
     }
+}
+
+/// `dir/name` へ `.part` 経由で書いて rename し、書いたパスを返す。
+/// 定期回収や agent が書き込み途中の半端なファイルを読んで
+/// 「復旧不能」として消す競合を防ぐ。.part 名に pid を含めるのは、
+/// proxy と external extension agent が同一 rid に並行して書き込む際の
+/// O_TRUNC 競合を避けるため。
+fn write_atomic(dir: &Path, name: &str, body: &[u8]) -> std::io::Result<PathBuf> {
+    let path = dir.join(name);
+    let tmp = dir.join(format!(".{name}.{}.part", std::process::id()));
+    ensure_dir(dir)?;
+    write_mode_600(&tmp, body)?;
+    std::fs::rename(&tmp, &path)?;
+    Ok(path)
 }
 
 /// 0600 で新規作成する。umask 既定の 0666&~umask（=0644）だと
@@ -76,25 +77,10 @@ fn ensure_dir(path: &Path) -> std::io::Result<()> {
 }
 
 /// 呼び出し中イベントのステージを書く（external extension との共有用）。
-/// spill と同じく .part 経由の atomic rename — agent が読みかけの
-/// 半端なファイルを見ないようにする。失敗しても warn のみ（呼び出し
-/// 本体に影響させない）。
-pub fn write_inflight(dir: &Path, request_id: &str, body: &[u8]) -> bool {
-    let path = dir.join(inflight_name(request_id));
-    let tmp = dir.join(format!(
-        ".{}.{}.part",
-        inflight_name(request_id),
-        std::process::id()
-    ));
-    match ensure_dir(dir)
-        .and_then(|_| write_mode_600(&tmp, body))
-        .and_then(|_| std::fs::rename(&tmp, &path))
-    {
-        Ok(()) => true,
-        Err(e) => {
-            warn!(request_id, error = %e, "failed to stage inflight event");
-            false
-        }
+/// 失敗しても warn のみ（呼び出し本体に影響させない）。
+pub fn write_inflight(dir: &Path, request_id: &str, body: &[u8]) {
+    if let Err(e) = write_atomic(dir, &inflight_name(request_id), body) {
+        warn!(request_id, error = %e, "failed to stage inflight event");
     }
 }
 
@@ -259,11 +245,10 @@ fn sanitize(request_id: &str) -> String {
             }
         })
         .collect();
-    let clean = clean.trim_start_matches('.');
     if clean.is_empty() {
         "record".to_string()
     } else {
-        clean.to_string()
+        clean
     }
 }
 
