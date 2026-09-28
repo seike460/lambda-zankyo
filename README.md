@@ -232,7 +232,7 @@ cli/         # TypeScript CLI (node --test、AWS SDK v3、引数は node:util)
 construct/   # CDK construct (aws-cdk-lib v2、SAR 参照 + bucket/IAM 配線)
 examples/    # デモスタック（handler error / timeout / init error）
 sar/         # SAR 公開用 SAM テンプレート
-scripts/     # build-layer.mts（musl 静的バイナリ → layer zip）
+scripts/     # build-layer.mts（musl 静的バイナリ → layer zip）、check-versions.mts（版の一致）
 SPEC.md      # 仕様書（決定事項・スコープ外・Open Questions）
 ```
 
@@ -240,7 +240,7 @@ SPEC.md      # 仕様書（決定事項・スコープ外・Open Questions）
 
 ```bash
 pnpm install            # JS/TS 依存
-pnpm gate               # lint + build + typecheck + test（全パッケージ）
+pnpm gate               # lint + 版の一致 + build + typecheck + test（全パッケージ）
 cargo test --workspace  # Rust ユニットテスト
 cargo fmt --all -- --check && cargo clippy -- -D warnings
 ```
@@ -250,6 +250,11 @@ cargo fmt --all -- --check && cargo clippy -- -D warnings
 - Rust: ロジック（scrub/record/config/inflight）は IO と分離した
   ユニットテスト。proxy/extension 経路はモック Runtime API/S3 への
   統合テスト（`proxy/tests/`）で検証。
+- 版: リリースでは、`cli/package.json`・`construct/package.json`・
+  `proxy/Cargo.toml`（と `Cargo.lock`）・`sar/template.yaml` の `SemanticVersion` を
+  同じ版に上げます。SAR の `SourceCodeUrl` はその版のタグを指し、`CHANGELOG.md` には
+  その版の見出しを置きます。`pnpm check:versions`（`pnpm gate` と CI が実行）で確かめます。
+  construct の既定の SAR 版は、construct のテストが `sar/template.yaml` と突き合わせます。
 
 ### 保守性の指針
 

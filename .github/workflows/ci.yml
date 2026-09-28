@@ -30,6 +30,8 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: pnpm lint          # biome check .
+      # npm の 2 パッケージ・proxy の crate・SAR の版と、SourceCodeUrl のタグ・CHANGELOG の見出し
+      - run: pnpm check:versions
       - run: pnpm build         # tsc emit — zankyo-cdk/dist を生成（examples の typecheck/test が依存）
       # CLI のテストは src を型除去で実行する。公開する bin（package.json の bin が指す dist）の
       # import 書き換えやパスの誤りは、ここで実際に起動して確かめる（bin.js は全コマンドを静的 import する）

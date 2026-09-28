@@ -12,7 +12,8 @@
     "typecheck": "pnpm -r run typecheck",
     "test": "pnpm -r run test",
     "build": "pnpm -r --if-present run build",
-    "gate": "pnpm lint && pnpm build && pnpm typecheck && pnpm test"
+    "check:versions": "node scripts/check-versions.mts",
+    "gate": "pnpm lint && pnpm check:versions && pnpm build && pnpm typecheck && pnpm test"
   },
   "devDependencies": {
     "@biomejs/biome": "2.5.14",
