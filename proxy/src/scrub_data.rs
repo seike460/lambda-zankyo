@@ -12,6 +12,8 @@ pub(crate) const DEFAULT_DENYLIST: &[&str] = &[
     "authorization",
     "privatekey",
     "sessionid",
+    "cookie",
+    "cookies",
     "ssn",
     "creditcard",
     "cvv",

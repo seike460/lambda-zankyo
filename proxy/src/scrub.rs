@@ -157,15 +157,41 @@ impl Scrubber {
                 }
             }
             Value::String(s) => {
-                let next = self.scrub_string(s, report);
+                let next = self
+                    .scrub_embedded_json(s, report)
+                    .unwrap_or_else(|| self.scrub_string(s, report));
                 *s = next;
             }
             _ => {}
         }
     }
 
-    /// denylist に一致したフィールド値の置き換え。
+    /// 文字列化された JSON（API Gateway・Function URL の `body` 等）の
+    /// フィールドにも denylist を効かせる。denylist に一致した場合だけ
+    /// 再シリアライズした文字列を返す。一致しなければ None を返し、
+    /// 原文へのパターン置換に任せる（空白やキー順を不要に変えない）。
+    fn scrub_embedded_json(&self, s: &str, report: &mut ScrubReport) -> Option<String> {
+        if !matches!(s.trim_start().as_bytes().first(), Some(b'{' | b'[')) {
+            return None;
+        }
+        let mut inner: Value = serde_json::from_str(s).ok()?;
+        let mut sub = ScrubReport::default();
+        self.scrub(&mut inner, &mut sub);
+        if sub.fields_redacted == 0 {
+            return None;
+        }
+        report.fields_redacted += sub.fields_redacted;
+        report.patterns_applied.extend(sub.patterns_applied);
+        Some(inner.to_string())
+    }
+
+    /// denylist に一致したフィールド値の置き換え。配列は要素ごとに
+    /// 置き換えて形を保つ（`cookies` の文字列配列が文字列に変わると、
+    /// replay でハンドラが元と別の例外で落ちるため）。
     fn redact_node(&self, v: &Value) -> Value {
+        if let Value::Array(items) = v {
+            return Value::Array(items.iter().map(|i| self.redact_node(i)).collect());
+        }
         match self.mode {
             ScrubMode::Off => v.clone(),
             ScrubMode::Hash => Value::String(format!("hmac:{}", self.hmac(v))),
@@ -366,6 +392,46 @@ mod tests {
         scrubber().scrub(&mut v, &mut r);
         assert_eq!(v["a"], "***1111");
         assert_eq!(v["b"], "4111 1111 1111 1112");
+    }
+
+    #[test]
+    fn cookies_are_denied_and_keep_array_shape() {
+        let mut v = json!({
+            "headers": {"Cookie": "sid=abc123"},
+            "cookies": ["sid=abc123", "theme=dark"],
+            "multiValueHeaders": {"Set-Cookie": ["sid=abc123; HttpOnly"]},
+        });
+        let mut r = ScrubReport::default();
+        scrubber().scrub(&mut v, &mut r);
+        assert_eq!(v["headers"]["Cookie"], "s***");
+        assert_eq!(v["cookies"], json!(["s***", "t***"]));
+        assert_eq!(v["multiValueHeaders"]["Set-Cookie"], json!(["s***"]));
+        assert_eq!(r.fields_redacted, 3);
+    }
+
+    #[test]
+    fn stringified_json_body_is_walked() {
+        // API Gateway プロキシ統合の body は JSON を文字列化した値
+        let mut v = json!({
+            "body": r#"{"username":"alice","password":"hunter2"}"#,
+            "isBase64Encoded": false,
+        });
+        let mut r = ScrubReport::default();
+        scrubber().scrub(&mut v, &mut r);
+        let body: Value = serde_json::from_str(v["body"].as_str().unwrap()).unwrap();
+        assert_eq!(body, json!({"username": "alice", "password": "h***"}));
+        assert_eq!(r.fields_redacted, 1);
+    }
+
+    #[test]
+    fn stringified_json_without_denied_fields_keeps_original_text() {
+        let raw = r#"{ "to": "alice@example.com",  "n": 1 }"#;
+        let mut v = json!({"body": raw, "log": "[INFO] password reset"});
+        let mut r = ScrubReport::default();
+        scrubber().scrub(&mut v, &mut r);
+        assert_eq!(v["body"], r#"{ "to": "a***@e***.com",  "n": 1 }"#);
+        assert_eq!(v["log"], "[INFO] password reset");
+        assert_eq!(r.fields_redacted, 0);
     }
 
     #[test]

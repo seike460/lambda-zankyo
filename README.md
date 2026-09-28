@@ -172,11 +172,18 @@ s3://{ZANKYO_BUCKET}/zankyo/{function-name}/{yyyy}/{mm}/{dd}/{requestId}.json
 ハイブリッド方式で、消した内容を `scrubReport` に証跡化します。
 
 - **フィールド名 denylist**: `password, secret, token, apiKey, authorization,
-  privateKey, sessionId, ssn, creditCard, cvv, pin`（大文字小文字・
-  セパレータ `_` `-` `.` 空白は不問。`access_token`→`token` のような
-  prefix/suffix 一致も対象）＋ `ZANKYO_SCRUB_FIELDS`。
+  privateKey, sessionId, cookie, cookies, ssn, creditCard, cvv, pin`（大文字小文字・
+  セパレータ `_` `-` `.` 空白は不問。`access_token`→`token` や
+  `Set-Cookie`→`cookie` のような prefix/suffix 一致も対象）＋
+  `ZANKYO_SCRUB_FIELDS`。値が配列なら要素ごとに置き換え、配列の形を保ちます。
+- **文字列化された JSON**（API Gateway・Function URL の `body` 等）も、
+  中のフィールドに denylist を適用します。一致した場合だけ、その文字列を
+  空白なし・キーは辞書順の JSON に書き直します。
 - **パターン検出**: email / クレカ番号（**Luhn 検証付き**）/ JWT /
   AWS アクセスキー / Bearer トークン / 電話番号 / IPv4。
+  対象は文字列値だけです。数値型の値（`"cardNo": 4111111111111111` 等）と
+  オブジェクトのキー名（`{"alice@example.com": …}` 等）は検査しません。
+  該当するフィールド名を `ZANKYO_SCRUB_FIELDS` に足すと、値ごとマスクされます。
 - **mask モード**は形状保持（`j***@e***.com`、`***1234`）で再現性を維持。
 - **hash モード**は HMAC-SHA256 擬似名化（鍵は関数名+バケット由来の
   決定的 seed。暗号化ではなく「同じ値→同じハッシュ」の再現性が目的）。
