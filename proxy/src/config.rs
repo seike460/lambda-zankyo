@@ -65,9 +65,10 @@ pub struct Config {
     pub scrub_fields: BTreeSet<String>,
     pub scrub_mode: ScrubMode,
     pub max_event_kb: usize,
-    /// SHUTDOWN 検知後に S3 フラッシュへ使える時間の上限。
+    /// 失敗レコードの PutObject に使える時間の上限。呼び出し中の記録
+    /// （応答の転送をこの時間まで待たせる）と SHUTDOWN 後のフラッシュに効く。
     pub flush_budget_ms: u64,
-    /// 通常経路の PutObject 上限時間。呼び出し経路を遅らせないため短め。
+    /// spill 再送（起動時・定期回収）の PutObject 上限時間。
     pub put_timeout_ms: u64,
     /// S3 失敗時・SHUTDOWN 時のローカル退避先。
     pub spill_dir: String,

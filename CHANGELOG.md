@@ -35,6 +35,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **proxy** — spill の回収が、空になった spill dir を削除していた。同時に走る
   inflight ステージや spill の書き込みが、まれに ENOENT で失敗していた。
   dir は削除せずに残す
+- **proxy** — README と設定の説明で、`ZANKYO_FLUSH_BUDGET_MS` と
+  `ZANKYO_PUT_TIMEOUT_MS` の役割を実際の動作に合わせた。失敗レコードの PUT
+  （呼び出し中と SHUTDOWN 後）は前者、spill 再送の PUT は後者で打ち切る
 
 ### Security
 

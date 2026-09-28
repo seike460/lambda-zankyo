@@ -113,8 +113,8 @@ env を部分上書きします。複数関数で設定を一元管理するた�
 | `ZANKYO_SCRUB_FIELDS` | 既定 denylist | 追加フィールド名（カンマ区切り） |
 | `ZANKYO_SCRUB_MODE` | `mask` | `mask` / `hash`（HMAC 擬似名化）/ `off` |
 | `ZANKYO_MAX_EVENT_KB` | `256` | イベント保存の上限（超過は先頭のみ + `truncated`） |
-| `ZANKYO_FLUSH_BUDGET_MS` | `1200` | SHUTDOWN フラッシュの予算上限 |
-| `ZANKYO_PUT_TIMEOUT_MS` | `5000` | 通常経路の PutObject 上限時間 |
+| `ZANKYO_FLUSH_BUDGET_MS` | `1200` | 失敗レコードの PutObject 上限時間（呼び出し中の記録と SHUTDOWN フラッシュ）。失敗時の応答はこの時間まで遅れうる |
+| `ZANKYO_PUT_TIMEOUT_MS` | `5000` | spill 再送の PutObject 上限時間（起動時・定期回収） |
 | `ZANKYO_SPILL_DIR` | `/tmp/zankyo/<function>` | S3 失敗時・SHUTDOWN 時のローカル退避先（既定は関数名でスコープ） |
 | `ZANKYO_SPILL_MAX_FILES` | `64` | spill 保持数の上限。超過分は古いものから破棄 |
 | `ZANKYO_SPILL_RETRY_MS` | `60000` | spill 再送を試みる間隔（生存中の定期回収） |
