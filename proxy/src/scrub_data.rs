@@ -88,7 +88,7 @@ fn luhn_ok(text: &str) -> bool {
         sum += x;
         double = !double;
     }
-    sum % 10 == 0
+    sum.is_multiple_of(10)
 }
 
 fn ipv4_ok(text: &str) -> bool {

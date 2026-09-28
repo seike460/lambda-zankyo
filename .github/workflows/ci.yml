@@ -41,6 +41,21 @@ jobs:
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
 
+  rust-msrv:
+    name: rust (MSRV)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # proxy/Cargo.toml の rust-version を正とし、rust-toolchain.toml より
+      # 古い宣言値でもビルドできることを確かめる（RUSTUP_TOOLCHAIN が toml に優先する）
+      - name: install the declared rust-version
+        run: |
+          msrv=$(sed -n 's/^rust-version = "\(.*\)"/\1/p' proxy/Cargo.toml)
+          rustup toolchain install "$msrv" --profile minimal
+          echo "RUSTUP_TOOLCHAIN=$msrv" >> "$GITHUB_ENV"
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - run: cargo check --locked --workspace --all-targets
+
   audit:
     name: dependency audit
     runs-on: ubuntu-latest

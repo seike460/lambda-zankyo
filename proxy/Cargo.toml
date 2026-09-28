@@ -5,7 +5,10 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Lambda Runtime API proxy + external extension that persists failed synchronous invocations"
-rust-version = "1.85"
+# ロック済み依存（aws-sdk-* / aws-smithy-*）の要求に合わせる
+rust-version = "1.94.1"
+# 配布物は Layer zip / SAR / npm。crates.io には公開しない
+publish = false
 
 [dependencies]
 # Async runtime: proxy は常駐プロセスとして Runtime API を中継する
