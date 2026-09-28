@@ -140,27 +140,27 @@ pub async fn run(argv: &[OsString]) -> u8 {
     // layer に /opt/extensions/zankyo が含まれる環境では、platform が
     // external extension として別プロセスで agent を起動する。
     // internal register は SHUTDOWN を拒否されるため、その場合は省く。
+    // SHUTDOWN フラッシュは agent が担い、その完了はこのプロセスから
+    // 観測できないので、待つハンドルも持たない（None）。
     let has_external_ext = std::path::Path::new(EXTERNAL_EXT_PATH).exists();
     let shutdown = if has_external_ext {
         info!("external extension detected; internal register skipped");
-        // 決して解決しないハンドル — false を返すと wait_for_exit が
-        // 「extension 死亡」の warn を毎回 init で出してしまう。
-        // SHUTDOWN フラッシュは別プロセスの agent が担う。
-        tokio::spawn(std::future::pending::<bool>())
+        None
     } else {
-        tokio::spawn(start_extension(
+        Some(tokio::spawn(start_extension(
             client,
             upstream,
             register_timeout,
             state.inflight.clone(),
             state.recorder.clone(),
-        ))
+        )))
     };
 
     let (code, pending_shutdown) = wait_for_exit(&mut child, shutdown).await;
     // 子が先に落ちた場合、Lambda がランタイム死亡を検知して SHUTDOWN を
-    // 配信するまで数十〜数百 ms ある。in-flight が残っているなら
-    // bounded に待って、extension 側の正式なフラッシュ（spill+PUT）に任せる。
+    // 配信するまで数十〜数百 ms ある。同じプロセスの extension が
+    // in-flight を持ったまま生きているなら、bounded に待って
+    // extension 側の正式なフラッシュ（spill+PUT）に任せる。
     if let Some(h) = pending_shutdown {
         if !state.inflight.is_empty() {
             let grace = state.cfg.flush_budget_ms.min(SHUTDOWN_GRACE_CAP_MS);
@@ -249,12 +249,16 @@ async fn start_extension(
 /// 先に終わる場合は正常終了（0）として抜ける。ただし extension が
 /// SHUTDOWN 以外の理由（ポーリング断等）で終わった場合は、子プロセスの
 /// 完了を待ち続ける — ここで抜けると関数実行中に子を殺してしまう。
+/// `shutdown` が None（プロセス内に extension が無い）なら子だけを待つ。
 /// 戻り値の Some(handle) は「子が先に終わり extension が生存中」の場合で、
 /// 呼び出し側が SHUTDOWN 到着を短く待つ判断に使う。
 async fn wait_for_exit(
     child: &mut Child,
-    mut shutdown: JoinHandle<bool>,
+    shutdown: Option<JoinHandle<bool>>,
 ) -> (u8, Option<JoinHandle<bool>>) {
+    let Some(mut shutdown) = shutdown else {
+        return (exit_code(child.wait().await), None);
+    };
     tokio::select! {
         status = child.wait() => (exit_code(status), Some(shutdown)),
         res = &mut shutdown => match res {
@@ -264,5 +268,36 @@ async fn wait_for_exit(
                 (exit_code(child.wait().await), None)
             }
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn exiting_child(code: u8) -> Child {
+        tokio::process::Command::new("sh")
+            .args(["-c", &format!("exit {code}")])
+            .spawn()
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn wait_for_exit_without_extension_returns_no_handle() {
+        // external extension 構成: 待つハンドルが無いので grace 待ちも起きない
+        let mut child = exiting_child(3);
+        let (code, pending) = wait_for_exit(&mut child, None).await;
+        assert_eq!(code, 3);
+        assert!(pending.is_none());
+    }
+
+    #[tokio::test]
+    async fn wait_for_exit_keeps_live_extension_handle() {
+        let mut child = exiting_child(3);
+        let ext = tokio::spawn(std::future::pending::<bool>());
+        let (code, pending) = wait_for_exit(&mut child, Some(ext)).await;
+        assert_eq!(code, 3);
+        let h = pending.expect("live in-process extension handle");
+        h.abort();
     }
 }
