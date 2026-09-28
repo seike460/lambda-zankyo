@@ -52,6 +52,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   走査の上限を、除外後の件数ではなくページ数で数える
 - **cli / construct** — npm の tarball に LICENSE を同梱する。以前は
   MIT の許諾文が配布物に入っていなかった
+- **layer** — Layer の zip に、LICENSE と `THIRD_PARTY_LICENSES` を同梱する
+  （`/opt/share/licenses/zankyo/`）。以前は、MIT の許諾文も、バイナリに静的リンク
+  した crate（tokio・hyper・aws-lc-rs・ring など）のライセンスと著作権表示も
+  入っていなかった
 - **cli / construct** — pack と publish の前（`prepack`）に build を実行する。
   以前は dist が無いまま、または古いまま公開されうる手順だった
 - **cli / construct** — package.json に repository・homepage・bugs・

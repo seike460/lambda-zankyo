@@ -282,3 +282,7 @@ SSM キー・build arch。spill は atomic 書き込み・上限・定期回収�
 ## License
 
 MIT
+
+Layer の zip は `share/licenses/zankyo/`（Lambda 上では `/opt/share/licenses/zankyo/`）に、
+この LICENSE と `THIRD_PARTY_LICENSES` を含みます。`THIRD_PARTY_LICENSES` は、
+バイナリに入る Rust crate のライセンスと著作権表示の原文です。

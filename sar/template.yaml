@@ -22,7 +22,8 @@ Metadata:
 
 Resources:
   # scripts/build-layer.mts の出力を配置して sam publish する。
-  # Layer zip の中身は bin/zankyo + zankyo-wrapper（exec wrapper 入口）。
+  # Layer zip の中身は bin/zankyo・extensions/zankyo・zankyo-wrapper（exec wrapper 入口）と、
+  # share/licenses/zankyo/ のライセンス表示（LICENSE・THIRD_PARTY_LICENSES）。
   ZankyoLayerX86:
     Type: AWS::Serverless::LayerVersion
     Properties:

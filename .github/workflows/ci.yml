@@ -126,6 +126,11 @@ jobs:
         env:
           SKIP_BUILD: '1'
         run: node scripts/build-layer.mts
+      - name: check the license files in the layer zips
+        run: |
+          for z in dist/layer/*.zip; do
+            unzip -tq "$z" share/licenses/zankyo/LICENSE share/licenses/zankyo/THIRD_PARTY_LICENSES
+          done
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: zankyo-layer
