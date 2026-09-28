@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, it } from 'node:test';
@@ -59,6 +59,15 @@ describe('zankyo fixture', () => {
     const written: unknown = JSON.parse(await readFile(outFile, 'utf8'));
     assert(typeof written === 'object' && written !== null && 'user' in written);
     assert.equal(written.user, 'alice');
+  });
+
+  it('creates --out with mode 0600', { skip: process.platform === 'win32' }, async (t) => {
+    const dir = await mkdtemp(join(tmpdir(), 'zankyo-'));
+    t.after(() => rm(dir, { recursive: true, force: true }));
+    const outFile = join(dir, 'event.json');
+    const s3 = fakeS3([{ Contents: [{ Key: KEY }] }], VALID_RECORD);
+    await captureStdout(() => runFixture(['r1', '--bucket', 'b', '--out', outFile], deps(s3)));
+    assert.equal((await stat(outFile)).mode & 0o777, 0o600);
   });
 
   it('rejects when no requestId or --last given', async () => {
