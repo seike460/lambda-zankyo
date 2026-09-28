@@ -184,6 +184,10 @@ s3://{ZANKYO_BUCKET}/zankyo/{function-name}/{yyyy}/{mm}/{dd}/{requestId}.json
 - proxy が listen するのは `127.0.0.1` のみ。
 - 依存は lockfile で固定（`Cargo.lock` / `pnpm-lock.yaml`）。
   CI で `cargo audit` と `pnpm audit` を実行します。
+- `pnpm.auditConfig.ignoreGhsas` の GHSA-6cpc-mj5c-m9rq は
+  ワークスペース内の `cli/` パッケージ（v0.1.0）が deprecated な同名 npm
+  パッケージと誤検知で衝突するための除外です。実依存に `cli` を追加する
+  場合はこの除外を見直してください。
 
 ## 制限事項（重要）
 
