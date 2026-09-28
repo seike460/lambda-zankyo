@@ -3,7 +3,7 @@
 `zankyo` — S3 に保存された「同期呼び出しの失敗レコード」を読み、
 fixture 生成・差分リプレイ・本番再実行を行う CLI。
 失敗レコードを作る Layer (proxy) 側と組み合わせて使う。詳細は
-リポジトリ直下の README を参照。
+[リポジトリ直下の README](https://github.com/seike460/lambda-zankyo#readme) を参照。
 
 ## install
 
