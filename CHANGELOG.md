@@ -98,6 +98,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 Initial release.
 
+タグ `v0.1.0` は d220009 を指す。公開した SAR 0.1.0 のメタデータ（`LicenseUrl`・
+`ReadmeUrl` のパス）は、タグの後のコミット 83e4929 の内容である。タグの
+`sar/template.yaml` のままでは、この 2 つのパスがリポジトリの外を指す。83e4929 は
+ほかに `construct/package.json` の `main`・`types` を dist に向けたが、npm の
+`zankyo-cdk@0.1.0` はタグ時点の `publishConfig` で同じ値になっている。
+proxy・CLI・construct のコードは、タグと 83e4929 で同じである。
+
 ### Added
 
 - **proxy** — `AWS_LAMBDA_EXEC_WRAPPER` 経由で Runtime API を仲介し、失敗した
