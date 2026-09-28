@@ -208,7 +208,7 @@ mod tests {
     }
 
     #[test]
-    fn ssk_bad_field_does_not_drop_whole_overlay() {
+    fn ssm_bad_field_does_not_drop_whole_overlay() {
         // 1 フィールドの型違いで overlay 全体が捨てられると、
         // SSM 側にしか無い bucket まで失って記録が止まる。
         let mut cfg = Config::from_env_map(&env(&[])).unwrap();

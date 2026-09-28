@@ -148,30 +148,35 @@ mod tests {
     }
 
     #[test]
-    fn header_name_matching_is_case_insensitive() {
-        // http::HeaderName は常に小文字正規化されるので as_str() 比較で効く
+    fn connection_named_collects_every_token_lowercased() {
+        // 複数の Connection ヘッダ・カンマ区切り・大文字混じりをすべて拾う
         let mut h = HeaderMap::new();
-        h.insert("Connection", HeaderValue::from_static("keep-alive"));
-        let name = h.keys().next().unwrap().as_str();
-        assert_eq!(name, "connection");
-        assert!(HOP_BY_HOP.contains(&name));
-    }
-
-    #[test]
-    fn connection_header_names_are_parsed() {
-        // "Connection: x-opt, close" は x-opt も drop 対象にする
-        let mut h = HeaderMap::new();
-        h.insert(
+        h.append(
             "connection",
             HeaderValue::from_static("X-Custom-Hop, keep-alive"),
         );
-        let mut drop_named: Vec<String> = Vec::new();
-        for v in h.get_all("connection") {
-            if let Ok(s) = v.to_str() {
-                drop_named.extend(s.split(',').map(|t| t.trim().to_ascii_lowercase()));
-            }
-        }
-        assert!(drop_named.iter().any(|n| n == "x-custom-hop"));
-        assert!(drop_named.iter().any(|n| n == "keep-alive"));
+        h.append("connection", HeaderValue::from_static(" X-Other "));
+        assert_eq!(
+            connection_named(&h),
+            ["x-custom-hop", "keep-alive", "x-other"]
+        );
+    }
+
+    #[test]
+    fn strip_hop_by_hop_keeps_only_end_to_end_headers() {
+        let mut h = HeaderMap::new();
+        h.insert("Connection", HeaderValue::from_static("X-Custom-Hop"));
+        h.insert("X-Custom-Hop", HeaderValue::from_static("1"));
+        h.insert("Transfer-Encoding", HeaderValue::from_static("chunked"));
+        h.insert("Keep-Alive", HeaderValue::from_static("timeout=5"));
+        h.insert("Content-Type", HeaderValue::from_static("application/json"));
+        h.insert(
+            "Lambda-Runtime-Aws-Request-Id",
+            HeaderValue::from_static("req-1"),
+        );
+        strip_hop_by_hop(&mut h);
+        let mut kept: Vec<&str> = h.keys().map(|k| k.as_str()).collect();
+        kept.sort_unstable();
+        assert_eq!(kept, ["content-type", "lambda-runtime-aws-request-id"]);
     }
 }

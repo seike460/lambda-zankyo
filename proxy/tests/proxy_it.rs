@@ -747,6 +747,96 @@ async fn failed_put_keeps_spill_until_recovery_resends_it() {
     assert!(spill_dir.exists());
 }
 
+/// S3 モックが PutObject で受けた (x-amz-server-side-encryption, KMS キー ID)。
+type SseHeaders = Arc<Mutex<Vec<(Option<String>, Option<String>)>>>;
+
+#[tokio::test]
+async fn record_put_requests_server_side_encryption() {
+    // 既定は SSE-S3（AES256）。ZANKYO_KMS_KEY 指定時は SSE-KMS とそのキー
+    let kms = "arn:aws:kms:us-east-1:111122223333:key/test";
+    for (extra, want) in [
+        (vec![], (Some("AES256"), None)),
+        (vec![("ZANKYO_KMS_KEY", kms)], (Some("aws:kms"), Some(kms))),
+    ] {
+        let seen: SseHeaders = Arc::new(Mutex::new(Vec::new()));
+        let (s3_addr, _s3) = spawn_mock({
+            let seen = seen.clone();
+            move |m, _p, h, _b| {
+                if m == "PUT" {
+                    let header = |k: &str| h.get(k).and_then(|v| v.to_str().ok()).map(String::from);
+                    seen.lock().unwrap().push((
+                        header("x-amz-server-side-encryption"),
+                        header("x-amz-server-side-encryption-aws-kms-key-id"),
+                    ));
+                }
+                ok_empty()
+            }
+        })
+        .await;
+        let (recorder, _spill) = recorder_with_env(&s3_addr, &extra);
+        recorder.stage_inflight(&Invocation {
+            request_id: "req-sse".to_string(),
+            event: json!({"input": 1}),
+            encoding: EventEncoding::Json,
+            invoked_at: OffsetDateTime::now_utc(),
+        });
+        recorder.recover_inflights(None).await;
+
+        assert_eq!(
+            seen.lock().unwrap().clone(),
+            vec![(want.0.map(String::from), want.1.map(String::from))],
+            "{extra:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn hop_by_hop_headers_are_dropped_in_both_directions() {
+    // 上流へは Connection 指名ヘッダと固定の hop-by-hop を渡さず、
+    // 上流の応答も同じ規則で落としてからランタイムへ返す
+    let upstream_saw = Arc::new(Mutex::new(HeaderMap::new()));
+    let (api_addr, _api) = spawn_mock({
+        let upstream_saw = upstream_saw.clone();
+        move |_m, _p, h, _b| {
+            *upstream_saw.lock().unwrap() = h.clone();
+            Response::builder()
+                .status(StatusCode::OK)
+                .header("connection", "X-Up-Hop")
+                .header("x-up-hop", "1")
+                .header("x-up-keep", "1")
+                .body(boxed_full(Bytes::new()))
+                .unwrap()
+        }
+    })
+    .await;
+    let (s3_addr, _s3) = spawn_mock(|_m, _p, _h, _b| ok_empty()).await;
+    let (recorder, _spill) = recorder_to(&s3_addr);
+    let proxy = spawn_proxy(&api_addr, Arc::new(InFlight::new()), recorder).await;
+
+    let req = Request::builder()
+        .method(Method::POST)
+        .uri(format!("http://{proxy}/2022-07-01/telemetry"))
+        .header("connection", "X-Custom-Hop")
+        .header("x-custom-hop", "1")
+        .header("proxy-authorization", "Basic abc")
+        .header("x-keep", "1")
+        .body(boxed_full(Bytes::from_static(b"{}")))
+        .unwrap();
+    let resp = new_client().request(req).await.unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    let sent = upstream_saw.lock().unwrap().clone();
+    for dropped in ["connection", "x-custom-hop", "proxy-authorization"] {
+        assert!(
+            sent.get(dropped).is_none(),
+            "{dropped} must not be forwarded"
+        );
+    }
+    assert_eq!(sent["x-keep"], "1");
+    assert!(resp.headers().get("x-up-hop").is_none());
+    assert_eq!(resp.headers()["x-up-keep"], "1");
+}
+
 /// Extensions API モックが受けた (path, 登録名 or 識別子ヘッダ)。
 type ExtHeaders = Arc<Mutex<Vec<(String, Option<String>)>>>;
 
