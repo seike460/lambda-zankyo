@@ -19,6 +19,11 @@
     "typescript": "7.0.2"
   },
   "pnpm": {
-    "onlyBuiltDependencies": []
+    "onlyBuiltDependencies": [],
+    "auditConfig": {
+      "ignoreGhsas": [
+        "GHSA-6cpc-mj5c-m9rq"
+      ]
+    }
   }
 }

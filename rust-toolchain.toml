@@ -1,3 +1,6 @@
 [toolchain]
 channel = "1.98.1"
 components = ["rustfmt", "clippy"]
+# Lambda layer の静的バイナリは musl でビルドする（CI build-layer / ローカル
+# build-layer.mts の素の cargo build 経路どちらでも rustup が自動取得する）
+targets = ["x86_64-unknown-linux-musl"]
