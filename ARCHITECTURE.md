@@ -75,7 +75,7 @@ agent は passthrough 判定でも終了せず、`SHUTDOWN` だけを購読し�
 | `scrub.rs` / `scrub_data.rs` | PII マスキングの純粋ロジックと判定データ |
 | `config.rs` / `ssm_overlay.rs` | env 設定解決と SSM JSON overlay（キーはテーブル駆動） |
 | `runtime.rs` | 子プロセス起動（passthrough / proxy）と終了コード変換 |
-| `ssm.rs` | SSM Parameter Store 取得（10s timeout、fail-open） |
+| `ssm.rs` | SSM Parameter Store 取得（既定 2s timeout、fail-open） |
 | `error.rs` / `lib.rs` | `ZankyoError` 統一型と公開面 |
 
 ## 拡張ポイント

@@ -13,6 +13,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   1.94.1 に合わせた。CI で宣言値のビルドを検証する
 - **proxy** — denylist に一致した値が配列なら、要素ごとにマスクして配列の形を
   保つ。以前は配列全体を 1 つの文字列 `"***"` に置き換えていた
+- **proxy** — `ZANKYO_SSM_TIMEOUT_MS` の既定値を 10000 から 2000 に下げた。
+  SSM の取得は子ランタイムの起動と extension の登録より前に待つ。以前の既定値は
+  Lambda の Init 上限（10 秒）と同じで、SSM に届かない VPC では Init が
+  上限を超えうる
 
 ### Fixed
 

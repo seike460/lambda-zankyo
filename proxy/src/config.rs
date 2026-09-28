@@ -30,8 +30,9 @@ pub const DEFAULT_EXT_RETRY_MS: u64 = 500;
 /// ポーリング連続失敗の上限。既定では 500ms × 120 ≒ 60 秒失敗が
 /// 続いたら Extensions API の障害とみなしてループを抜ける。
 pub const DEFAULT_EXT_MAX_POLL_FAILURES: u32 = 120;
-/// SSM get_parameter の上限時間（ms）。
-pub const DEFAULT_SSM_TIMEOUT_MS: u64 = 10_000;
+/// SSM get_parameter の上限時間（ms）。取得は子の起動と extension 登録の
+/// 前に待つため、Lambda の Init 上限（10 秒）を使い切らない短めの既定にする。
+pub const DEFAULT_SSM_TIMEOUT_MS: u64 = 2_000;
 /// `/next` 以外の上流転送の上限時間（ms）。localhost 上の Runtime API が
 /// 60 秒応えない状況は実行環境の異常とみなす。
 pub const DEFAULT_FORWARD_TIMEOUT_MS: u64 = 60_000;
@@ -286,6 +287,8 @@ mod tests {
         assert_eq!(cfg.bucket, "b");
         assert_eq!(cfg.scrub_mode, ScrubMode::Mask);
         assert_eq!(cfg.max_event_kb, 256);
+        // SSM 取得は Init の 10 秒上限の内側で諦める
+        assert_eq!(cfg.ssm_timeout_ms, 2_000);
         assert!(!cfg.disabled);
     }
 
