@@ -147,12 +147,15 @@ impl Config {
         let mut cfg = Config {
             // 空文字は「未設定」と同じ扱いにする。
             // Some("") の kms_key は全 PutObject を失敗させ、
+            // Some("") の ssm_param は init のたびに空名で SSM を呼び、
             // "" の bucket は SSM 側の値を後から潰すだけになる。
             bucket: get("ZANKYO_BUCKET").unwrap_or_default().to_string(),
             kms_key: get("ZANKYO_KMS_KEY")
                 .filter(|s| !s.is_empty())
                 .map(String::from),
-            ssm_param: get("ZANKYO_SSM_PARAM").map(String::from),
+            ssm_param: get("ZANKYO_SSM_PARAM")
+                .filter(|s| !s.is_empty())
+                .map(String::from),
             scrub_fields: BTreeSet::new(),
             scrub_mode: ScrubMode::Mask,
             max_event_kb: DEFAULT_MAX_EVENT_KB,
@@ -300,6 +303,7 @@ mod tests {
             ("ZANKYO_DISABLED", "true"),
         ]))
         .unwrap();
+        assert_eq!(cfg.kms_key.as_deref(), Some("arn:aws:kms:..."));
         assert_eq!(cfg.max_body_kb, 4096);
         assert_eq!(cfg.ext_max_poll_failures, 10);
         assert_eq!(cfg.ssm_timeout_ms, 3000);
@@ -313,6 +317,45 @@ mod tests {
     #[test]
     fn rejects_bad_mode() {
         assert!(Config::from_env_map(&env(&[("ZANKYO_SCRUB_MODE", "yes")])).is_err());
+    }
+
+    #[test]
+    fn empty_strings_are_treated_as_unset() {
+        let cfg = Config::from_env_map(&env(&[
+            ("ZANKYO_BUCKET", ""),
+            ("ZANKYO_KMS_KEY", ""),
+            ("ZANKYO_SSM_PARAM", ""),
+        ]))
+        .unwrap();
+        assert!(cfg.bucket.is_empty());
+        assert_eq!(cfg.kms_key, None);
+        assert_eq!(cfg.ssm_param, None);
+    }
+
+    #[test]
+    fn rejects_zero_limits() {
+        for key in [
+            "ZANKYO_MAX_BODY_KB",
+            "ZANKYO_FLUSH_BUDGET_MS",
+            "ZANKYO_EXT_MAX_POLL_FAILURES",
+        ] {
+            assert!(
+                Config::from_env_map(&env(&[(key, "0")])).is_err(),
+                "{key}=0 must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn non_absolute_spill_dir_is_ignored() {
+        for v in ["rel", ""] {
+            let cfg = Config::from_env_map(&env(&[
+                ("AWS_LAMBDA_FUNCTION_NAME", "my-fn"),
+                ("ZANKYO_SPILL_DIR", v),
+            ]))
+            .unwrap();
+            assert_eq!(cfg.spill_dir, "/tmp/zankyo/my-fn", "{v:?} must be ignored");
+        }
     }
 
     #[test]
