@@ -67,6 +67,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **construct** — `recordRetentionDays` が 1 以上の整数でなければ、synth で
   例外を投げる。以前は 0 が synth を通り、S3 のライフサイクル設定でデプロイが
   失敗していた
+- **construct** — npm のページに使い方が何も表示されなかった。props と
+  Layer の入手先を書いた README をパッケージに含める
 
 ### Security
 

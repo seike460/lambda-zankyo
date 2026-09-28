@@ -86,6 +86,9 @@ zankyo.attachTo(myFunction);
 
 bucket 未指定なら「パブリックアクセス全ブロック + lifecycle 30 日 +
 enforceSSL」のバケットを自動作成します。
+layer 未指定なら、上の SAR アプリを参照します。`arm64` は関数のアーキテクチャに
+揃えてください。食い違うと `attachTo` が例外を投げます
+（props の一覧は [construct/README.md](https://github.com/seike460/lambda-zankyo/blob/main/construct/README.md)）。
 
 ### 3. CLI
 
