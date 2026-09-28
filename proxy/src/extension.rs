@@ -323,12 +323,13 @@ mod tests {
 
     #[test]
     fn budget_shrinks_to_remaining_window() {
-        let cfg = Duration::from_millis(1200);
-        // 凍結期限が 700ms 先 → 残 500ms 程度になるはず
+        let cfg = Duration::from_millis(10_000);
+        // 凍結期限が 5 秒先 → 残 4.8 秒以下になるはず。実時計に依存するため、
+        // テスト中にスレッドが止まっても期限を過ぎないよう数秒の幅を取る
         let now_ms = time::OffsetDateTime::now_utc().unix_timestamp_nanos() / 1_000_000;
-        let near = (now_ms + 700) as i64;
+        let near = (now_ms + 5_000) as i64;
         let b = flush_budget_for(Some(near), cfg);
-        assert!(b < cfg && b <= Duration::from_millis(500));
+        assert!(b < cfg && b <= Duration::from_millis(4_800));
     }
 
     #[test]
