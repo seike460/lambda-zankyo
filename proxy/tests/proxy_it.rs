@@ -98,15 +98,39 @@ async fn wait_for(ms: u64, mut f: impl FnMut() -> bool) -> bool {
 
 static NEXT_SPILL: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 
-/// `endpoint` (mock S3) に向けた Recorder。spill はテストごとに
-/// 一意の一時 dir を使い、テスト間・リラン間で残滓を共有しない。
-fn recorder_to(endpoint: &str) -> Arc<Recorder> {
-    let n = NEXT_SPILL.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let dir = std::env::temp_dir().join(format!("zankyo-it-{}-{}", std::process::id(), n));
-    recorder_to_with_spill(endpoint, &dir)
+/// テストごとに一意な spill dir。Drop で消すので、アサーションの
+/// 失敗で抜けた場合も一時ディレクトリが残らない。
+struct SpillDir(std::path::PathBuf);
+
+impl SpillDir {
+    fn new() -> Self {
+        let n = NEXT_SPILL.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Self(std::env::temp_dir().join(format!("zankyo-it-{}-{}", std::process::id(), n)))
+    }
 }
 
-fn recorder_to_with_spill(endpoint: &str, spill: &std::path::Path) -> Arc<Recorder> {
+impl std::ops::Deref for SpillDir {
+    type Target = std::path::Path;
+    fn deref(&self) -> &std::path::Path {
+        &self.0
+    }
+}
+
+impl Drop for SpillDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// `endpoint` (mock S3) に向けた Recorder と、その spill dir。
+/// spill dir は戻り値を保持している間だけ残る。
+fn recorder_to(endpoint: &str) -> (Arc<Recorder>, SpillDir) {
+    recorder_with_env(endpoint, &[])
+}
+
+/// `recorder_to` に env 設定を足したもの。
+fn recorder_with_env(endpoint: &str, extra: &[(&str, &str)]) -> (Arc<Recorder>, SpillDir) {
+    let spill = SpillDir::new();
     let conf = aws_sdk_s3::Config::builder()
         .region(aws_sdk_s3::config::Region::new("us-east-1"))
         .credentials_provider(aws_sdk_s3::config::SharedCredentialsProvider::new(
@@ -116,20 +140,22 @@ fn recorder_to_with_spill(endpoint: &str, spill: &std::path::Path) -> Arc<Record
         .force_path_style(true)
         .behavior_version(aws_sdk_s3::config::BehaviorVersion::latest())
         .build();
-    let cfg = Config::from_env_map(&HashMap::from([
+    let mut env = HashMap::from([
         ("ZANKYO_BUCKET".to_string(), "test-bucket".to_string()),
         (
             "ZANKYO_SPILL_DIR".to_string(),
             spill.to_string_lossy().into_owned(),
         ),
-    ]))
-    .unwrap();
-    Arc::new(Recorder::new(
+    ]);
+    env.extend(extra.iter().map(|(k, v)| (k.to_string(), v.to_string())));
+    let cfg = Config::from_env_map(&env).unwrap();
+    let recorder = Arc::new(Recorder::new(
         aws_sdk_s3::Client::from_conf(conf),
         cfg,
         "test-fn".to_string(),
         "42".to_string(),
-    ))
+    ));
+    (recorder, spill)
 }
 
 /// zankyo proxy を addr から listen させる。
@@ -222,7 +248,8 @@ async fn handler_error_is_forwarded_scrubbed_and_recorded() {
     })
     .await;
     let inflight = Arc::new(InFlight::new());
-    let proxy = spawn_proxy(&api_addr, inflight.clone(), recorder_to(&s3_addr)).await;
+    let (recorder, _spill) = recorder_to(&s3_addr);
+    let proxy = spawn_proxy(&api_addr, inflight.clone(), recorder).await;
 
     // 1. ランタイムが /next をポーリング → イベントは素通り（中身を変えない）
     let (status, body) = call(
@@ -279,7 +306,8 @@ async fn successful_response_is_not_recorded() {
     let (api_addr, _api) = spawn_mock(runtime_api_handler()).await;
     let (s3_addr, s3_hits) = spawn_mock(|_m, _p, _h, _b| ok_empty()).await;
     let inflight = Arc::new(InFlight::new());
-    let proxy = spawn_proxy(&api_addr, inflight.clone(), recorder_to(&s3_addr)).await;
+    let (recorder, _spill) = recorder_to(&s3_addr);
+    let proxy = spawn_proxy(&api_addr, inflight.clone(), recorder).await;
 
     call(
         &proxy,
@@ -307,7 +335,8 @@ async fn response_with_error_type_is_recorded() {
     let (api_addr, _api) = spawn_mock(runtime_api_handler()).await;
     let (s3_addr, s3_hits) = spawn_mock(|_m, _p, _h, _b| ok_empty()).await;
     let inflight = Arc::new(InFlight::new());
-    let proxy = spawn_proxy(&api_addr, inflight.clone(), recorder_to(&s3_addr)).await;
+    let (recorder, _spill) = recorder_to(&s3_addr);
+    let proxy = spawn_proxy(&api_addr, inflight.clone(), recorder).await;
 
     call(
         &proxy,
@@ -337,7 +366,8 @@ async fn init_error_records_without_event() {
     let (api_addr, _api) = spawn_mock(|_m, _p, _h, _b| ok_empty()).await;
     let (s3_addr, s3_hits) = spawn_mock(|_m, _p, _h, _b| ok_empty()).await;
     let inflight = Arc::new(InFlight::new());
-    let proxy = spawn_proxy(&api_addr, inflight, recorder_to(&s3_addr)).await;
+    let (recorder, _spill) = recorder_to(&s3_addr);
+    let proxy = spawn_proxy(&api_addr, inflight, recorder).await;
 
     let (status, _) = call(
         &proxy,
@@ -379,8 +409,7 @@ async fn shutdown_flushes_inflight_as_timeout() {
         encoding: EventEncoding::Json,
         invoked_at: OffsetDateTime::now_utc(),
     });
-    let spill_dir = std::env::temp_dir().join(format!("zankyo-it-shutdown-{}", std::process::id()));
-    let recorder = recorder_to_with_spill(&s3_addr, &spill_dir);
+    let (recorder, spill_dir) = recorder_to(&s3_addr);
 
     zankyo::extension::run_event_loop(
         new_client(),
@@ -403,7 +432,6 @@ async fn shutdown_flushes_inflight_as_timeout() {
     // S3 へ届いた spill は成功時に掃除される（残すと次回 init で冗長 PUT）
     let spill = spill_dir.join("zankyo-req-timeout.json");
     assert!(!spill.exists());
-    let _ = std::fs::remove_dir_all(&spill_dir);
 }
 
 #[tokio::test]
@@ -412,7 +440,8 @@ async fn non_runtime_paths_are_forwarded_without_recording() {
     let (api_addr, api_hits) = spawn_mock(|_m, _p, _h, _b| ok_body(json!({"proxied": true}))).await;
     let (s3_addr, s3_hits) = spawn_mock(|_m, _p, _h, _b| ok_empty()).await;
     let inflight = Arc::new(InFlight::new());
-    let proxy = spawn_proxy(&api_addr, inflight, recorder_to(&s3_addr)).await;
+    let (recorder, _spill) = recorder_to(&s3_addr);
+    let proxy = spawn_proxy(&api_addr, inflight, recorder).await;
 
     let (status, body) = call(
         &proxy,
@@ -451,7 +480,8 @@ async fn raw_text_event_is_recorded_verbatim() {
     .await;
     let (s3_addr, s3_hits) = spawn_mock(|_m, _p, _h, _b| ok_empty()).await;
     let inflight = Arc::new(InFlight::new());
-    let proxy = spawn_proxy(&api_addr, inflight, recorder_to(&s3_addr)).await;
+    let (recorder, _spill) = recorder_to(&s3_addr);
+    let proxy = spawn_proxy(&api_addr, inflight, recorder).await;
 
     call(
         &proxy,
@@ -491,7 +521,8 @@ async fn binary_event_is_stored_as_base64() {
     .await;
     let (s3_addr, s3_hits) = spawn_mock(|_m, _p, _h, _b| ok_empty()).await;
     let inflight = Arc::new(InFlight::new());
-    let proxy = spawn_proxy(&api_addr, inflight, recorder_to(&s3_addr)).await;
+    let (recorder, _spill) = recorder_to(&s3_addr);
+    let proxy = spawn_proxy(&api_addr, inflight, recorder).await;
 
     call(
         &proxy,
@@ -525,7 +556,8 @@ async fn error_context_pii_is_scrubbed() {
     let (api_addr, _api) = spawn_mock(runtime_api_handler()).await;
     let (s3_addr, s3_hits) = spawn_mock(|_m, _p, _h, _b| ok_empty()).await;
     let inflight = Arc::new(InFlight::new());
-    let proxy = spawn_proxy(&api_addr, inflight, recorder_to(&s3_addr)).await;
+    let (recorder, _spill) = recorder_to(&s3_addr);
+    let proxy = spawn_proxy(&api_addr, inflight, recorder).await;
 
     call(
         &proxy,
@@ -561,7 +593,8 @@ async fn second_error_call_does_not_overwrite_record() {
     let (api_addr, _api) = spawn_mock(runtime_api_handler()).await;
     let (s3_addr, s3_hits) = spawn_mock(|_m, _p, _h, _b| ok_empty()).await;
     let inflight = Arc::new(InFlight::new());
-    let proxy = spawn_proxy(&api_addr, inflight, recorder_to(&s3_addr)).await;
+    let (recorder, _spill) = recorder_to(&s3_addr);
+    let proxy = spawn_proxy(&api_addr, inflight, recorder).await;
 
     call(
         &proxy,
@@ -595,8 +628,7 @@ async fn inflight_stage_is_cleared_on_completion() {
     // 正常完了分が残ると次回 init で誤って timeout 記録される。
     let (api_addr, _api) = spawn_mock(runtime_api_handler()).await;
     let (s3_addr, _s3) = spawn_mock(|_m, _p, _h, _b| ok_empty()).await;
-    let spill_dir = std::env::temp_dir().join(format!("zankyo-it-infl-{}", std::process::id()));
-    let recorder = recorder_to_with_spill(&s3_addr, &spill_dir);
+    let (recorder, spill_dir) = recorder_to(&s3_addr);
     let inflight = Arc::new(InFlight::new());
     let proxy = spawn_proxy(&api_addr, inflight, recorder).await;
     let stage = spill_dir.join("zankyo-req-123.inflight");
@@ -618,7 +650,6 @@ async fn inflight_stage_is_cleared_on_completion() {
     .await;
     assert_eq!(status, StatusCode::OK);
     assert!(!stage.exists());
-    let _ = std::fs::remove_dir_all(&spill_dir);
 }
 
 #[tokio::test]
@@ -626,8 +657,7 @@ async fn leftover_inflight_stage_becomes_timeout_record() {
     // external extension / init 時回収: 残った .inflight ステージを
     // timeout レコードへ変換し、ステージ本体は消える。
     let (s3_addr, s3_hits) = spawn_mock(|_m, _p, _h, _b| ok_empty()).await;
-    let spill_dir = std::env::temp_dir().join(format!("zankyo-it-infl2-{}", std::process::id()));
-    let recorder = recorder_to_with_spill(&s3_addr, &spill_dir);
+    let (recorder, spill_dir) = recorder_to(&s3_addr);
     let inv = Invocation {
         request_id: "req-stuck".to_string(),
         event: json!({"token": "secret-token-value"}),
@@ -651,7 +681,6 @@ async fn leftover_inflight_stage_becomes_timeout_record() {
     // 変換後はステージも spill も残らない（PUT 成功時）
     assert!(!stage.exists());
     assert!(!spill_dir.join("zankyo-req-stuck.json").exists());
-    let _ = std::fs::remove_dir_all(&spill_dir);
 }
 
 /// Extensions API モックが受けた (path, 登録名 or 識別子ヘッダ)。
@@ -737,8 +766,7 @@ async fn external_agent_converts_staged_inflight_on_shutdown() {
     // 本番の timeout 捕捉経路: register → SHUTDOWN 受信 → .inflight を timeout 記録へ
     let (api_addr, api_hits, seen) = spawn_extensions_api("timeout").await;
     let (s3_addr, s3_hits) = spawn_mock(|_m, _p, _h, _b| ok_empty()).await;
-    let spill_dir = std::env::temp_dir().join(format!("zankyo-it-agent-{}", std::process::id()));
-    let recorder = recorder_to_with_spill(&s3_addr, &spill_dir);
+    let (recorder, spill_dir) = recorder_to(&s3_addr);
     recorder.stage_inflight(&Invocation {
         request_id: "req-agent".to_string(),
         event: json!({"token": "secret-token-value"}),
@@ -761,7 +789,6 @@ async fn external_agent_converts_staged_inflight_on_shutdown() {
     assert_eq!(rec["failureType"], "timeout");
     assert_eq!(rec["errorContext"]["errorType"], "Timeout");
     assert!(!spill_dir.join("zankyo-req-agent.inflight").exists());
-    let _ = std::fs::remove_dir_all(&spill_dir);
 }
 
 #[tokio::test]
@@ -809,7 +836,8 @@ async fn oversized_body_is_rejected_without_forwarding() {
     let (api_addr, api_hits) = spawn_mock(|_m, _p, _h, _b| ok_empty()).await;
     let (s3_addr, _s3) = spawn_mock(|_m, _p, _h, _b| ok_empty()).await;
     let inflight = Arc::new(InFlight::new());
-    let proxy = spawn_proxy(&api_addr, inflight, recorder_to(&s3_addr)).await;
+    let (recorder, _spill) = recorder_to(&s3_addr);
+    let proxy = spawn_proxy(&api_addr, inflight, recorder).await;
 
     // MAX_BODY_BYTES (8MiB) を超えるボディは上流へ転送せず 413 を返す
     let big = Bytes::from(vec![b'x'; 9 * 1024 * 1024]);
