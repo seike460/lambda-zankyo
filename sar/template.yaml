@@ -18,7 +18,7 @@ Metadata:
     Labels: [lambda, observability, replay, debugging, incidents]
     HomePageUrl: https://github.com/seike460/lambda-zankyo
     SemanticVersion: 0.1.0
-    SourceCodeUrl: https://github.com/seike460/lambda-zankyo
+    SourceCodeUrl: https://github.com/seike460/lambda-zankyo/tree/v0.1.0
 
 Resources:
   # scripts/build-layer.mts の出力を配置して sam publish する。

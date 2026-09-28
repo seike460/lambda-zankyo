@@ -21,6 +21,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   モード（0600）で書く。既存のファイルを上書きするときは、モードを変えない
 - **cli** — npm の tarball から、使われない型定義（`.d.ts`）と source map を外した。
   source map は tarball に含まれない `src/` を指していた
+- **sar** — SAR の `SourceCodeUrl` を、リポジトリのルートから、その版のタグ
+  （`/tree/v<版>`）に変えた。SAR の各版から、対応するソースをたどれる
 
 ### Fixed
 
