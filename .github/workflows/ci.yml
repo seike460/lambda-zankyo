@@ -25,9 +25,9 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: pnpm lint          # biome check .
+      - run: pnpm build         # tsc emit — zankyo-cdk/dist を生成（examples の typecheck/test が依存）
       - run: pnpm typecheck     # tsc --noEmit in each package
       - run: pnpm test          # node --test in each package
-      - run: pnpm build         # emit check: tsc -p tsconfig.build.json per package
 
   rust-quality:
     name: rust (fmt + clippy + test)
