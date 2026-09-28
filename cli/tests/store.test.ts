@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import { CliError } from '../src/errors.ts';
 import { fetchRecord, listRecordKeys, loadRecord, resolveRecordKey } from '../src/store.ts';
-import { fakeS3 } from './helpers.ts';
+import { fakeS3, rejecting } from './helpers.ts';
 
 function obj(key: string, lastModified?: string) {
   return { Key: key, LastModified: lastModified ? new Date(lastModified) : undefined };
@@ -75,6 +75,19 @@ describe('listRecordKeys', () => {
     ]);
     const refs = await listRecordKeys(s3, 'bkt', {});
     assert.equal(refs.length, 2);
+    assert.deepEqual(
+      s3.listInputs.map((i) => [i.Bucket, i.Prefix, i.ContinuationToken]),
+      [
+        ['bkt', 'zankyo/', undefined],
+        ['bkt', 'zankyo/', 't2'],
+      ],
+    );
+  });
+
+  it('narrows the prefix to one function with --function', async () => {
+    const s3 = fakeS3([{ Contents: [obj('zankyo/fn/2026/09/22/a.json')] }]);
+    await listRecordKeys(s3, 'bkt', { functionName: 'fn' });
+    assert.equal(s3.listInputs[0]?.Prefix, 'zankyo/fn/');
   });
 
   it('filters by since', async () => {
@@ -112,6 +125,29 @@ describe('resolveRecordKey', () => {
     ]);
     const key = await resolveRecordKey(s3, 'bkt', { requestId: 'target-id' });
     assert.equal(key, 'zankyo/fn/2026/09/22/target-id.json');
+    assert.deepEqual(
+      s3.listInputs.map((i) => i.ContinuationToken),
+      [undefined, 't2'],
+    );
+  });
+
+  it('narrows the prefix to one function with --function', async () => {
+    const s3 = fakeS3([{ Contents: [obj('zankyo/fn/2026/09/22/r1.json')] }]);
+    await resolveRecordKey(s3, 'bkt', { requestId: 'r1', functionName: 'fn' });
+    await resolveRecordKey(s3, 'bkt', { last: true, functionName: 'fn' });
+    assert.deepEqual(
+      s3.listInputs.map((i) => i.Prefix),
+      ['zankyo/fn/', 'zankyo/fn/'],
+    );
+  });
+
+  it('maps an S3 list failure to exitCode 3', async () => {
+    const s3 = { ...fakeS3([]), listObjectsV2: rejecting('AccessDenied') };
+    await assert.rejects(
+      () => resolveRecordKey(s3, 'bkt', { requestId: 'r1' }),
+      (e: unknown) =>
+        e instanceof CliError && e.exitCode === 3 && e.message.includes('AccessDenied'),
+    );
   });
 
   it('throws exitCode 4 when not found', async () => {
@@ -128,6 +164,38 @@ describe('fetchRecord', () => {
     const s3 = fakeS3([], VALID_RECORD);
     const rec = await fetchRecord(s3, 'bkt', 'zankyo/fn/2026/09/22/r1.json');
     assert.equal(rec.requestId, 'r1');
+    assert.deepEqual(s3.getInputs, [{ Bucket: 'bkt', Key: 'zankyo/fn/2026/09/22/r1.json' }]);
+  });
+
+  it('maps an S3 read failure to exitCode 3', async () => {
+    const s3 = { ...fakeS3([], VALID_RECORD), getObject: rejecting('NoSuchKey') };
+    await assert.rejects(
+      () => fetchRecord(s3, 'bkt', 'k'),
+      (e: unknown) => e instanceof CliError && e.exitCode === 3 && e.message.includes('NoSuchKey'),
+    );
+  });
+
+  it('refuses an object over ZANKYO_RECORD_MAX_MB with exitCode 4 without reading it', async () => {
+    let read = false;
+    const s3 = {
+      ...fakeS3([]),
+      async getObject() {
+        return {
+          ContentLength: 32 * 1024 * 1024 + 1,
+          Body: {
+            transformToString: async () => {
+              read = true;
+              return VALID_RECORD;
+            },
+          },
+        };
+      },
+    };
+    await assert.rejects(
+      () => fetchRecord(s3, 'bkt', 'k'),
+      (e: unknown) => e instanceof CliError && e.exitCode === 4,
+    );
+    assert.equal(read, false);
   });
 
   it('throws on schema mismatch', async () => {

@@ -16,10 +16,15 @@ import {
   fakeLambdaHandler,
   fakeLambdaSeq,
   fakeS3,
+  rejecting,
+  sentPayload,
   VALID_RECORD,
 } from './helpers.ts';
 
 const KEY = 'zankyo/fn/2026/09/22/r1.json';
+const RECORDED_EVENT = { user: 'alice', password: 'x***' };
+
+const isExit = (code: number) => (e: unknown) => e instanceof CliError && e.exitCode === code;
 
 describe('zankyo list', () => {
   const s3 = () =>
@@ -43,6 +48,11 @@ describe('zankyo list', () => {
     const first = parsed[0];
     assert(typeof first === 'object' && first !== null && 'key' in first);
     assert.equal(first.key, KEY);
+  });
+
+  it('exits 3 when S3 rejects the listing', async () => {
+    const s3 = { ...fakeS3([]), listObjectsV2: rejecting('AccessDenied') };
+    await assert.rejects(() => runList(['--bucket', 'b'], deps(s3)), isExit(3));
   });
 });
 
@@ -73,21 +83,47 @@ describe('zankyo fixture', () => {
   it('rejects when no requestId or --last given', async () => {
     await assert.rejects(() => runFixture(['--bucket', 'b'], deps(fakeS3([]))), CliError);
   });
+
+  it('exits 3 when S3 rejects the read', async () => {
+    const s3 = { ...fakeS3([{ Contents: [{ Key: KEY }] }]), getObject: rejecting('AccessDenied') };
+    await assert.rejects(() => runFixture(['r1', '--bucket', 'b'], deps(s3)), isExit(3));
+  });
 });
 
 describe('zankyo replay', () => {
+  const s3 = () => fakeS3([{ Contents: [{ Key: KEY }] }], VALID_RECORD);
+
   it('invokes the recorded event and prints the outcome', async () => {
-    const s3 = fakeS3([{ Contents: [{ Key: KEY }] }], VALID_RECORD);
     const lambda = fakeLambda({
       StatusCode: 200,
       Payload: new TextEncoder().encode('{"ok":true}'),
     });
     const { code, out } = await captureStdout(() =>
-      runReplay(['r1', '--bucket', 'b', '--alias', 'dev'], deps(s3, lambda)),
+      runReplay(['r1', '--bucket', 'b', '--alias', 'dev'], deps(s3(), lambda)),
     );
     assert.equal(code, 0);
     assert.ok(out.includes('fn:dev'));
     assert.ok(out.includes('{"ok":true}'));
+    assert.equal(lambda.inputs.length, 1);
+    assert.equal(lambda.inputs[0]?.FunctionName, 'fn:dev');
+    assert.deepEqual(sentPayload(lambda.inputs[0]), RECORDED_EVENT);
+  });
+
+  it('exits 1 when the function returns an error', async () => {
+    const lambda = fakeLambda({
+      StatusCode: 200,
+      FunctionError: 'Unhandled',
+      Payload: new TextEncoder().encode('{"errorMessage":"x"}'),
+    });
+    const { code } = await captureStdout(() =>
+      runReplay(['r1', '--bucket', 'b'], deps(s3(), lambda)),
+    );
+    assert.equal(code, 1);
+  });
+
+  it('exits 3 when the Invoke API call fails', async () => {
+    const lambda = { invoke: rejecting('AccessDeniedException') };
+    await assert.rejects(() => runReplay(['r1', '--bucket', 'b'], deps(s3(), lambda)), isExit(3));
   });
 });
 
@@ -103,6 +139,8 @@ describe('zankyo diff', () => {
       runDiff(['r1', '--bucket', 'b', '--alias', 'a', '--alias', 'b'], deps(s3(), lambda)),
     );
     assert.equal(code, 0);
+    assert.deepEqual(lambda.inputs.map((i) => i.FunctionName).sort(), ['fn:a', 'fn:b']);
+    assert.deepEqual(lambda.inputs.map(sentPayload), [RECORDED_EVENT, RECORDED_EVENT]);
   });
 
   it('exits 1 when responses differ', async () => {
@@ -128,6 +166,7 @@ describe('zankyo redrive', () => {
     );
     assert.equal(code, 0);
     assert.ok(out.includes('dry-run'));
+    assert.deepEqual(lambda.inputs, []);
   });
 
   it('invokes with --confirm and reports function errors', async () => {
@@ -140,6 +179,9 @@ describe('zankyo redrive', () => {
       runRedrive(['r1', '--bucket', 'b', '--confirm'], deps(s3(), lambda)),
     );
     assert.equal(code, 1);
+    assert.equal(lambda.inputs.length, 1);
+    assert.equal(lambda.inputs[0]?.FunctionName, 'fn');
+    assert.deepEqual(sentPayload(lambda.inputs[0]), RECORDED_EVENT);
   });
 
   it('refuses to invoke a function other than the one in the record key', async () => {
