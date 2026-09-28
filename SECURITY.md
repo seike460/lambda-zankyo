@@ -19,8 +19,9 @@ zankyo は失敗イベントを扱うため、記録経路そのものを最小�
 - **PII scrub**: 既定で有効。フィールド名 denylist とパターン検出
   （email・JWT・クレジットカード番号等）の hybrid で、
   `ZANKYO_SCRUB_MODE=off` を明示しない限り無効化できません。
-- **権限**: CDK construct が付与するのは記録バケットへの
-  `s3:PutObject` のみ。読み取り権限は関数に付きません。
+- **権限**: CDK construct が付与するのは記録バケットの
+  `zankyo/{function-name}/` 配下への `s3:PutObject` のみ。読み取り権限は
+  関数に付きません。バケットを共有する関数どうしも、互いのレコードは書けません。
 - **暗号化**: SSE-S3 が既定。`ZANKYO_KMS_KEY` で SSE-KMS を選択でき、
   その場合に限り KMS の encrypt / data key 権限が付きます。
 - **fail-open**: proxy 自身の障害で関数本体を止めない設計です。

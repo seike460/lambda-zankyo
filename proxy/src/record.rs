@@ -10,7 +10,7 @@ use time::OffsetDateTime;
 
 pub const RECORD_VERSION: &str = "1";
 /// S3 キーの先頭セグメント。CLI (cli/src/record.ts)・CDK construct の
-/// IAM スコープ (`zankyo/*`) と揃える規約。
+/// IAM スコープ (`zankyo/{function-name}/*`) と揃える規約。
 pub const KEY_PREFIX: &str = "zankyo";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

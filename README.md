@@ -193,6 +193,8 @@ s3://{ZANKYO_BUCKET}/zankyo/{function-name}/{yyyy}/{mm}/{dd}/{requestId}.json
 
 - レコードは**利用者自身のアカウントの S3** にのみ保存。外部送信ゼロ。
 - 関数に付与するのは `s3:PutObject` のみ（+KMS 時は Encrypt/GenerateDataKey）。
+  書き込み先は `zankyo/{function-name}/` 配下に限るので、バケットを共有する
+  別の関数のレコードは書けません（CDK construct の場合）。
 - CLI は、キーの関数名と本文の `functionName` が食い違うレコードを
   replay・diff・redrive に使いません（exit 4）。
 - proxy が listen するのは `127.0.0.1` のみ。

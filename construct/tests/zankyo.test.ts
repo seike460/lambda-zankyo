@@ -68,6 +68,36 @@ describe('Zankyo', () => {
     });
   });
 
+  it('scopes PutObject to each function own key prefix', () => {
+    const fnRefs: unknown[] = [];
+    const t = synth((stack) => {
+      const z = new Zankyo(stack, 'Z', {
+        layer: lambda.LayerVersion.fromLayerVersionArn(
+          stack,
+          'L',
+          'arn:aws:lambda:us-east-1:123456789012:layer:zankyo:1',
+        ),
+      });
+      for (const id of ['A', 'B']) {
+        const f = fn(stack, id);
+        z.attachTo(f);
+        fnRefs.push(stack.resolve(f.functionName));
+      }
+    });
+    for (const fnRef of fnRefs) {
+      t.hasResourceProperties('AWS::IAM::Policy', {
+        PolicyDocument: {
+          Statement: [
+            Match.objectLike({
+              Action: 's3:PutObject',
+              Resource: { 'Fn::Join': ['', [Match.anyValue(), '/zankyo/', fnRef, '/*']] },
+            }),
+          ],
+        },
+      });
+    }
+  });
+
   it('uses an existing bucket and emits scrub fields', () => {
     const t = synth((stack) => {
       const bucket = s3.Bucket.fromBucketName(stack, 'B', 'existing-records');

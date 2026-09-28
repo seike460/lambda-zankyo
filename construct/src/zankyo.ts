@@ -123,12 +123,19 @@ export class Zankyo extends Construct {
     }
     // 記録に必要なのは PutObject のみ。grantPut は LegalHold/Tagging 等まで
     // 広く付くため、最小権限の方針に合わせアクションを明示する。
-    // 書き込み先も zankyo/ プレフィックスに限る — proxy はそれ以外の
-    // キーを生成しないので、バケットの他領域まで許す必要がない。
-    fn.addToRolePolicy(
-      new iam.PolicyStatement({
-        actions: ['s3:PutObject'],
-        resources: [this.bucket.arnForObjects(`${RECORD_KEY_PREFIX}/*`)],
+    // 書き込み先は zankyo/{関数名}/ に限る。proxy は自分の関数名の下にしか
+    // 書かないので、バケットを共有する別の関数がこの関数を名乗るレコード
+    // （replay/redrive の投入先になる）を置けないようにする。
+    // 関数名は関数自身への Ref のため、role の DefaultPolicy に書くと
+    // 循環依存になる。独立した Policy として付ける。
+    fn.role?.attachInlinePolicy(
+      new iam.Policy(fn, 'ZankyoRecordsPolicy', {
+        statements: [
+          new iam.PolicyStatement({
+            actions: ['s3:PutObject'],
+            resources: [this.bucket.arnForObjects(`${RECORD_KEY_PREFIX}/${fn.functionName}/*`)],
+          }),
+        ],
       }),
     );
     // SSE-KMS 書き込みに必要なのは Encrypt と GenerateDataKey。Decrypt は不要。
