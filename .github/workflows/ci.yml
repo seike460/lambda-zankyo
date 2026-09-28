@@ -26,6 +26,11 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm lint          # biome check .
       - run: pnpm build         # tsc emit — zankyo-cdk/dist を生成（examples の typecheck/test が依存）
+      # CLI のテストは src を型除去で実行する。公開する bin（package.json の bin が指す dist）の
+      # import 書き換えやパスの誤りは、ここで実際に起動して確かめる（bin.js は全コマンドを静的 import する）
+      - name: smoke-test the cli bin (dist)
+        working-directory: cli
+        run: node "$(node -p 'require("./package.json").bin.zankyo')" --version
       - run: pnpm typecheck     # tsc --noEmit in each package
       - run: pnpm test          # node --test in each package
 
