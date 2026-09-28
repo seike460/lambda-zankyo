@@ -131,7 +131,7 @@ async fn handle(req: Request<Incoming>, st: &ProxyState) -> Response<BoxedBody> 
     };
 
     let segs: Vec<&str> = path.split('/').collect();
-    tracing::info!(method = %parts.method, path = %path, "runtime api request");
+    debug!(method = %parts.method, path = %path, "runtime api request");
     match (parts.method.as_str(), segs.as_slice()) {
         ("GET", ["", "2018-06-01", "runtime", "invocation", "next"]) => {
             crate::handlers::handle_next(
