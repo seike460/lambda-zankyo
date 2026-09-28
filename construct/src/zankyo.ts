@@ -55,6 +55,7 @@ export interface ZankyoProps {
   readonly layer?: lambda.ILayerVersion;
   /**
    * SAR アプリの arm64 用 Output を使う（既定 false = x86_64）。
+   * attachTo する関数のアーキテクチャと揃える。食い違うと attachTo が例外を投げる。
    * layer を渡した場合は無関係。
    */
   readonly arm64?: boolean;
@@ -69,6 +70,8 @@ export class Zankyo extends Construct {
   /** 失敗レコードの保存先バケット。 */
   readonly bucket: s3.IBucket;
   private readonly layer: lambda.ILayerVersion;
+  /** SAR から取り出した Layer のアーキテクチャ。layer を渡した場合は undefined。 */
+  private readonly sarArchitecture: lambda.Architecture | undefined;
   private readonly kmsKey: kms.IKey | undefined;
   private readonly scrubFields: readonly string[] | undefined;
 
@@ -88,6 +91,11 @@ export class Zankyo extends Construct {
         // 失敗レコードは監査証跡になりうるため、誤削除より残す方を既定にする
         removalPolicy: RemovalPolicy.RETAIN,
       });
+    this.sarArchitecture = props.layer
+      ? undefined
+      : props.arm64
+        ? lambda.Architecture.ARM_64
+        : lambda.Architecture.X86_64;
     this.layer =
       props.layer ??
       lambda.LayerVersion.fromLayerVersionArn(this, 'SarLayer', this.sarLayerArn(props));
@@ -110,6 +118,15 @@ export class Zankyo extends Construct {
    * 記録先への PutObject（+ KMS）権限付与。
    */
   public attachTo(fn: lambda.Function): void {
+    // 別アーキテクチャのバイナリは exec できず、ランタイムごと起動しなくなる（fail-open にならない）。
+    // Layer の互換性は利用者が確かめる前提で、デプロイで止まる保証がないため synth で止める
+    if (this.sarArchitecture && fn.architecture.name !== this.sarArchitecture.name) {
+      throw new Error(
+        `Zankyo: ${fn.node.path} runs on ${fn.architecture.name}, but this Zankyo uses the ` +
+          `${this.sarArchitecture.name} SAR layer. Set arm64 to match the function, or use a ` +
+          'separate Zankyo per architecture.',
+      );
+    }
     fn.addLayers(this.layer);
     fn.addEnvironment('AWS_LAMBDA_EXEC_WRAPPER', WRAPPER_PATH);
     fn.addEnvironment('ZANKYO_BUCKET', this.bucket.bucketName);

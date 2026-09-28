@@ -61,6 +61,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   存在しないアプリを参照してデプロイに失敗していた。公開中の
   `arn:aws:serverlessrepo:ap-northeast-1:446537410535:applications/lambda-zankyo`
   に直した。公開アプリなので、ほかのリージョンのスタックからもデプロイできる
+- **construct** — `attachTo` は、SAR の Layer のアーキテクチャ（`arm64`）と関数の
+  アーキテクチャが食い違うと例外を投げる。以前は synth が通り、関数は
+  別アーキテクチャのバイナリを exec できずに起動しなくなっていた
 - **construct** — `recordRetentionDays` が 1 以上の整数でなければ、synth で
   例外を投げる。以前は 0 が synth を通り、S3 のライフサイクル設定でデプロイが
   失敗していた

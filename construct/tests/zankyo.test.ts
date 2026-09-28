@@ -91,6 +91,37 @@ describe('Zankyo', () => {
     assert.deepEqual(layers, [{ 'Fn::GetAtt': [appId, 'Outputs.LayerVersionArnArm64'] }]);
   });
 
+  it('rejects a function whose architecture differs from the SAR layer', () => {
+    const cases = [
+      { arm64: false, architecture: lambda.Architecture.ARM_64 },
+      { arm64: true, architecture: lambda.Architecture.X86_64 },
+    ];
+    for (const { arm64, architecture } of cases) {
+      const stack = newStack();
+      const z = new Zankyo(stack, 'Z', { arm64 });
+      const f = fn(stack, 'Fn', architecture);
+      assert.throws(() => z.attachTo(f), /runs on .* SAR layer\. Set arm64/);
+      assert.equal(f.node.tryFindChild('ZankyoRecordsPolicy'), undefined);
+    }
+  });
+
+  it('does not check the architecture of a self-hosted layer', () => {
+    const t = synth((stack) => {
+      const z = new Zankyo(stack, 'Z', {
+        layer: lambda.LayerVersion.fromLayerVersionArn(
+          stack,
+          'L',
+          'arn:aws:lambda:us-east-1:123456789012:layer:zankyo-arm64:1',
+        ),
+      });
+      z.attachTo(fn(stack, 'Fn', lambda.Architecture.ARM_64));
+    });
+    t.resourceCountIs('AWS::Serverless::Application', 0);
+    t.hasResourceProperties('AWS::Lambda::Function', {
+      Layers: ['arn:aws:lambda:us-east-1:123456789012:layer:zankyo-arm64:1'],
+    });
+  });
+
   it('rejects a recordRetentionDays that S3 lifecycle cannot accept', () => {
     for (const days of [0, -1, 1.5, Number.NaN]) {
       assert.throws(
