@@ -264,7 +264,8 @@ SSM キー・build arch。spill は atomic 書き込み・上限・定期回収�
 
 - 依存は lockfile 固定: `Cargo.lock`（Rust）と `pnpm-lock.yaml`（JS/TS）
   をコミット済み。`pnpm install --frozen-lockfile` / `cargo build --locked`
-  で同一依存が解決されます。
+  で同一依存が解決されます。CI のビルド・テストと `scripts/build-layer.mts`
+  も `--locked` を付けます。`Cargo.toml` と lockfile がずれていれば失敗します。
 - ツールチェーンも固定: `rust-toolchain.toml`（Rust 1.98.1。最低要件は
   `proxy/Cargo.toml` の `rust-version` = 1.94.1 で、CI で検証）、`.nvmrc`
   （Node 24。engines の下限 `>=24` と同じで、CI は Node 24 と 26 で検証）、
