@@ -74,7 +74,6 @@ class LambdaFunctionInvoker implements FunctionInvoker {
 export interface AwsClients {
   s3: RecordReader;
   lambda: FunctionInvoker;
-  region: string | undefined;
 }
 
 export function makeClients(values: Record<string, unknown>): AwsClients {
@@ -93,6 +92,5 @@ export function makeClients(values: Record<string, unknown>): AwsClients {
   return {
     s3: new S3RecordReader(new S3Client(cfg)),
     lambda: new LambdaFunctionInvoker(new LambdaClient(cfg)),
-    region,
   };
 }

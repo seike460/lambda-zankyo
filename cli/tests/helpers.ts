@@ -59,7 +59,6 @@ export function deps(s3: RecordReader, lambda?: FunctionInvoker): AwsClients {
   return {
     s3,
     lambda: lambda ?? fakeLambda({}),
-    region: undefined,
   };
 }
 

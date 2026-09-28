@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
+import { LambdaClient } from '@aws-sdk/client-lambda';
+import { S3Client } from '@aws-sdk/client-s3';
 import { envTimeout, makeClients } from '../src/aws.ts';
 
 describe('envTimeout', () => {
@@ -37,8 +39,17 @@ describe('makeClients', () => {
     }
   });
 
-  it('passes region through when given', () => {
-    const clients = makeClients({ region: 'ap-northeast-1' });
-    assert.equal(clients.region, 'ap-northeast-1');
+  it('passes --region to the S3 and Lambda clients', async (t) => {
+    const regions: string[] = [];
+    async function captureRegion(this: { config: { region: () => Promise<string> } }) {
+      regions.push(await this.config.region());
+      return {};
+    }
+    t.mock.method(S3Client.prototype, 'send', captureRegion);
+    t.mock.method(LambdaClient.prototype, 'send', captureRegion);
+    const clients = makeClients({ region: 'sa-east-1' });
+    await clients.s3.listObjectsV2({ Bucket: 'b', Prefix: 'zankyo/' });
+    await clients.lambda.invoke({ FunctionName: 'fn', Payload: new Uint8Array() });
+    assert.deepEqual(regions, ['sa-east-1', 'sa-east-1']);
   });
 });

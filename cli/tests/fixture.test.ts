@@ -41,6 +41,11 @@ describe('fixtureJson', () => {
     const raw: ZankyoRecord = { ...base, event: '<xml>not json</xml>', eventIsRawText: true };
     assert.equal(fixtureJson(raw), '<xml>not json</xml>\n');
   });
+
+  it('writes base64 events verbatim (no JSON quoting)', () => {
+    const b64: ZankyoRecord = { ...base, event: 'iVBORw==', eventIsBase64: true };
+    assert.equal(fixtureJson(b64), 'iVBORw==\n');
+  });
 });
 
 describe('eventPayload', () => {

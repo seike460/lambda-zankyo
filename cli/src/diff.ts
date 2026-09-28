@@ -63,21 +63,6 @@ function diffArrays(a: unknown[], b: unknown[], path: string): JsonDiff[] {
   return diffs;
 }
 
-/** キー順を安定化した JSON 文字列。比較・表示用。 */
-export function canonicalize(v: unknown): string {
-  return JSON.stringify(sortKeys(v), null, 2);
-}
-
-function sortKeys(v: unknown): unknown {
-  if (Array.isArray(v)) return v.map(sortKeys);
-  if (isPlainObject(v)) {
-    const out: Record<string, unknown> = {};
-    for (const k of Object.keys(v).sort()) out[k] = sortKeys(v[k]);
-    return out;
-  }
-  return v;
-}
-
 const KIND_MARK: Record<JsonDiff['kind'], string> = {
   added: '+',
   removed: '-',

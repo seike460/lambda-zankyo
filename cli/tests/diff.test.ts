@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { canonicalize, diffJson } from '../src/diff.ts';
+import { diffJson } from '../src/diff.ts';
 
 describe('diffJson', () => {
   it('returns empty for identical inputs', () => {
@@ -33,13 +33,5 @@ describe('diffJson', () => {
   it('reports type changes as changed', () => {
     const diffs = diffJson({ v: [1] }, { v: 'one' });
     assert.deepEqual(diffs, [{ path: '$.v', kind: 'changed', a: [1], b: 'one' }]);
-  });
-});
-
-describe('canonicalize', () => {
-  it('produces key-order-independent output', () => {
-    const a = canonicalize({ b: 1, a: { d: 2, c: 3 } });
-    const b = canonicalize({ a: { c: 3, d: 2 }, b: 1 });
-    assert.equal(a, b);
   });
 });

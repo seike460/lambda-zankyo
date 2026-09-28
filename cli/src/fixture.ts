@@ -22,12 +22,9 @@ export function buildFixtureEvent(rec: ZankyoRecord): unknown {
 
 export function fixtureJson(rec: ZankyoRecord): string {
   const event = buildFixtureEvent(rec);
-  // 非 JSON イベントはレコードに生テキストで入っている。
+  // 非 JSON イベントはレコードに文字列（生テキストか base64）で入っている。
   // JSON 再エンコードすると原文と異なるペイロードになるため、そのまま書く。
-  if (rec.eventIsRawText && typeof event === 'string') {
-    return `${event}\n`;
-  }
-  if (rec.eventIsBase64 && typeof event === 'string') {
+  if ((rec.eventIsRawText || rec.eventIsBase64) && typeof event === 'string') {
     return `${event}\n`;
   }
   return `${JSON.stringify(event, null, 2)}\n`;
@@ -47,5 +44,5 @@ export function eventPayload(rec: ZankyoRecord): string | Uint8Array {
   if (rec.eventIsRawText && typeof event === 'string') {
     return event;
   }
-  return JSON.stringify(event ?? {});
+  return JSON.stringify(event);
 }
