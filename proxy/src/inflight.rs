@@ -91,6 +91,22 @@ struct State {
     recorded_order: VecDeque<String>,
 }
 
+impl State {
+    /// 記録権の確保。初回だけ true を返し、上限を超えた分は古い方から捨てる。
+    fn claim(&mut self, request_id: &str) -> bool {
+        if !self.recorded.insert(request_id.to_string()) {
+            return false;
+        }
+        self.recorded_order.push_back(request_id.to_string());
+        while self.recorded_order.len() > RECORDED_CAP {
+            if let Some(old) = self.recorded_order.pop_front() {
+                self.recorded.remove(&old);
+            }
+        }
+        true
+    }
+}
+
 #[derive(Debug, Default)]
 pub struct InFlight {
     state: Mutex<State>,
@@ -126,15 +142,7 @@ impl InFlight {
     pub fn remove_and_claim(&self, request_id: &str) -> (Option<Invocation>, bool) {
         let mut st = self.state.lock().unwrap_or_else(|e| e.into_inner());
         let inv = st.map.remove(request_id);
-        let claimed = st.recorded.insert(request_id.to_string());
-        if claimed {
-            st.recorded_order.push_back(request_id.to_string());
-            while st.recorded_order.len() > RECORDED_CAP {
-                if let Some(old) = st.recorded_order.pop_front() {
-                    st.recorded.remove(&old);
-                }
-            }
-        }
+        let claimed = st.claim(request_id);
         (inv, claimed)
     }
 
@@ -143,18 +151,10 @@ impl InFlight {
     /// map から外れた呼び出しでも有効 — init_error や /error リトライの
     /// 重複防止に使う。
     pub fn claim_record(&self, request_id: &str) -> bool {
-        let mut st = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        if st.recorded.insert(request_id.to_string()) {
-            st.recorded_order.push_back(request_id.to_string());
-            while st.recorded_order.len() > RECORDED_CAP {
-                if let Some(old) = st.recorded_order.pop_front() {
-                    st.recorded.remove(&old);
-                }
-            }
-            true
-        } else {
-            false
-        }
+        self.state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .claim(request_id)
     }
 
     /// drain と記録権の一括確保を 1 回のロックで行う。
@@ -166,18 +166,7 @@ impl InFlight {
         let items: Vec<Invocation> = st.map.drain().map(|(_, v)| v).collect();
         items
             .into_iter()
-            .filter(|inv| {
-                let claimed = st.recorded.insert(inv.request_id.clone());
-                if claimed {
-                    st.recorded_order.push_back(inv.request_id.clone());
-                    while st.recorded_order.len() > RECORDED_CAP {
-                        if let Some(old) = st.recorded_order.pop_front() {
-                            st.recorded.remove(&old);
-                        }
-                    }
-                }
-                claimed
-            })
+            .filter(|inv| st.claim(&inv.request_id))
             .collect()
     }
 
