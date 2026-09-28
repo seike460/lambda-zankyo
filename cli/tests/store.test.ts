@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import { CliError } from '../src/errors.ts';
-import { fetchRecord, listRecordKeys, resolveRecordKey } from '../src/store.ts';
+import { fetchRecord, listRecordKeys, loadRecord, resolveRecordKey } from '../src/store.ts';
 import { fakeS3 } from './helpers.ts';
 
 function obj(key: string, lastModified?: string) {
@@ -151,5 +151,25 @@ describe('fetchRecord', () => {
       console.error = original;
     }
     assert.ok(warnings.some((w) => w.includes('unknown failureType')));
+  });
+});
+
+describe('loadRecord', () => {
+  const page = { Contents: [obj('zankyo/fn/2026/09/22/r1.json')] };
+
+  it('returns the record when its functionName matches the key', async () => {
+    const rec = await loadRecord(fakeS3([page], VALID_RECORD), 'bkt', { requestId: 'r1' });
+    assert.equal(rec.functionName, 'fn');
+  });
+
+  it('rejects with exitCode 4 when the body names a function other than its key', async () => {
+    const forged = JSON.stringify({
+      ...(JSON.parse(VALID_RECORD) as Record<string, unknown>),
+      functionName: 'other-fn',
+    });
+    await assert.rejects(
+      () => loadRecord(fakeS3([page], forged), 'bkt', { requestId: 'r1' }),
+      (e: unknown) => e instanceof CliError && e.exitCode === 4,
+    );
   });
 });

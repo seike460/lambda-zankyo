@@ -193,6 +193,8 @@ s3://{ZANKYO_BUCKET}/zankyo/{function-name}/{yyyy}/{mm}/{dd}/{requestId}.json
 
 - レコードは**利用者自身のアカウントの S3** にのみ保存。外部送信ゼロ。
 - 関数に付与するのは `s3:PutObject` のみ（+KMS 時は Encrypt/GenerateDataKey）。
+- CLI は、キーの関数名と本文の `functionName` が食い違うレコードを
+  replay・diff・redrive に使いません（exit 4）。
 - proxy が listen するのは `127.0.0.1` のみ。
 - 依存は lockfile で固定（`Cargo.lock` / `pnpm-lock.yaml`）。
   CI で `cargo audit` と `pnpm audit` を実行します。

@@ -9,6 +9,7 @@ import {
   isKnownFailureType,
   keyMatchesRequestId,
   parseRecord,
+  parseRecordKey,
   RECORD_PREFIX,
   type ZankyoRecord,
 } from './record.ts';
@@ -178,5 +179,16 @@ export async function loadRecord(
   q: KeyQuery,
 ): Promise<ZankyoRecord> {
   const key = await resolveRecordKey(s3, bucket, q);
-  return fetchRecord(s3, bucket, key);
+  const rec = await fetchRecord(s3, bucket, key);
+  // replay/diff/redrive の invoke 先は本文の functionName で決まる。
+  // キーの関数セグメント（--function の絞り込みもここに効く）と食い違う
+  // レコードは、別の関数への投入に使わせない。
+  if (parseRecordKey(key)?.functionName !== rec.functionName) {
+    throw new CliError(
+      `record at s3://${bucket}/${key} names function ${JSON.stringify(rec.functionName)}, which does not match its key`,
+      4,
+      'the record may have been written by another function; inspect it before replaying',
+    );
+  }
+  return rec;
 }

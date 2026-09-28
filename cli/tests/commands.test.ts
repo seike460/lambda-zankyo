@@ -9,7 +9,15 @@ import { run as runList } from '../src/commands/list.ts';
 import { run as runRedrive } from '../src/commands/redrive.ts';
 import { run as runReplay } from '../src/commands/replay.ts';
 import { CliError } from '../src/errors.ts';
-import { captureStdout, deps, fakeLambda, fakeLambdaSeq, fakeS3, VALID_RECORD } from './helpers.ts';
+import {
+  captureStdout,
+  deps,
+  fakeLambda,
+  fakeLambdaHandler,
+  fakeLambdaSeq,
+  fakeS3,
+  VALID_RECORD,
+} from './helpers.ts';
 
 const KEY = 'zankyo/fn/2026/09/22/r1.json';
 
@@ -123,5 +131,26 @@ describe('zankyo redrive', () => {
       runRedrive(['r1', '--bucket', 'b', '--confirm'], deps(s3(), lambda)),
     );
     assert.equal(code, 1);
+  });
+
+  it('refuses to invoke a function other than the one in the record key', async () => {
+    const forged = JSON.stringify({
+      ...(JSON.parse(VALID_RECORD) as Record<string, unknown>),
+      functionName: 'other-fn',
+    });
+    const invoked: string[] = [];
+    const lambda = fakeLambdaHandler((input) => {
+      invoked.push(input.FunctionName);
+      return { StatusCode: 200 };
+    });
+    await assert.rejects(
+      () =>
+        runRedrive(
+          ['r1', '--bucket', 'b', '--confirm'],
+          deps(fakeS3([{ Contents: [{ Key: KEY }] }], forged), lambda),
+        ),
+      (e: unknown) => e instanceof CliError && e.exitCode === 4,
+    );
+    assert.deepEqual(invoked, []);
   });
 });
