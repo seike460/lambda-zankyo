@@ -165,9 +165,17 @@ describe('Zankyo', () => {
         Variables: Match.objectLike({
           AWS_LAMBDA_EXEC_WRAPPER: '/opt/zankyo-wrapper',
           ZANKYO_BUCKET: Match.anyValue(),
+          ZANKYO_KMS_KEY: Match.absent(),
         }),
       },
       Layers: Match.anyValue(),
+    });
+    t.hasResourceProperties('AWS::S3::Bucket', {
+      BucketEncryption: {
+        ServerSideEncryptionConfiguration: [
+          { ServerSideEncryptionByDefault: { SSEAlgorithm: 'AES256' } },
+        ],
+      },
     });
     t.hasResourceProperties('AWS::IAM::Policy', {
       PolicyDocument: {
@@ -235,9 +243,11 @@ describe('Zankyo', () => {
     });
   });
 
-  it('grants kms encrypt when a key is provided', () => {
+  it('encrypts with the given key and grants only encrypt-side kms actions', () => {
+    let keyArn: unknown;
     const t = synth((stack) => {
       const key = new kms.Key(stack, 'K');
+      keyArn = stack.resolve(key.keyArn);
       const z = new Zankyo(stack, 'Z', {
         kmsKey: key,
         layer: lambda.LayerVersion.fromLayerVersionArn(
@@ -248,15 +258,29 @@ describe('Zankyo', () => {
       });
       z.attachTo(fn(stack, 'Fn'));
     });
+    t.hasResourceProperties('AWS::Lambda::Function', {
+      Environment: { Variables: Match.objectLike({ ZANKYO_KMS_KEY: keyArn }) },
+    });
+    t.hasResourceProperties('AWS::S3::Bucket', {
+      BucketEncryption: {
+        ServerSideEncryptionConfiguration: [
+          { ServerSideEncryptionByDefault: { SSEAlgorithm: 'aws:kms', KMSMasterKeyID: keyArn } },
+        ],
+      },
+    });
     t.hasResourceProperties('AWS::IAM::Policy', {
       PolicyDocument: {
         Statement: Match.arrayWith([
           Match.objectLike({
-            Action: Match.arrayWith(['kms:Encrypt', 'kms:GenerateDataKey']),
+            Action: ['kms:Encrypt', 'kms:GenerateDataKey'],
             Effect: 'Allow',
+            Resource: keyArn,
           }),
         ]),
       },
     });
+    for (const policy of Object.values(t.findResources('AWS::IAM::Policy'))) {
+      assert.doesNotMatch(JSON.stringify(policy), /kms:Decrypt|kms:\*/);
+    }
   });
 });
