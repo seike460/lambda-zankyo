@@ -211,7 +211,7 @@ SPEC.md      # 仕様書（決定事項・スコープ外・Open Questions）
 
 ```bash
 pnpm install            # JS/TS 依存
-pnpm gate               # lint + typecheck + test（全パッケージ）
+pnpm gate               # lint + build + typecheck + test（全パッケージ）
 cargo test --workspace  # Rust ユニットテスト
 cargo fmt --all -- --check && cargo clippy -- -D warnings
 ```

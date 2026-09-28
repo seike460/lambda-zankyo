@@ -6,10 +6,16 @@ SPEC.md「E2E 検証手順」の実施先。
 
 ## deploy
 
+リポジトリルートで実行:
+
 ```bash
 pnpm install
-pnpm --filter zankyo-examples deploy
+pnpm build                            # zankyo-cdk の dist を生成（workspace 依存の解決に必要）
+pnpm --filter zankyo-examples run deploy
 ```
+
+`cdk synth` のみ試す場合も同じ前提です（`pnpm build` 後に
+`pnpm --filter zankyo-examples run synth`）。
 
 ## 検証の流れ
 
