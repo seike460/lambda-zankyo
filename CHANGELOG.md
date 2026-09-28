@@ -28,6 +28,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ログを出していた。debug レベルに下げ、既定では出さない
 - **proxy** — Node.js ランタイムはスタックトレースを `trace` キーで送るため、
   `errorContext.stackTrace` が空だった。`stackTrace` が無いときは `trace` を読む
+- **proxy** — spill の回収が、空になった spill dir を削除していた。同時に走る
+  inflight ステージや spill の書き込みが、まれに ENOENT で失敗していた。
+  dir は削除せずに残す
 
 ### Security
 

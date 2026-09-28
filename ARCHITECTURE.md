@@ -50,7 +50,8 @@ agent は passthrough 判定でも終了せず、`SHUTDOWN` だけを購読し�
 - **エラーは握り潰さない**。失敗は `ZankyoError`/`Option` でモデル化し、
   捨てる経路はすべて文脈付きの warn で残す。
 - **rerun は冪等**。spill は atomic 書き込み → 数・鮮度上限 →
-  起動時・定期回収 → 全件回収で dir 削除、とライフサイクルが閉じる。
+  起動時・定期回収 → 送れたファイルの削除、とライフサイクルが閉じる。
+  spill dir 自体は消さない（同時に走る書き込みが ENOENT で失敗するため）。
 - **型は緩めない**。TS は strict + noUncheckedIndexedAccess、`as`
   キャストなし（AWS 境界は `ports.ts` の構造的ポート）。Rust は
   `#![forbid(unsafe_code)]` + clippy -D warnings。書式は

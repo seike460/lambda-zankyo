@@ -347,9 +347,6 @@ impl Recorder {
         // 再送を試みた後で上限を適用する。先に絞ると、届くはずだった
         // 古いレコードを試行すらせず捨ててしまう。
         spill::enforce_cap(dir, self.cfg.spill_max_files);
-        // 全件回収できたらディレクトリごと消し、rerun 後に残滓を残さない
-        // （非空なら remove_dir は失敗するだけなので無害）。
-        let _ = std::fs::remove_dir(dir);
     }
 
     fn spill(&self, request_id: &str, body: &[u8]) -> bool {

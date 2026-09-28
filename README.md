@@ -245,7 +245,7 @@ cargo fmt --all -- --check && cargo clippy -- -D warnings
 `ZANKYO_*` 環境変数で外から変えられます（一覧は上の表）。拡張は
 データの 1 エントリ追加で済みます: scrub パターン・CLI コマンド・
 SSM キー・build arch。spill は atomic 書き込み・上限・定期回収・
-全件回収時の dir 削除までライフサイクルが閉じており、rerun で
+送れたファイルの削除までライフサイクルが閉じており、rerun で
 残滓が増えません。不変条件の全体は ARCHITECTURE.md を参照してください。
 
 ### 再現性（reproducibility）

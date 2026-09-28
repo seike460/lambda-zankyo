@@ -683,6 +683,70 @@ async fn leftover_inflight_stage_becomes_timeout_record() {
     assert!(!spill_dir.join("zankyo-req-stuck.json").exists());
 }
 
+#[tokio::test]
+async fn failed_put_keeps_spill_until_recovery_resends_it() {
+    // S3 が PutObject を拒否する間は spill が残り、回復後の recover_spills が
+    // 同じキーへ同じレコードを再送して spill を消す（write-ahead の本線）。
+    let (api_addr, _api) = spawn_mock(runtime_api_handler()).await;
+    let s3_up = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let (s3_addr, s3_hits) = spawn_mock({
+        let s3_up = s3_up.clone();
+        move |_m, _p, _h, _b| {
+            if s3_up.load(std::sync::atomic::Ordering::SeqCst) {
+                return ok_empty();
+            }
+            Response::builder()
+                .status(StatusCode::FORBIDDEN)
+                .body(boxed_full(Bytes::from_static(
+                    b"<Error><Code>AccessDenied</Code><Message>Access Denied</Message></Error>",
+                )))
+                .unwrap()
+        }
+    })
+    .await;
+    let (recorder, spill_dir) = recorder_to(&s3_addr);
+    let proxy = spawn_proxy(&api_addr, Arc::new(InFlight::new()), recorder.clone()).await;
+    let spilled = spill_dir.join("zankyo-req-123.json");
+    let record_puts = || {
+        captured(&s3_hits)
+            .into_iter()
+            .filter(|(m, p, _)| m == "PUT" && p.contains("req-123.json"))
+            .collect::<Vec<_>>()
+    };
+
+    call(
+        &proxy,
+        Method::GET,
+        "/2018-06-01/runtime/invocation/next",
+        None,
+    )
+    .await;
+    let (status, _) = call(
+        &proxy,
+        Method::POST,
+        "/2018-06-01/runtime/invocation/req-123/error",
+        Some(json!({"errorType": "E", "errorMessage": "x"})),
+    )
+    .await;
+    // 記録の失敗は関数の応答を止めない
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(record_puts().len(), 1);
+    assert!(spilled.exists(), "rejected PUT must keep the spill");
+    assert!(!spill_dir.join("zankyo-req-123.inflight").exists());
+
+    s3_up.store(true, std::sync::atomic::Ordering::SeqCst);
+    recorder.recover_spills().await;
+
+    let puts = record_puts();
+    assert_eq!(puts.len(), 2);
+    assert_eq!(puts[1].1, puts[0].1, "resend must target the same key");
+    assert_eq!(puts[1].2, puts[0].2, "resend must carry the same record");
+    assert!(!spilled.exists());
+    // 空になった spill dir は消さない。消すと、同時に走るステージや
+    // spill の書き込みが ENOENT で失敗する。
+    assert!(spill_dir.exists());
+}
+
 /// Extensions API モックが受けた (path, 登録名 or 識別子ヘッダ)。
 type ExtHeaders = Arc<Mutex<Vec<(String, Option<String>)>>>;
 
