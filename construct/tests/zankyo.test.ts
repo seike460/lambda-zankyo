@@ -1,19 +1,44 @@
+import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { describe, it } from 'node:test';
 import { App, aws_kms as kms, aws_lambda as lambda, Stack, aws_s3 as s3 } from 'aws-cdk-lib';
 import { Match, Template } from 'aws-cdk-lib/assertions';
 import { Zankyo } from '../src/index.ts';
 
-function fn(stack: Stack, id: string): lambda.Function {
+const PUBLISHED_APPLICATION_ID =
+  'arn:aws:serverlessrepo:ap-northeast-1:446537410535:applications/lambda-zankyo';
+
+/** SAR に公開するアプリの定義。construct の既定の版と Output 名は、これと揃える。 */
+const sarTemplate = readFileSync(new URL('../../sar/template.yaml', import.meta.url), 'utf8');
+
+function fn(
+  stack: Stack,
+  id: string,
+  architecture: lambda.Architecture = lambda.Architecture.X86_64,
+): lambda.Function {
   return new lambda.Function(stack, id, {
     runtime: lambda.Runtime.NODEJS_22_X,
     handler: 'index.handler',
+    architecture,
     code: lambda.Code.fromInline('exports.handler = async () => "ok"'),
   });
 }
 
+/** スタックに 1 つずつある SAR アプリの論理 ID と、関数に付いた Layer を返す。 */
+function sarWiring(t: Template): { appId: string | undefined; layers: unknown } {
+  t.resourceCountIs('AWS::Serverless::Application', 1);
+  t.resourceCountIs('AWS::Lambda::Function', 1);
+  const [appId] = Object.keys(t.findResources('AWS::Serverless::Application'));
+  const [f] = Object.values(t.findResources('AWS::Lambda::Function'));
+  return { appId, layers: f?.Properties?.Layers };
+}
+
+function newStack(): Stack {
+  return new Stack(new App(), 'TestStack');
+}
+
 function synth(setup: (stack: Stack) => void): Template {
-  const app = new App();
-  const stack = new Stack(app, 'TestStack');
+  const stack = newStack();
   setup(stack);
   return Template.fromStack(stack);
 }
@@ -34,6 +59,29 @@ describe('Zankyo', () => {
         Rules: Match.arrayWith([Match.objectLike({ ExpirationInDays: 30 })]),
       },
     });
+  });
+
+  it('deploys the published SAR application at the version in sar/template.yaml', () => {
+    const semanticVersion = /^ {4}SemanticVersion: (\S+)$/m.exec(sarTemplate)?.[1];
+    assert.ok(semanticVersion, 'sar/template.yaml declares SemanticVersion');
+    const t = synth((stack) => {
+      new Zankyo(stack, 'Z').attachTo(fn(stack, 'Fn'));
+    });
+    t.hasResourceProperties('AWS::Serverless::Application', {
+      Location: { ApplicationId: PUBLISHED_APPLICATION_ID, SemanticVersion: semanticVersion },
+    });
+    assert.match(sarTemplate, /^Outputs:\n(?:.*\n)*? {2}LayerVersionArn:$/m);
+    const { appId, layers } = sarWiring(t);
+    assert.deepEqual(layers, [{ 'Fn::GetAtt': [appId, 'Outputs.LayerVersionArn'] }]);
+  });
+
+  it('uses the arm64 SAR output when arm64 is set', () => {
+    const t = synth((stack) => {
+      new Zankyo(stack, 'Z', { arm64: true }).attachTo(fn(stack, 'Fn', lambda.Architecture.ARM_64));
+    });
+    assert.match(sarTemplate, /^Outputs:\n(?:.*\n)*? {2}LayerVersionArnArm64:$/m);
+    const { appId, layers } = sarWiring(t);
+    assert.deepEqual(layers, [{ 'Fn::GetAtt': [appId, 'Outputs.LayerVersionArnArm64'] }]);
   });
 
   it('attachTo wires env, layer and PutObject permission', () => {

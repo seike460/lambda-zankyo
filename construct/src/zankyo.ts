@@ -10,13 +10,12 @@ import {
 import { Construct } from 'constructs';
 
 /**
- * SAR 上のアプリケーション ID。
- * SAR の applicationId は公開時に確定する ARN のため、初回 publish までは
- * `layer` props でのセルフホストを推奨する（SPEC: GitHub Releases zip 同梱）。
- * props.sarApplicationId で任意の公開済み ARN を指すこともできる。
+ * SAR で公開している lambda-zankyo のアプリケーション ID。
+ * 公開アプリなので、ap-northeast-1 以外のリージョンのスタックからもデプロイできる。
+ * props.sarApplicationId で、自分で公開した別のアプリを指すこともできる。
  */
 export const ZANKYO_APPLICATION_ID =
-  'arn:aws:serverlessrepo:us-east-1:000000000000:applications/lambda-zankyo';
+  'arn:aws:serverlessrepo:ap-northeast-1:446537410535:applications/lambda-zankyo';
 
 /** SAR アプリが出力する LayerVersion ARN の Output 名（sar/template.yaml と契約）。 */
 const SAR_LAYER_OUTPUT = 'LayerVersionArn';
@@ -50,7 +49,7 @@ export interface ZankyoProps {
   readonly semanticVersion?: string;
   /**
    * セルフホストする LayerVersion。指定時は SAR アプリをデプロイせず
-   * この Layer をそのまま使う（SAR 審査中・独自ビルド向け）。
+   * この Layer をそのまま使う（独自ビルドや、SAR を使えない環境向け）。
    */
   readonly layer?: lambda.ILayerVersion;
   /**

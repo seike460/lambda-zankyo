@@ -56,6 +56,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   以前は dist が無いまま、または古いまま公開されうる手順だった
 - **cli / construct** — package.json に repository・homepage・bugs・
   keywords・author を追加した。npm のページから GitHub へたどれる
+- **construct** — 既定の SAR アプリケーション ID が、プレースホルダ
+  （us-east-1 / アカウント 000000000000）のままだった。`layer` を渡さない構成は、
+  存在しないアプリを参照してデプロイに失敗していた。公開中の
+  `arn:aws:serverlessrepo:ap-northeast-1:446537410535:applications/lambda-zankyo`
+  に直した。公開アプリなので、ほかのリージョンのスタックからもデプロイできる
 
 ### Security
 

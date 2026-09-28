@@ -57,7 +57,10 @@ agent は `SHUTDOWN` だけを購読して待機します。登録前や `SHUTDO
 ### 1. Layer の導入
 
 - **SAR（推奨）**: Serverless Application Repository から `lambda-zankyo`
-  を 1 クリック導入（`sar/template.yaml` 参照）。
+  を 1 クリック導入（`sar/template.yaml` 参照）。アプリケーション ID は
+  `arn:aws:serverlessrepo:ap-northeast-1:446537410535:applications/lambda-zankyo`
+  です。公開アプリなので、ap-northeast-1 以外のリージョンにもデプロイできます
+  （[AWS ドキュメント](https://docs.aws.amazon.com/serverlessrepo/latest/devguide/serverlessrepo-publishing-applications.html)）。
 - **セルフホスト**: `node scripts/build-layer.mts` で両 arch の zip を作り、
   通常の Lambda Layer として発行します（GitHub Releases にも zip を添付）。
 
