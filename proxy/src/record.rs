@@ -72,12 +72,13 @@ pub struct FailureRecord {
     #[serde(rename = "errorContext")]
     pub error_context: ErrorContext,
     /// イベントが非 JSON ボディの生テキストで保存されている場合 true。
-    /// CLI は replay/redrive 時に JSON 再エンコードせず原文を送る。
+    /// CLI の fixture は原文のまま書き出す。replay/diff/redrive は
+    /// Invoke API が JSON しか受け付けないため、invoke せず exit 4 で止める。
     #[serde(rename = "eventIsRawText", skip_serializing_if = "is_false")]
     pub event_is_raw_text: bool,
     /// イベントが UTF-8 でないバイナリの場合 true。
-    /// `event` は base64 文字列として保持され、CLI は replay 時に
-    /// デコードして元のバイト列を再送する。
+    /// `event` は base64 文字列として保持され、CLI の fixture はその文字列を
+    /// そのまま書き出す。replay/diff/redrive は生テキストと同じく exit 4 で止める。
     #[serde(rename = "eventIsBase64", skip_serializing_if = "is_false")]
     pub event_is_base64: bool,
     #[serde(rename = "scrubReport")]
