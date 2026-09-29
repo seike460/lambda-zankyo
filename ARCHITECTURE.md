@@ -90,7 +90,7 @@ Runtime API への接続不能の継続（`ZANKYO_EXT_MAX_POLL_FAILURES` 回）�
 | `PART_ORPHAN_GRACE` | 60 秒 | `spill.rs` | 書きかけの `.part` を、クラッシュ後の残りとみなして消すまでの猶予 |
 | `RECORDED_CAP` | 4096 件 | `inflight.rs` | 記録済みの requestId（二重記録の防止用）を覚えておく件数の上限 |
 
-設定を読んでも使わない場合が 1 つある。記録しない状態の agent は、設定が壊れている
+設定で指定しても効かない場合が 1 つある。記録しない状態の agent は、設定が壊れている
 場合に備えて、Extensions API の 4 つの設定を読まず、既定値（`config.rs` の定数）を使う
 （上の「全体像」）。
 
