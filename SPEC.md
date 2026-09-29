@@ -152,7 +152,7 @@ new Zankyo(this, 'Zankyo', { bucket?, kmsKey?, scrubFields? })
 1. `examples/` のデモ関数（`zankyo demo deploy` 相当の CDK app）をデプロイ。
 2. 失敗するイベント・timeout するイベントを直接 invoke（RequestResponse）で発火。
 3. `s3 ls zankyo/...` にレコードがあり、`event`/`errorContext`/`scrubReport` が揃っていること。PII フィールドがマスクされていること。
-4. `zankyo fixture --last` で `sam local invoke -e` が通り、同じエラーが再現すること。
+4. `zankyo fixture --last --function <失敗する関数>` で `sam local invoke -e` が通り、同じエラーが再現すること（`--last` は全関数で最新のレコードを選ぶため、`--function` を付けないと timeout レコードを拾いうる）。
 5. 関数を修正して新バージョンを発行 → `zankyo diff <id> --alias old --alias new` で差異が出ること。
-6. `zankyo redrive <id>` で修復後の本番関数が成功応答を返すこと。
+6. `zankyo redrive <id> --confirm` で修復後の本番関数が成功応答を返すこと（`--confirm` を付けないと dry-run で、関数を呼ばない）。
 7. timeout ケースで SHUTDOWN フラッシュによるレコードが残ること（取りこぼしがあれば頻度を計測・文書化）。
