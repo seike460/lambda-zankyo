@@ -35,6 +35,11 @@ proxy が即削除する（残存＝未完の証跡）。
 agent は passthrough 判定でも終了せず、`SHUTDOWN` だけを購読して
 待機する。登録前や `SHUTDOWN` 前に extension が終了すると、
 終了コードに関係なく platform が Init を失敗させるため。
+同じ理由で、register と `/event/next` の一時的な失敗は再試行し、
+`SHUTDOWN` まで終了しない。終了するのは、登録の 4xx 拒否・500
+（公式リファレンスが「回復不能。速やかに終了」と定める）・
+Runtime API への接続不能の継続（`ZANKYO_EXT_MAX_POLL_FAILURES` 回）の
+ときだけで、終了コードは 1 にする。
 
 ## 品質・保守性の不変条件
 

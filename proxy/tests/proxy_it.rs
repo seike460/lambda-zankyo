@@ -1157,6 +1157,243 @@ async fn passthrough_agent_stays_registered_until_shutdown() {
     }
 }
 
+/// Extensions API モックが返す失敗の応答（ステータスとボディ）。
+type Fault = (StatusCode, &'static str);
+
+/// 失敗を差し込まない。
+const NO_FAULTS: &[Fault] = &[];
+/// 一時的な登録失敗（Lambda が文書化していない 5xx）。
+const REGISTER_UNAVAILABLE: &[Fault] = &[
+    (StatusCode::SERVICE_UNAVAILABLE, ""),
+    (StatusCode::BAD_GATEWAY, ""),
+];
+/// 登録の拒否。同じ要求を送り直しても通らない。
+const REGISTER_FORBIDDEN: &[Fault] = &[(
+    StatusCode::FORBIDDEN,
+    r#"{"errorType":"Extension.InvalidExtensionState"}"#,
+)];
+/// 再試行で通りうる event/next の失敗。公式 RIE（rapid）の実装では、前の
+/// ロングポーリングの接続が切れた extension は、次のイベントが配られるまで 403 で断られる。
+const POLL_GLITCHES: &[Fault] = &[
+    (
+        StatusCode::FORBIDDEN,
+        r#"{"errorType":"Extension.InvalidExtensionState"}"#,
+    ),
+    (StatusCode::BAD_GATEWAY, ""),
+    (StatusCode::OK, "not json"),
+];
+/// AWS が「回復不能。速やかに終了すべき」と定める 500。
+const POLL_CONTAINER_ERROR: &[Fault] = &[(
+    StatusCode::INTERNAL_SERVER_ERROR,
+    r#"{"errorType":"Extension.InternalServerError"}"#,
+)];
+
+/// 失敗を差し込める Extensions API モックと、その受信回数。
+struct FaultyExtApi {
+    addr: String,
+    registers: Arc<std::sync::atomic::AtomicUsize>,
+    polls: Arc<std::sync::atomic::AtomicUsize>,
+    /// 立てると、以降の `/event/next` に SHUTDOWN を返す。
+    release: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl FaultyExtApi {
+    fn registers(&self) -> usize {
+        self.registers.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    fn polls(&self) -> usize {
+        self.polls.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    fn release(&self) {
+        self.release
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+/// `/register` は最初の `register_faults.len()` 回をその応答で断り、以降は
+/// 識別子 `ext-test` を払い出す。`/event/next` は SHUTDOWN の解放
+/// （`release`）まで `next_faults` を順に繰り返し返す。`next_faults` が
+/// 空なら最初から SHUTDOWN を返す。
+async fn spawn_faulty_extensions_api(
+    register_faults: &'static [Fault],
+    next_faults: &'static [Fault],
+) -> FaultyExtApi {
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    let registers = Arc::new(AtomicUsize::new(0));
+    let polls = Arc::new(AtomicUsize::new(0));
+    let release = Arc::new(AtomicBool::new(next_faults.is_empty()));
+    let (addr, _hits) = spawn_mock({
+        let (registers, polls, release) = (registers.clone(), polls.clone(), release.clone());
+        move |_m, path, _h, _b| {
+            let reply = |(status, body): Fault| {
+                Response::builder()
+                    .status(status)
+                    .body(boxed_full(Bytes::from_static(body.as_bytes())))
+                    .unwrap()
+            };
+            if path == "/2020-01-01/extension/register" {
+                let n = registers.fetch_add(1, Ordering::SeqCst);
+                if let Some(fault) = register_faults.get(n) {
+                    return reply(*fault);
+                }
+                return Response::builder()
+                    .status(StatusCode::OK)
+                    .header("lambda-extension-identifier", "ext-test")
+                    .body(boxed_full(Bytes::new()))
+                    .unwrap();
+            }
+            if path == "/2020-01-01/extension/event/next" {
+                let n = polls.fetch_add(1, Ordering::SeqCst);
+                if !release.load(Ordering::SeqCst) {
+                    return reply(next_faults[n % next_faults.len()]);
+                }
+                return ok_body(json!({
+                    "eventType": "SHUTDOWN",
+                    "shutdownReason": "timeout",
+                    "deadlineMs": OffsetDateTime::now_utc().unix_timestamp() * 1000 + 60_000
+                }));
+            }
+            reply((StatusCode::NOT_FOUND, ""))
+        }
+    })
+    .await;
+    FaultyExtApi {
+        addr,
+        registers,
+        polls,
+        release,
+    }
+}
+
+/// 記録しない（passthrough の）agent の env。ノブは既定値が使われる。
+fn passthrough_agent_env(api: &FaultyExtApi) -> HashMap<String, String> {
+    HashMap::from([
+        ("ZANKYO_DISABLED".to_string(), "1".to_string()),
+        ("AWS_LAMBDA_RUNTIME_API".to_string(), api.addr.clone()),
+    ])
+}
+
+#[tokio::test]
+async fn agents_retry_register_until_accepted() {
+    // 一時的な登録失敗で終了すると、Lambda は Extension.Crash として Init を
+    // 失敗させる。登録の上限時間内で再試行して SHUTDOWN まで進むこと
+    let api = spawn_faulty_extensions_api(REGISTER_UNAVAILABLE, NO_FAULTS).await;
+    let (s3_addr, _s3) = spawn_mock(|_m, _p, _h, _b| ok_empty()).await;
+    let (recorder, _spill) = recorder_with_env(&s3_addr, &[("ZANKYO_EXT_RETRY_MS", "1")]);
+    let done = tokio::time::timeout(
+        Duration::from_secs(5),
+        zankyo::extension::run_agent(new_client(), api.addr.clone(), recorder),
+    )
+    .await
+    .expect("recording agent must register and reach SHUTDOWN");
+    assert!(done, "recording agent");
+    assert_eq!(api.registers(), REGISTER_UNAVAILABLE.len() + 1);
+
+    // 記録しない agent も同じ（既定の再試行間隔 500ms で 2 回待つ）
+    let api = spawn_faulty_extensions_api(REGISTER_UNAVAILABLE, NO_FAULTS).await;
+    let code = tokio::time::timeout(
+        Duration::from_secs(5),
+        zankyo::orchestrate::run_agent_with_env(&passthrough_agent_env(&api)),
+    )
+    .await
+    .expect("passthrough agent must register and reach SHUTDOWN");
+    assert_eq!(code, 0, "passthrough agent");
+    assert_eq!(api.registers(), REGISTER_UNAVAILABLE.len() + 1);
+}
+
+#[tokio::test]
+async fn agents_keep_polling_through_failures_until_shutdown() {
+    // event/next の失敗が続いても SHUTDOWN の前には終了しない。応答が返る失敗は
+    // 接続できない回数の上限（ここでは 2）に数えない。上限を大きく超えて
+    // 失敗させても、記録する agent が待ち続けること
+    let api = spawn_faulty_extensions_api(NO_FAULTS, POLL_GLITCHES).await;
+    let (s3_addr, s3_hits) = spawn_mock(|_m, _p, _h, _b| ok_empty()).await;
+    let (recorder, _spill) = recorder_with_env(
+        &s3_addr,
+        &[
+            ("ZANKYO_EXT_RETRY_MS", "1"),
+            ("ZANKYO_EXT_MAX_POLL_FAILURES", "2"),
+        ],
+    );
+    recorder.stage_inflight(&Invocation {
+        request_id: "req-glitch".to_string(),
+        event: json!({"input": 1}),
+        encoding: EventEncoding::Json,
+        invoked_at: OffsetDateTime::now_utc(),
+    });
+    let agent = tokio::spawn(zankyo::extension::run_agent(
+        new_client(),
+        api.addr.clone(),
+        recorder,
+    ));
+    assert!(wait_for(5_000, || api.polls() >= 3 * POLL_GLITCHES.len()).await);
+    assert!(
+        !agent.is_finished(),
+        "recording agent exited before SHUTDOWN"
+    );
+    api.release();
+    let done = tokio::time::timeout(Duration::from_secs(5), agent)
+        .await
+        .expect("recording agent must return after SHUTDOWN")
+        .unwrap();
+    assert!(done, "recording agent");
+    assert!(wait_for(2_000, || !captured(&s3_hits).is_empty()).await);
+    let (_, path, _) = captured(&s3_hits).remove(0);
+    assert!(path.contains("req-glitch.json"));
+
+    // 記録しない agent も同じ（既定の再試行間隔 500ms）
+    let api = spawn_faulty_extensions_api(NO_FAULTS, POLL_GLITCHES).await;
+    let env = passthrough_agent_env(&api);
+    let agent = tokio::spawn(async move { zankyo::orchestrate::run_agent_with_env(&env).await });
+    assert!(wait_for(5_000, || api.polls() >= POLL_GLITCHES.len()).await);
+    assert!(
+        !agent.is_finished(),
+        "passthrough agent exited before SHUTDOWN"
+    );
+    api.release();
+    let code = tokio::time::timeout(Duration::from_secs(5), agent)
+        .await
+        .expect("passthrough agent must return after SHUTDOWN")
+        .unwrap();
+    assert_eq!(code, 0, "passthrough agent");
+}
+
+#[tokio::test]
+async fn agents_exit_promptly_when_lambda_rejects_them() {
+    // 登録の拒否（4xx）は送り直しても通らない。event/next の 500 は、AWS が
+    // 「回復不能。速やかに終了すべき」と定める。どちらも再試行せずに抜け、
+    // agent のプロセスは 1 で終わる（正常終了の 0 と区別する）
+    for (case, register_faults, next_faults, registers, polls) in [
+        ("register rejected", REGISTER_FORBIDDEN, NO_FAULTS, 1, 0),
+        ("container error", NO_FAULTS, POLL_CONTAINER_ERROR, 1, 1),
+    ] {
+        // 記録する agent は既定の再試行間隔（500ms）。再試行すれば 5 秒を超える
+        let api = spawn_faulty_extensions_api(register_faults, next_faults).await;
+        let (s3_addr, _s3) = spawn_mock(|_m, _p, _h, _b| ok_empty()).await;
+        let (recorder, _spill) = recorder_to(&s3_addr);
+        let done = tokio::time::timeout(
+            Duration::from_secs(5),
+            zankyo::extension::run_agent(new_client(), api.addr.clone(), recorder),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("{case}: recording agent must exit promptly"));
+        assert!(!done, "{case}");
+        assert_eq!((api.registers(), api.polls()), (registers, polls), "{case}");
+
+        let api = spawn_faulty_extensions_api(register_faults, next_faults).await;
+        let code = tokio::time::timeout(
+            Duration::from_secs(5),
+            zankyo::orchestrate::run_agent_with_env(&passthrough_agent_env(&api)),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("{case}: passthrough agent must exit promptly"));
+        assert_eq!(code, 1, "{case}");
+        assert_eq!((api.registers(), api.polls()), (registers, polls), "{case}");
+    }
+}
+
 #[tokio::test]
 async fn oversized_body_is_rejected_without_forwarding() {
     let (api_addr, api_hits) = spawn_mock(|_m, _p, _h, _b| ok_empty()).await;

@@ -38,6 +38,8 @@ const EXTERNAL_EXT_PATH: &str = "/opt/extensions/zankyo";
 /// passthrough でもすぐには終了しない: SHUTDOWN 前に extension が
 /// 終わると、終了コードに関係なく platform は Init を失敗させる。
 /// 記録しない場合も登録して SHUTDOWN まで待つ（fail-open）。
+/// SHUTDOWN の前に戻るのは、登録を拒否されたときと、Extensions API が
+/// 回復不能になったときだけ。その場合は 1 を返し、正常終了と区別する。
 pub async fn run_agent() -> u8 {
     let env_map: HashMap<String, String> = std::env::vars().collect();
     run_agent_with_env(&env_map).await
@@ -46,7 +48,7 @@ pub async fn run_agent() -> u8 {
 /// `run_agent` の本体。env を引数で受け、起動判定からの配線を
 /// プロセスの環境変数に触れずに検証できるようにする。
 pub async fn run_agent_with_env(env_map: &HashMap<String, String>) -> u8 {
-    match setup::resolve_plan(env_map).await {
+    let completed = match setup::resolve_plan(env_map).await {
         StartupPlan::Record(plan) => {
             let RecordPlan {
                 cfg,
@@ -54,15 +56,21 @@ pub async fn run_agent_with_env(env_map: &HashMap<String, String>) -> u8 {
                 upstream,
             } = *plan;
             let recorder = Arc::new(setup::build_recorder(&shared, cfg, env_map));
-            extension::run_agent(new_client(), upstream, recorder).await;
+            extension::run_agent(new_client(), upstream, recorder).await
         }
-        StartupPlan::Passthrough => {
-            if let Some(upstream) = env_map.get("AWS_LAMBDA_RUNTIME_API") {
-                extension::run_passthrough_agent(new_client(), upstream.clone()).await;
+        StartupPlan::Passthrough => match env_map.get("AWS_LAMBDA_RUNTIME_API") {
+            Some(upstream) => {
+                extension::run_passthrough_agent(new_client(), upstream.clone()).await
             }
-        }
+            // main.rs はこの変数があるときだけ agent を起動する。無ければ待つ相手もいない
+            None => true,
+        },
+    };
+    if completed {
+        0
+    } else {
+        1
     }
-    0
 }
 
 /// 実行本体。子プロセスの終了コードをそのまま返す。
@@ -247,7 +255,8 @@ async fn start_extension(
     inflight: Arc<InFlight>,
     recorder: Arc<Recorder>,
 ) -> bool {
-    match extension::register(&client, &upstream, register_timeout).await {
+    let retry = std::time::Duration::from_millis(recorder.config().ext_retry_ms);
+    match extension::register(&client, &upstream, register_timeout, retry).await {
         Ok(ext_id) => {
             info!("registered as internal extension");
             extension::run_event_loop(client, upstream, ext_id, inflight, recorder).await
@@ -261,8 +270,9 @@ async fn start_extension(
 
 /// 子の終了コードをそのまま返す。SHUTDOWN フラッシュ後に extension 側が
 /// 先に終わる場合は正常終了（0）として抜ける。ただし extension が
-/// SHUTDOWN 以外の理由（ポーリング断等）で終わった場合は、子プロセスの
-/// 完了を待ち続ける — ここで抜けると関数実行中に子を殺してしまう。
+/// SHUTDOWN 以外の理由（登録の拒否・Extensions API の回復不能なエラー等）で
+/// 終わった場合は、子プロセスの完了を待ち続ける — ここで抜けると
+/// 関数実行中に子を殺してしまう。
 /// `shutdown` が None（プロセス内に extension が無い）なら子だけを待つ。
 /// 戻り値の Some(handle) は「子が先に終わり extension が生存中」の場合で、
 /// 呼び出し側が SHUTDOWN 到着を短く待つ判断に使う。

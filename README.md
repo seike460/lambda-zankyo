@@ -61,6 +61,17 @@ agent は `SHUTDOWN` だけを購読して待機します。登録前や `SHUTDO
 終了した extension は、終了コードに関係なく Lambda が Init 失敗として
 扱うためです。
 
+同じ理由で、agent は Extensions API の一時的な失敗では終了しません。
+登録は `ZANKYO_REGISTER_TIMEOUT_MS` の時間内で再試行します。
+`/event/next` は、`SHUTDOWN` を受けるまで `ZANKYO_EXT_RETRY_MS` の間隔で再試行します。
+記録しない状態では、設定が壊れている場合に備えて、これらの既定値を使います。
+`SHUTDOWN` の前に終了するのは、次の 3 つの場合だけです。このときの終了コードは 1 です。
+
+- 登録が 4xx で拒否された
+- Lambda が 500 を返した（AWS はこれを回復不能とし、速やかな終了を求めています。
+  [Extensions API リファレンス](https://docs.aws.amazon.com/lambda/latest/dg/runtimes-extensions-api.html)）
+- Runtime API に接続できない状態が `ZANKYO_EXT_MAX_POLL_FAILURES` 回続いた
+
 ## 使い方
 
 ### 1. Layer の導入
@@ -152,9 +163,9 @@ CDK construct はこの権限を付けないので、別に付与してくださ
 | `ZANKYO_SPILL_MAX_AGE_SECS` | `604800` | spill ファイルの有効期間。超過分は再送せず破棄 |
 | `ZANKYO_MAX_BODY_KB` | `8192` | Runtime API が受け付けるボディ上限（KiB） |
 | `ZANKYO_EXT_BODY_KB` | `1024` | Extensions API イベントボディ上限（KiB） |
-| `ZANKYO_REGISTER_TIMEOUT_MS` | `10000` | extension 登録の上限時間 |
-| `ZANKYO_EXT_RETRY_MS` | `500` | event/next ポーリング失敗時の再試行間隔 |
-| `ZANKYO_EXT_MAX_POLL_FAILURES` | `120` | ポーリング連続失敗の上限（超過でループを抜ける） |
+| `ZANKYO_REGISTER_TIMEOUT_MS` | `10000` | extension 登録の上限時間（一時的な失敗の再試行を含む） |
+| `ZANKYO_EXT_RETRY_MS` | `500` | Extensions API（登録・event/next）が失敗したときの再試行間隔 |
+| `ZANKYO_EXT_MAX_POLL_FAILURES` | `120` | Runtime API に接続できない状態が続いたときの再試行回数の上限（超過で agent が終了する）。応答が返る失敗は数えない |
 | `ZANKYO_SSM_TIMEOUT_MS` | `2000` | SSM get_parameter の上限時間。Lambda の Init 上限（10 秒）に含まれる |
 | `ZANKYO_FORWARD_TIMEOUT_MS` | `60000` | `/next` 以外の上流転送の上限時間 |
 | `ZANKYO_DISABLED` | `false` | 緊急停止スイッチ（passthrough） |

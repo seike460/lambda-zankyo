@@ -4,6 +4,17 @@
 //! `/event/next` をポーリングする。
 //! SHUTDOWN を受けたら、reason を問わず in-flight 呼び出しを timeout レコードとして
 //! フラッシュする。
+//!
+//! SHUTDOWN の前に終了した extension は、終了コードを問わず Extension.Crash
+//! になる（Init 中なら Init の失敗。
+//! <https://docs.aws.amazon.com/lambda/latest/dg/lambda-runtime-environment.html>）。
+//! そのため一時的な失敗は再試行し、終了するのは回復できない場合だけにする。
+//! register と event/next の 500 は、公式の API リファレンスが「Container error.
+//! Non-recoverable state. Extension should exit promptly.」と定める
+//! （<https://docs.aws.amazon.com/lambda/latest/dg/runtimes-extensions-api.html>）。
+//! 終了の前に `/extension/init/error`・`/extension/exit/error` は送らない。
+//! どちらも登録で得る識別子が要り、終了する場面（登録の拒否・500・接続不能）では
+//! API が使えないため。
 
 use crate::config::{
     Config, DEFAULT_EXT_BODY_KB, DEFAULT_EXT_MAX_POLL_FAILURES, DEFAULT_EXT_RETRY_MS,
@@ -13,7 +24,7 @@ use crate::error::{Result, ZankyoError};
 use crate::inflight::InFlight;
 use crate::proxy::{boxed_full, HttpClient};
 use crate::store::Recorder;
-use http::{Method, Request};
+use http::{Method, Request, StatusCode};
 use http_body_util::BodyExt;
 use serde::Deserialize;
 use std::sync::Arc;
@@ -21,6 +32,51 @@ use std::time::Duration;
 use tracing::{info, warn};
 
 const EXT_BASE: &str = "/2020-01-01/extension";
+
+/// Extensions API 呼び出しの失敗。再試行するかどうかを種類で決める。
+#[derive(Debug)]
+enum ApiError {
+    /// 接続できなかった。続くなら Runtime API そのものが無い。
+    Unreachable(String),
+    /// Lambda がエラーのステータスを返した。
+    Status(StatusCode, String),
+    /// 途中での切断・ボディの破損・不正な JSON など。再試行で通りうる。
+    Other(String),
+}
+
+impl ApiError {
+    fn from_client(e: hyper_util::client::legacy::Error) -> Self {
+        if e.is_connect() {
+            Self::Unreachable(e.to_string())
+        } else {
+            Self::Other(e.to_string())
+        }
+    }
+
+    /// AWS が「回復不能。速やかに終了すべき」と定める 500 か。
+    fn is_container_error(&self) -> bool {
+        matches!(self, Self::Status(s, _) if *s == StatusCode::INTERNAL_SERVER_ERROR)
+    }
+}
+
+impl std::fmt::Display for ApiError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Unreachable(e) => write!(f, "unreachable: {e}"),
+            Self::Status(status, body) => write!(f, "status {status} body {body}"),
+            Self::Other(e) => f.write_str(e),
+        }
+    }
+}
+
+/// エラー応答のボディを診断用に読む（platform の拒否理由が分かる）。
+async fn error_body(body: hyper::body::Incoming) -> String {
+    http_body_util::Limited::new(body, 4096)
+        .collect()
+        .await
+        .map(|c| String::from_utf8_lossy(&c.to_bytes()).into_owned())
+        .unwrap_or_default()
+}
 
 #[derive(Debug, Deserialize)]
 pub struct ExtensionEvent {
@@ -36,32 +92,78 @@ pub struct ExtensionEvent {
 
 /// `/extension/register`。成功すると extension identifier が返る。
 /// 登録に失敗しても proxy 機能は残るので、呼び出し側は warn のみで続行する。
-/// `timeout` は実行環境の初期化を遅らせないための上限。
+/// `timeout` は再試行を含めた登録全体の上限で、実行環境の初期化を遅らせないためのもの。
+/// 一時的な失敗は `retry_delay` の間隔で再試行する（`register_events`）。
 pub async fn register(
     client: &HttpClient,
     upstream_api: &str,
     timeout: Duration,
+    retry_delay: Duration,
 ) -> Result<String> {
-    register_events(client, upstream_api, timeout, &["INVOKE", "SHUTDOWN"]).await
+    register_events(
+        client,
+        upstream_api,
+        timeout,
+        retry_delay,
+        &["INVOKE", "SHUTDOWN"],
+    )
+    .await
 }
 
+/// 登録を `timeout` の範囲で再試行する。Init は 10 秒が上限なので、
+/// 一時的な失敗（接続断・想定外のステータス）で諦めると、Lambda は Init を
+/// 失敗させる。4xx（登録の拒否）と 500（回復不能）は、同じ要求を送り直しても
+/// 通らないので、すぐに諦める。1 回の要求の上限は残り時間とする —
+/// 応答の無いまま打ち切った要求を送り直すと、二重登録で拒否されうるため。
+/// 時刻の足し算はしない（巨大な設定値で Instant があふれて panic しないように）。
 async fn register_events(
     client: &HttpClient,
     upstream_api: &str,
     timeout: Duration,
+    retry_delay: Duration,
     events: &[&str],
 ) -> Result<String> {
-    let body = serde_json::to_vec(&serde_json::json!({ "events": events }))?;
+    let started = tokio::time::Instant::now();
+    let mut attempts: u32 = 0;
+    loop {
+        attempts += 1;
+        let remaining = timeout.saturating_sub(started.elapsed());
+        let err = match register_once(client, upstream_api, remaining, events).await {
+            Ok(id) => return Ok(id),
+            Err(e) => e,
+        };
+        let rejected = matches!(&err, ApiError::Status(s, _) if s.is_client_error())
+            || err.is_container_error();
+        if rejected || timeout.saturating_sub(started.elapsed()) <= retry_delay {
+            return Err(ZankyoError::Upstream(format!(
+                "extension register failed after {attempts} attempt(s): {err}"
+            )));
+        }
+        warn!(error = %err, attempts, "extension register failed; retrying");
+        tokio::time::sleep(retry_delay).await;
+    }
+}
+
+/// `/extension/register` を 1 回送る。
+async fn register_once(
+    client: &HttpClient,
+    upstream_api: &str,
+    timeout: Duration,
+    events: &[&str],
+) -> std::result::Result<String, ApiError> {
+    let body = serde_json::to_vec(&serde_json::json!({ "events": events }))
+        .map_err(|e| ApiError::Other(e.to_string()))?;
     let req = Request::builder()
         .method(Method::POST)
         .uri(format!("http://{upstream_api}{EXT_BASE}/register"))
         .header("Lambda-Extension-Name", "zankyo")
         .header("content-type", "application/json")
-        .body(boxed_full(body))?;
+        .body(boxed_full(body))
+        .map_err(|e| ApiError::Other(e.to_string()))?;
     let resp = tokio::time::timeout(timeout, client.request(req))
         .await
-        .map_err(|_| ZankyoError::Upstream("extension register timed out".into()))?
-        .map_err(|e| ZankyoError::Upstream(e.to_string()))?;
+        .map_err(|_| ApiError::Other("extension register timed out".into()))?
+        .map_err(ApiError::from_client)?;
     let (parts, body) = resp.into_parts();
     if let Some(id) = parts
         .headers
@@ -70,47 +172,40 @@ async fn register_events(
     {
         return Ok(id.to_string());
     }
-    // 失敗時はステータスとボディを残す（platform の拒否理由が分かる）。
-    let body = http_body_util::Limited::new(body, 4096)
-        .collect()
-        .await
-        .map(|c| String::from_utf8_lossy(&c.to_bytes()).into_owned())
-        .unwrap_or_default();
-    Err(ZankyoError::Upstream(format!(
-        "extension register: status {} body {}",
-        parts.status, body
-    )))
+    Err(ApiError::Status(parts.status, error_body(body).await))
 }
 
 /// `/event/next` はイベント到着までブロックするロングポーリング。
-/// タイムアウトを付けない（イベントなし＝正常な待機）。
+/// タイムアウトを付けない（イベントなし＝正常な待機。AWS も付けないよう求めている）。
 /// ボディは異常なサイズを読まないよう `body_limit` バイトで切る。
-pub async fn next_event(
+async fn next_event(
     client: &HttpClient,
     upstream_api: &str,
     ext_id: &str,
     body_limit: usize,
-) -> Result<ExtensionEvent> {
+) -> std::result::Result<ExtensionEvent, ApiError> {
     let req = Request::builder()
         .method(Method::GET)
         .uri(format!("http://{upstream_api}{EXT_BASE}/event/next"))
         .header("Lambda-Extension-Identifier", ext_id)
-        .body(boxed_full(bytes::Bytes::new()))?;
-    let resp = client
-        .request(req)
-        .await
-        .map_err(|e| ZankyoError::Upstream(e.to_string()))?;
-    let body = http_body_util::Limited::new(resp.into_body(), body_limit)
+        .body(boxed_full(bytes::Bytes::new()))
+        .map_err(|e| ApiError::Other(e.to_string()))?;
+    let resp = client.request(req).await.map_err(ApiError::from_client)?;
+    let (parts, body) = resp.into_parts();
+    if !parts.status.is_success() {
+        return Err(ApiError::Status(parts.status, error_body(body).await));
+    }
+    let body = http_body_util::Limited::new(body, body_limit)
         .collect()
         .await
-        .map_err(|e| ZankyoError::Upstream(format!("event body read failed: {e}")))?
+        .map_err(|e| ApiError::Other(format!("event body read failed: {e}")))?
         .to_bytes();
-    Ok(serde_json::from_slice(&body)?)
+    serde_json::from_slice(&body).map_err(|e| ApiError::Other(format!("invalid event: {e}")))
 }
 
 /// INVOKE/SHUTDOWN を受け取り続けるループ。
 /// SHUTDOWN を受けたら in-flight 呼び出しをフラッシュして `true` で戻る。
-/// ポーリング断が続いて諦めた場合は `false`（timeout 捕捉だけを失う
+/// Extensions API が回復不能になって諦めた場合は `false`（timeout 捕捉だけを失う
 /// 縮退運転であり、関数本体の継続には影響しない）。
 /// INVOKE の requestId 相関は proxy 側の観測で完結するため、ここでは
 /// SHUTDOWN 検知のみを担う。
@@ -182,6 +277,7 @@ pub async fn run_agent(client: HttpClient, upstream_api: String, recorder: Arc<R
         &client,
         &upstream_api,
         Duration::from_millis(cfg.register_timeout_ms),
+        limits.retry_delay,
     )
     .await
     {
@@ -224,6 +320,7 @@ pub async fn run_passthrough_agent(client: HttpClient, upstream_api: String) -> 
         &client,
         &upstream_api,
         Duration::from_millis(DEFAULT_REGISTER_TIMEOUT_MS),
+        limits.retry_delay,
         &["SHUTDOWN"],
     )
     .await
@@ -240,10 +337,12 @@ pub async fn run_passthrough_agent(client: HttpClient, upstream_api: String) -> 
         .is_some()
 }
 
-/// `/event/next` ポーリングのノブ。
+/// register と `/event/next` ポーリングのノブ。
 struct PollLimits {
     body_limit: usize,
+    /// 失敗から次の試行までの間隔。
     retry_delay: Duration,
+    /// Runtime API に接続できない状態が何回続いたら諦めるか。
     max_failures: u32,
 }
 
@@ -258,10 +357,16 @@ impl PollLimits {
 }
 
 /// SHUTDOWN が届くまで `/event/next` をポーリングする。INVOKE は読み捨てる。
-/// ネットワーク断・ボディ破損などの失敗は短い待機を挟んで再試行する —
-/// ポーリングを諦めると timeout 捕捉を失うため。ただし連続失敗が上限に
-/// 達したら Extensions API の障害とみなして None を返す（無限リトライで
-/// zombie 化しない）。
+/// SHUTDOWN の前に抜けると Extension.Crash になるため、失敗しても
+/// `retry_delay` の間隔で再試行を続ける。諦めるのは次の 2 つだけ（None を返す）。
+/// - Lambda が 500 を返した。AWS はこれを回復不能とし、速やかな終了を求めている。
+/// - Runtime API に接続できない状態が `max_failures` 回続いた。SHUTDOWN を
+///   送る相手がもう無い（無限リトライで zombie 化しない）。
+///
+/// 403 などは再試行する。公式 RIE（rapid）の実装では、前の `/event/next` の
+/// 接続が切れた extension は待機中のままで、次のイベントを配るまで
+/// `/event/next` を 403 で断られる。
+/// 警告は連続失敗の 1・2・4・8… 回目だけに出し、ログを溢れさせない。
 async fn wait_for_shutdown(
     client: &HttpClient,
     upstream_api: &str,
@@ -269,20 +374,37 @@ async fn wait_for_shutdown(
     limits: &PollLimits,
 ) -> Option<ExtensionEvent> {
     let mut failures: u32 = 0;
+    let mut unreachable: u32 = 0;
     loop {
-        match next_event(client, upstream_api, ext_id, limits.body_limit).await {
+        let err = match next_event(client, upstream_api, ext_id, limits.body_limit).await {
             Ok(ev) if ev.event_type == "SHUTDOWN" => return Some(ev),
-            Ok(_) => failures = 0,
-            Err(e) => {
-                failures += 1;
-                if failures >= limits.max_failures {
-                    warn!(failures, "extension event poll keeps failing; giving up");
-                    return None;
-                }
-                warn!(error = %e, failures, "extension event poll failed; retrying");
-                tokio::time::sleep(limits.retry_delay).await;
+            Ok(_) => {
+                failures = 0;
+                unreachable = 0;
+                continue;
             }
+            Err(e) => e,
+        };
+        if err.is_container_error() {
+            warn!(error = %err, "extensions API reported a non-recoverable error; exiting");
+            return None;
         }
+        failures = failures.saturating_add(1);
+        unreachable = match err {
+            ApiError::Unreachable(_) => unreachable + 1,
+            _ => 0,
+        };
+        if unreachable >= limits.max_failures {
+            warn!(
+                failures = unreachable,
+                "extensions API is unreachable; giving up"
+            );
+            return None;
+        }
+        if failures.is_power_of_two() {
+            warn!(error = %err, failures, "extension event poll failed; retrying");
+        }
+        tokio::time::sleep(limits.retry_delay).await;
     }
 }
 
@@ -351,5 +473,28 @@ mod tests {
         assert_eq!(ev.event_type, "SHUTDOWN");
         assert_eq!(ev.shutdown_reason.as_deref(), Some("timeout"));
         assert_eq!(ev.deadline_ms, Some(1));
+    }
+
+    #[tokio::test]
+    async fn poll_gives_up_when_runtime_api_is_gone() {
+        // 閉じたポートには接続できない。Runtime API が無いとみなし、
+        // 上限の回数だけ試して諦める（接続できない相手を待ち続けない）
+        let addr = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .to_string();
+        let limits = PollLimits {
+            body_limit: 1024,
+            retry_delay: Duration::from_millis(1),
+            max_failures: 3,
+        };
+        let polled = tokio::time::timeout(
+            Duration::from_secs(5),
+            wait_for_shutdown(&crate::proxy::new_client(), &addr, "ext-id", &limits),
+        )
+        .await
+        .expect("must give up once the runtime API is unreachable");
+        assert!(polled.is_none());
     }
 }

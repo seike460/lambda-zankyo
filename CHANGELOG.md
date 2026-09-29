@@ -24,6 +24,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   source map は tarball に含まれない `src/` を指していた
 - **sar** — SAR の `SourceCodeUrl` を、リポジトリのルートから、その版のタグ
   （`/tree/v<版>`）に変えた。SAR の各版から、対応するソースをたどれる
+- **proxy** — `ZANKYO_EXT_MAX_POLL_FAILURES` は、Runtime API に接続できない状態が
+  続いた回数だけを数える。応答が返る失敗（500 を除く）は数えず、`SHUTDOWN` まで
+  再試行する。`ZANKYO_EXT_RETRY_MS` は、登録を再試行する間隔にも使う
 - **layer** — `scripts/build-layer.mts` の `BUILDER` は、`cross build` と
   `cargo build` だけを受け付ける。`cargo zigbuild` などは、zig が持つ musl libc と
   CRT をリンクしうる。その場合、Layer のライセンス表示と中身が食い違う
@@ -34,6 +37,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   external extension が register せずに終了していた。Lambda はこれを
   Extension.Crash とみなし、関数の Init を失敗させうる。`SHUTDOWN` だけを
   購読して待機するようにした
+- **proxy** — external extension（agent）が、Extensions API の一時的な失敗で
+  `SHUTDOWN` の前に終了していた。登録は 1 回の失敗で、`/event/next` は連続失敗が
+  `ZANKYO_EXT_MAX_POLL_FAILURES` に達すると、終了コード 0 で終わっていた。
+  Lambda はこれを Extension.Crash とみなし、Init の失敗や実行環境の再起動につながる。
+  登録は `ZANKYO_REGISTER_TIMEOUT_MS` の時間内で再試行し、`/event/next` は
+  `SHUTDOWN` まで再試行を続ける。終了するのは、登録の 4xx 拒否・Lambda の 500
+  （AWS が回復不能と定める）・Runtime API への接続不能の継続のときだけで、
+  終了コードは 1 にした
 - **proxy** — 空文字の `ZANKYO_SSM_PARAM` を未設定として扱う。以前は init の
   たびに空の名前で SSM を呼び、起動を遅らせていた
 - **proxy** — external extension 構成で、呼び出し中にランタイムがクラッシュすると、

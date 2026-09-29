@@ -23,12 +23,14 @@ pub const DEFAULT_MAX_BODY_KB: usize = 8192;
 /// Extensions API のイベントボディ上限（KiB）。通知はメタデータだけ
 /// なので 1MiB で十分。
 pub const DEFAULT_EXT_BODY_KB: usize = 1024;
-/// extension 登録の上限時間（ms）。
+/// extension 登録の上限時間（ms）。一時的な失敗の再試行もこの時間内に収める。
 pub const DEFAULT_REGISTER_TIMEOUT_MS: u64 = 10_000;
-/// event/next ポーリング失敗時の再試行間隔（ms）。
+/// Extensions API（register・event/next）が失敗したときの再試行間隔（ms）。
 pub const DEFAULT_EXT_RETRY_MS: u64 = 500;
-/// ポーリング連続失敗の上限。既定では 500ms × 120 ≒ 60 秒失敗が
-/// 続いたら Extensions API の障害とみなしてループを抜ける。
+/// Extensions API に接続できない状態が続いたときの再試行回数の上限。
+/// 既定では 500ms × 120 ≒ 60 秒接続できなければ、Runtime API が無くなった
+/// とみなしてループを抜ける。応答が返る失敗（500 以外）はこの回数に数えず、
+/// SHUTDOWN まで再試行を続ける。
 pub const DEFAULT_EXT_MAX_POLL_FAILURES: u32 = 120;
 /// SSM get_parameter の上限時間（ms）。取得は子の起動と extension 登録の
 /// 前に待つため、Lambda の Init 上限（10 秒）を使い切らない短めの既定にする。
@@ -82,11 +84,12 @@ pub struct Config {
     pub max_body_kb: usize,
     /// Extensions API イベントボディの上限（KiB）。
     pub ext_body_kb: usize,
-    /// extension 登録リクエストの上限時間（ms）。
+    /// extension 登録の上限時間（ms）。再試行を含む。
     pub register_timeout_ms: u64,
-    /// event/next ポーリング失敗時の再試行間隔（ms）。
+    /// Extensions API（register・event/next）が失敗したときの再試行間隔（ms）。
     pub ext_retry_ms: u64,
-    /// ポーリング連続失敗の上限。超えると extension ループを抜ける。
+    /// Extensions API に接続できない状態が続いたときの再試行回数の上限。
+    /// 超えると extension ループを抜ける。
     pub ext_max_poll_failures: u32,
     /// SSM get_parameter の上限時間（ms）。
     pub ssm_timeout_ms: u64,
