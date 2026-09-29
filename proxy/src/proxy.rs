@@ -1,9 +1,10 @@
 //! Runtime API プロキシ。
 //!
 //! 子プロセス（実ランタイム）から見ると zankyo が Runtime API 本体に
-//! 見える。`/next`・`/response`・`/error`・`/init/error` だけを解釈し、
-//! それ以外のパスは一切触らず中継する（成功呼び出しの観測コストを
-//! ゼロに近づけるため、ボディを読むのは失敗判定が必要な経路だけ）。
+//! 見える。ボディを読んで解釈するのは `/next`・`/response`・`/error`・
+//! `/init/error` だけで、それ以外のパスは一切触らず中継する。
+//! `/next` のイベントは timeout 捕捉のため `/tmp` にステージし、完了時に消す。
+//! 成功呼び出しでは spill も S3 への PUT もしない。
 //! 各ルートの処理は `handlers.rs`、上流転送は `upstream.rs`。
 
 use crate::store::Recorder;

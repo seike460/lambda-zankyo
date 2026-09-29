@@ -104,7 +104,7 @@ agent は passthrough 判定でも終了せず、`SHUTDOWN` だけを購読し�
 3. 失敗時: イベントを scrub → レコード JSON を生成 → /tmp へ先書き
    （write-ahead spill）→ bounded な S3 PutObject を **応答転送の前に**
    完了させる。呼び出し終了で環境が freeze されると非同期 PUT は
-   進まないため、失敗経路だけこの順序を取る（成功経路はコスト 0）。
+   進まないため、失敗経路だけこの順序を取る（成功経路は spill も PUT もしない）。
    PUT が間に合わなければ spill が残り、定期回収・次回 init が拾う。
 4. SHUTDOWN（reason: timeout/failure/spindown）: external extension の
    agent が残った `.inflight` ステージを読み、「応答が返らなかった

@@ -2,7 +2,8 @@
 //! 単一バイナリが proxy と external extension を兼務するため、
 //! `/register` で INVOKE/SHUTDOWN（記録しない場合は SHUTDOWN だけ）を購読し、
 //! `/event/next` をポーリングする。
-//! SHUTDOWN（reason=timeout）を受けたら in-flight 呼び出しをフラッシュする。
+//! SHUTDOWN を受けたら、reason を問わず in-flight 呼び出しを timeout レコードとして
+//! フラッシュする。
 
 use crate::config::{
     Config, DEFAULT_EXT_BODY_KB, DEFAULT_EXT_MAX_POLL_FAILURES, DEFAULT_EXT_RETRY_MS,

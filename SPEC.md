@@ -35,10 +35,10 @@ Lambda Service ──Runtime API──▶ zankyo proxy (Rust, Layer) ──▶ �
 
 - Layer 内の単一バイナリが **Runtime API proxy と external extension を兼務**する。
   - proxy: `AWS_LAMBDA_RUNTIME_API` を localhost の自分に向け、`/next`・`/response`・`/error`・`/init/error` を中継。
-  - extension: `/extension/register` して `/event/next` をポーリングし、INVOKE/SHUTDOWN（reason=timeout/spindown）を受信。
-- **成功呼び出しは素通り**（観測しない＝常時コスト・レイテンシ最小）。
-- 失敗の定義: `/error` 呼出・`/init/error`・`/response` 内の errorType 含有・SHUTDOWN reason=timeout。
-- timeout 捕捉: in-flight イベントをメモリに保持 → SHUTDOWN 受信時に S3 へベストエフォートフラッシュ（shutdown ウィンドウ内に PutObject が完了しない場合は取りこぼす旨を README に明記）。
+  - extension: `/extension/register` して `/event/next` をポーリングし、INVOKE/SHUTDOWN（reason=timeout/failure/spindown）を受信。
+- **成功呼び出しは記録しない**（S3 PUT・spill なし）。`/next` のイベントは timeout 捕捉のため `/tmp` に一時ステージし、完了時に削除する。
+- 失敗の定義: `/error` 呼出・`/init/error`・`/response` 内の errorType 含有・SHUTDOWN の時点で応答を返していない呼び出し（reason を問わず failureType=timeout。reason は errorContext.errorType に写す）。
+- timeout 捕捉: proxy が in-flight イベントを `/tmp` の `.inflight` にステージ → SHUTDOWN を受けた extension がそれを読み、S3 へベストエフォートフラッシュ（shutdown ウィンドウ内に PutObject が完了しない場合は取りこぼす旨を README に明記）。
 - 対象ランタイム: `AWS_LAMBDA_EXEC_WRAPPER` を尊重する全 managed runtime（nodejs/python/java/dotnet/ruby）。`provided.*` は bootstrap が exec wrapper を尊重する場合のみ。
 
 ## データ仕様
