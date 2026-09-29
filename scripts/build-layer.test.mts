@@ -27,26 +27,41 @@ const constant = (name: string) => {
   return value;
 };
 const RUST_VERSION = constant('RUST_VERSION');
+const LIBRARY_NOTICE = fileURLToPath(
+  new URL(`./licenses/rust-${RUST_VERSION}/COPYRIGHT-library.html`, import.meta.url),
+);
 
 const work = mkdtempSync(join(tmpdir(), 'build-layer-test-'));
 after(() => rmSync(work, { recursive: true, force: true }));
 
 interface Toolchain {
   release?: string;
+  /// sysroot の share/doc/rust/COPYRIGHT-library.html。null なら置かない
+  libraryNotice?: string | null;
 }
 
 /// 偽の rustc・cargo・cross を PATH に置いて build-layer.mts を実行する。
 function run(env: Record<string, string>, toolchain: Toolchain = {}) {
   const dir = mkdtempSync(join(work, 'run-'));
   const bin = join(dir, 'bin');
+  const sysroot = join(dir, 'sysroot');
   const started = join(dir, 'started');
   const out = join(dir, 'out');
   mkdirSync(bin);
+  mkdirSync(join(sysroot, 'share/doc/rust'), { recursive: true });
+  const notice = toolchain.libraryNotice;
+  if (notice !== null) {
+    writeFileSync(
+      join(sysroot, 'share/doc/rust/COPYRIGHT-library.html'),
+      notice ?? readFileSync(LIBRARY_NOTICE),
+    );
+  }
   const release = toolchain.release ?? RUST_VERSION;
   const tools: Record<string, string> = {
     rustc: [
       'case "$1" in',
       `  --version) echo 'rustc ${release} (fake)' ;;`,
+      `  --print) echo '${sysroot}' ;;`,
       '  *) exit 2 ;;',
       'esac',
     ].join('\n'),
@@ -104,6 +119,21 @@ describe('build-layer.mts', () => {
         new RegExp(`rustc 0\\.0\\.0 \\(fake\\) .*is not Rust ${RUST_VERSION}`),
       );
       assert.equal(r.started, '');
+    }
+  });
+
+  it('stops when COPYRIGHT-library.html differs from the one shipped with rustc', () => {
+    for (const libraryNotice of ['<html>another release</html>', null]) {
+      const r = run({ SKIP_BUILD: '1' }, { libraryNotice });
+      assert.equal(r.status, 1);
+      assert.match(
+        r.stderr,
+        new RegExp(
+          `scripts/licenses/rust-${RUST_VERSION}/COPYRIGHT-library\\.html is not the same`,
+        ),
+      );
+      assert.equal(r.started, '');
+      assert.equal(r.outDirCreated, false);
     }
   });
 });

@@ -88,7 +88,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   した crate（tokio・hyper・aws-lc-rs・ring など）のライセンスと著作権表示も
   入っていなかった。`THIRD_PARTY_LICENSES` は、crate のほかに、musl ターゲットで
   静的リンクされる Rust 標準ライブラリ・musl libc・LLVM の libunwind と
-  crtbegin/crtend の表示も含む
+  crtbegin/crtend の表示も含む。Rust 標準ライブラリのファイルごとの表示は、
+  Rust に同梱の `COPYRIGHT-library.html` を、同じディレクトリにそのまま置く
 - **cli / construct** — pack と publish の前（`prepack`）に build を実行する。
   以前は dist が無いまま、または古いまま公開されうる手順だった
 - **cli / construct** — package.json に repository・homepage・bugs・

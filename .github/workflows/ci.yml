@@ -135,6 +135,7 @@ jobs:
       # エントリの並びと mode（実行ファイルは 755、ライセンス表示は 644）と CRC を確かめる。
       # THIRD_PARTY_LICENSES は、crate でない静的リンクの部品（Rust 標準ライブラリ・musl libc・
       # LLVM の libunwind と crtbegin/crtend）の表示も、scripts/licenses/ の原文のまま含むこと。
+      # COPYRIGHT-library.html（Rust 標準ライブラリのファイルごとの表示）は、原文と同じバイト列であること。
       # bin/zankyo は arch どおりの ELF で、動的リンカ（PT_INTERP）を要求しない静的リンクであること
       - name: check the layer zips
         run: |
@@ -144,7 +145,8 @@ jobs:
             '-rwxr-xr-x extensions/zankyo' \
             '-rwxr-xr-x zankyo-wrapper' \
             '-rw-r--r-- share/licenses/zankyo/LICENSE' \
-            '-rw-r--r-- share/licenses/zankyo/THIRD_PARTY_LICENSES')
+            '-rw-r--r-- share/licenses/zankyo/THIRD_PARTY_LICENSES' \
+            '-rw-r--r-- share/licenses/zankyo/COPYRIGHT-library.html')
           notices=(
             scripts/licenses/rust-*/COPYRIGHT
             scripts/licenses/rust-*/LICENSE-APACHE
@@ -170,6 +172,8 @@ jobs:
                 process.exit(1);
               }
             ' "$RUNNER_TEMP/layer-$arch/share/licenses/zankyo/THIRD_PARTY_LICENSES" "${notices[@]}"
+            cmp scripts/licenses/rust-*/COPYRIGHT-library.html \
+              "$RUNNER_TEMP/layer-$arch/share/licenses/zankyo/COPYRIGHT-library.html"
             bin=$RUNNER_TEMP/layer-$arch/bin/zankyo
             if ! readelf -h "$bin" | grep -q "Machine: .*$machine\$"; then
               echo "$z: bin/zankyo is not $machine" >&2

@@ -24,7 +24,7 @@ Resources:
   # ContentUri は scripts/build-layer.mts が書き出す zip。sam package で S3 に上げ、
   # 書き出したテンプレートを sam publish する（手順は RELEASING.md）。
   # Layer zip の中身は bin/zankyo・extensions/zankyo・zankyo-wrapper（exec wrapper 入口）と、
-  # share/licenses/zankyo/ のライセンス表示（LICENSE・THIRD_PARTY_LICENSES）。
+  # share/licenses/zankyo/ のライセンス表示（LICENSE・THIRD_PARTY_LICENSES・COPYRIGHT-library.html）。
   ZankyoLayerX86:
     Type: AWS::Serverless::LayerVersion
     Properties:

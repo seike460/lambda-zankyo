@@ -13,6 +13,7 @@ import { execFileSync, spawnSync } from 'node:child_process';
 import {
   chmodSync,
   cpSync,
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readdirSync,
@@ -37,7 +38,11 @@ const TARGETS: Record<string, string> = {
 const EXECUTABLES = ['bin/zankyo', 'extensions/zankyo', 'zankyo-wrapper'];
 // /opt 直下の LICENSE は他の Layer と同名になりうるため、ディレクトリを分ける。
 const NOTICE_DIR = 'share/licenses/zankyo';
-const NOTICES = [`${NOTICE_DIR}/LICENSE`, `${NOTICE_DIR}/THIRD_PARTY_LICENSES`];
+const NOTICES = [
+  `${NOTICE_DIR}/LICENSE`,
+  `${NOTICE_DIR}/THIRD_PARTY_LICENSES`,
+  `${NOTICE_DIR}/COPYRIGHT-library.html`,
+];
 /// zip のエントリ。zip には引数の順で入る。
 const ENTRIES = [...EXECUTABLES, ...NOTICES];
 
@@ -93,6 +98,14 @@ const llvm = (path: string): Notice => ({
   path: `llvm-${LLVM_VERSION}/${path}`,
   source: `https://github.com/rust-lang/llvm-project/blob/${LLVM_COMMIT}/${path}`,
 });
+/// Rust 標準ライブラリの著作権表示。library/ のファイルごとの表示と、依存する crate の
+/// ライセンスを載せる。Rust の COPYRIGHT が案内するファイルで、Rust のリリースごとに作られ、
+/// rustc コンポーネントの share/doc/rust/ に入る。HTML なので THIRD_PARTY_LICENSES には
+/// 混ぜず、隣にそのまま置く。
+const RUST_LIBRARY_NOTICE: Notice = {
+  path: `rust-${RUST_VERSION}/COPYRIGHT-library.html`,
+  source: `https://static.rust-lang.org/dist/rustc-${RUST_VERSION}-x86_64-unknown-linux-gnu.tar.xz (rustc/share/doc/rust/COPYRIGHT-library.html)`,
+};
 const TOOLCHAIN_NOTICES: { component: string; license: string; notices: Notice[] }[] = [
   {
     component: `Rust standard library ${RUST_VERSION}`,
@@ -210,8 +223,10 @@ function thirdPartyLicenses(target: string): string {
     'Rust ships for the musl targets.',
     'This file reproduces the license and notice files of each of them.',
     'A text shared by several of them appears once, under all of their names.',
-    'Per-file notices of the Rust standard library are in COPYRIGHT-library.html,',
-    'which ships in share/doc/rust/ of the Rust toolchain.',
+    'The copyright notices of the Rust standard library, for its in-tree files and its',
+    'out-of-tree dependencies, are in COPYRIGHT-library.html next to this file.',
+    'It is an unchanged copy of the file in',
+    `${RUST_LIBRARY_NOTICE.source}.`,
     '',
     'Rust crates:',
     ...crates.map((c) => `  ${c.name} ${c.version} (${c.license ?? c.license_file})`),
@@ -259,6 +274,19 @@ if (rustc.split(' ')[1] !== RUST_VERSION) {
   );
   process.exit(1);
 }
+// COPYRIGHT-library.html の写しが、この rustc に同梱されたものと同じことを確かめる。
+const libraryNotice = readFileSync(join(ROOT, 'scripts/licenses', RUST_LIBRARY_NOTICE.path));
+const sysroot = execFileSync('rustc', ['--print', 'sysroot'], { cwd: ROOT, encoding: 'utf8' });
+const shippedLibraryNotice = join(sysroot.trim(), 'share/doc/rust/COPYRIGHT-library.html');
+if (
+  !existsSync(shippedLibraryNotice) ||
+  !readFileSync(shippedLibraryNotice).equals(libraryNotice)
+) {
+  console.error(
+    `scripts/licenses/${RUST_LIBRARY_NOTICE.path} is not the same as ${shippedLibraryNotice}`,
+  );
+  process.exit(1);
+}
 const outDirEnv = process.env.OUT_DIR ?? 'dist/layer';
 const outDir = isAbsolute(outDirEnv) ? outDirEnv : resolve(ROOT, outDirEnv);
 mkdirSync(outDir, { recursive: true });
@@ -293,6 +321,7 @@ for (const arch of arches) {
     cpSync(join(ROOT, 'proxy/layer/extensions/zankyo'), join(stage, 'extensions/zankyo'));
     cpSync(join(ROOT, 'LICENSE'), join(stage, NOTICE_DIR, 'LICENSE'));
     writeFileSync(join(stage, NOTICE_DIR, 'THIRD_PARTY_LICENSES'), thirdParty);
+    writeFileSync(join(stage, NOTICE_DIR, 'COPYRIGHT-library.html'), libraryNotice);
     for (const f of EXECUTABLES) {
       chmodSync(join(stage, f), 0o755);
     }

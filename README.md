@@ -330,17 +330,23 @@ SSM キー・build arch。spill は atomic 書き込み・上限・定期回収�
 MIT
 
 Layer の zip は `share/licenses/zankyo/`（Lambda 上では `/opt/share/licenses/zankyo/`）に、
-この LICENSE と `THIRD_PARTY_LICENSES` を含みます。`THIRD_PARTY_LICENSES` は、
-バイナリに静的リンクされるもののライセンスと著作権表示の原文です。
+この LICENSE と `THIRD_PARTY_LICENSES`・`COPYRIGHT-library.html` を含みます。
+`THIRD_PARTY_LICENSES` は、バイナリに静的リンクされるもののライセンスと著作権表示の原文です。
 対象は、Rust の crate と、Rust の musl ターゲットがリンクするツールチェーンの部品です。
 部品は、Rust 標準ライブラリ（compiler_builtins を含む）・musl libc・
 LLVM の libunwind と crtbegin/crtend です。
+`COPYRIGHT-library.html` は、Rust 標準ライブラリのファイルごとの著作権表示と、
+標準ライブラリが依存する crate のライセンスです。Rust 1.98.1 の rustc に同梱される
+ファイルを、そのまま写しています。
 
 部品の原文は `scripts/licenses/` にあります。写した元の URL と版は、
-`scripts/build-layer.mts` の `TOOLCHAIN_NOTICES` にあります。
+`scripts/build-layer.mts` の `TOOLCHAIN_NOTICES` と `RUST_LIBRARY_NOTICE` にあります。
 版は、`rust-toolchain.toml` の Rust 1.98.1 と、その Rust が musl ターゲットに同梱する
 musl 1.2.5・LLVM 22.1.8 です。Rust を上げるときは、部品の原文も更新します。
-rustc の版が違うと、`scripts/build-layer.mts` は梱包を止めます。
+次の場合、`scripts/build-layer.mts` は梱包を止めます。
+
+- rustc の版が違う
+- `COPYRIGHT-library.html` の写しが、rustc に同梱されたものと違う
 
 これらの表示は、`cross build` か `cargo build` でビルドしたバイナリに合わせています。
 この 2 つでは、rustc が自分の musl libc と LLVM の部品をリンクします。
