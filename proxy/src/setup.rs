@@ -70,6 +70,8 @@ pub async fn apply_ssm_overlay(shared: &aws_config::SdkConfig, cfg: &mut Config)
     let Some(param) = cfg.ssm_param.clone() else {
         return;
     };
+    // 取得先と上限時間は取得の前に決まるので、env の値だけを使う
+    // （SSM の JSON は、この 2 つを上書きしない。`ssm_overlay.rs` の `ENV_ONLY_KEYS`）。
     let timeout = std::time::Duration::from_millis(cfg.ssm_timeout_ms);
     match crate::ssm::load_config_json(shared, &param, timeout).await {
         Ok(json) => {

@@ -45,6 +45,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `SHUTDOWN` まで再試行を続ける。終了するのは、登録の 4xx 拒否・Lambda の 500
   （AWS が回復不能と定める）・Runtime API への接続不能の継続のときだけで、
   終了コードは 1 にした
+- **proxy** — SSM の JSON に書いた `ZANKYO_SSM_TIMEOUT_MS` を、警告なしに
+  受け付けていたが、効いていなかった。SSM の取得の上限時間は、取得の前に
+  環境変数の値で決まるため。このキーは `ZANKYO_SSM_PARAM` と同じく、環境変数で
+  だけ指定できるものとした。SSM の JSON に書かれていたら、warn を出して無視する
 - **proxy** — 空文字の `ZANKYO_SSM_PARAM` を未設定として扱う。以前は init の
   たびに空の名前で SSM を呼び、起動を遅らせていた
 - **proxy** — external extension 構成で、呼び出し中にランタイムがクラッシュすると、

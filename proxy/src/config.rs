@@ -34,6 +34,7 @@ pub const DEFAULT_EXT_RETRY_MS: u64 = 500;
 pub const DEFAULT_EXT_MAX_POLL_FAILURES: u32 = 120;
 /// SSM get_parameter の上限時間（ms）。取得は子の起動と extension 登録の
 /// 前に待つため、Lambda の Init 上限（10 秒）を使い切らない短めの既定にする。
+/// 取得の前に使う値なので、env でだけ指定できる（SSM の JSON では変えられない）。
 pub const DEFAULT_SSM_TIMEOUT_MS: u64 = 2_000;
 /// 上流転送の上限時間（ms）。localhost 上の Runtime API が
 /// 60 秒応えない状況は実行環境の異常とみなす。`/next` はロングポーリングなので
@@ -92,7 +93,7 @@ pub struct Config {
     /// Extensions API に接続できない状態が続いたときの再試行回数の上限。
     /// 超えると extension ループを抜ける。
     pub ext_max_poll_failures: u32,
-    /// SSM get_parameter の上限時間（ms）。
+    /// SSM get_parameter の上限時間（ms）。env でだけ指定できる。
     pub ssm_timeout_ms: u64,
     /// 上流転送の上限時間（ms）。`/next` では応答ボディの読み取りにだけ使う。
     pub forward_timeout_ms: u64,

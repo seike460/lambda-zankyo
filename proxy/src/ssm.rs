@@ -7,7 +7,7 @@ use std::time::Duration;
 
 /// SecureString 想定で復号付き取得。値が空のパラメータはエラーにする
 /// （設定ミスの黙殺を防ぐ）。`timeout` は init 経路を遅らせないための
-/// 取得上限（`ZANKYO_SSM_TIMEOUT_MS` 由来）。
+/// 取得上限（env の `ZANKYO_SSM_TIMEOUT_MS` 由来。SSM の値では変えられない）。
 pub async fn load_config_json(
     shared: &aws_config::SdkConfig,
     name: &str,

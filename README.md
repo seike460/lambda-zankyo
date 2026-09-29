@@ -151,7 +151,7 @@ CDK construct はこの権限を付けないので、別に付与してくださ
 |---|---|---|
 | `ZANKYO_BUCKET` | （必須※） | 失敗レコードの保存先。未設定なら記録せず passthrough |
 | `ZANKYO_KMS_KEY` | SSE-S3 | SSE-KMS のキー ARN |
-| `ZANKYO_SSM_PARAM` | なし | 設定 JSON を保持する SSM Parameter 名 |
+| `ZANKYO_SSM_PARAM` | なし | 設定 JSON を保持する SSM Parameter 名。環境変数でだけ指定できる |
 | `ZANKYO_SCRUB_FIELDS` | 既定 denylist | 追加フィールド名（カンマ区切り） |
 | `ZANKYO_SCRUB_MODE` | `mask` | `mask` / `hash`（HMAC 擬似名化）/ `off` |
 | `ZANKYO_MAX_EVENT_KB` | `256` | イベント保存の上限（超過は先頭のみ + `truncated`） |
@@ -166,7 +166,7 @@ CDK construct はこの権限を付けないので、別に付与してくださ
 | `ZANKYO_REGISTER_TIMEOUT_MS` | `10000` | extension 登録の上限時間（一時的な失敗の再試行を含む） |
 | `ZANKYO_EXT_RETRY_MS` | `500` | Extensions API（登録・event/next）が失敗したときの再試行間隔 |
 | `ZANKYO_EXT_MAX_POLL_FAILURES` | `120` | Runtime API に接続できない状態が続いたときの再試行回数の上限（超過で agent が終了する）。応答が返る失敗は数えない |
-| `ZANKYO_SSM_TIMEOUT_MS` | `2000` | SSM get_parameter の上限時間。Lambda の Init 上限（10 秒）に含まれる |
+| `ZANKYO_SSM_TIMEOUT_MS` | `2000` | SSM get_parameter の上限時間。Lambda の Init 上限（10 秒）に含まれる。SSM を読む前に使うので、環境変数でだけ指定できる（SSM の JSON に書いても無視する） |
 | `ZANKYO_FORWARD_TIMEOUT_MS` | `60000` | 上流転送の上限時間。`/next` は応答ヘッダーまで無制限に待ち（ロングポーリング）、応答ボディの読み取りにだけ使う |
 | `ZANKYO_DISABLED` | `false` | 緊急停止スイッチ（passthrough） |
 
