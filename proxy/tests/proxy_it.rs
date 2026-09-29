@@ -1394,6 +1394,154 @@ async fn agents_exit_promptly_when_lambda_rejects_them() {
     }
 }
 
+/// 応答ヘッダーだけを送り、ボディを閉じないまま止まる応答ボディ。
+struct StalledBody;
+
+impl hyper::body::Body for StalledBody {
+    type Data = Bytes;
+    type Error = hyper::Error;
+
+    fn poll_frame(
+        self: std::pin::Pin<&mut Self>,
+        _cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Result<hyper::body::Frame<Bytes>, hyper::Error>>> {
+        std::task::Poll::Pending
+    }
+}
+
+/// `status` と応答ヘッダーだけを返し、ボディで止まる応答。`/next` の
+/// 応答にも使えるよう、Runtime API の requestId ヘッダーを付ける。
+fn stalled(status: StatusCode) -> Response<BoxedBody> {
+    Response::builder()
+        .status(status)
+        .header("lambda-runtime-aws-request-id", "req-stalled")
+        .body(StalledBody.boxed())
+        .unwrap()
+}
+
+#[tokio::test]
+async fn register_returns_within_its_deadline_when_error_body_stalls() {
+    // エラー応答のボディが閉じなくても、登録は上限時間の内側で諦める
+    let (api_addr, _api) =
+        spawn_mock(|_m, _p, _h, _b| stalled(StatusCode::SERVICE_UNAVAILABLE)).await;
+    let started = Instant::now();
+    let registered = tokio::time::timeout(
+        Duration::from_secs(5),
+        zankyo::extension::register(
+            &new_client(),
+            &api_addr,
+            Duration::from_millis(300),
+            Duration::from_millis(10),
+        ),
+    )
+    .await
+    .expect("register must return within its deadline");
+    assert!(registered.is_err());
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "{:?}",
+        started.elapsed()
+    );
+
+    // 上限時間に余裕があれば、ボディを待ち切らずに再試行して登録できる
+    let attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let (api_addr, _api) = spawn_mock({
+        let attempts = attempts.clone();
+        move |_m, _p, _h, _b| {
+            if attempts.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+                return stalled(StatusCode::SERVICE_UNAVAILABLE);
+            }
+            Response::builder()
+                .status(StatusCode::OK)
+                .header("lambda-extension-identifier", "ext-test")
+                .body(boxed_full(Bytes::new()))
+                .unwrap()
+        }
+    })
+    .await;
+    let registered = tokio::time::timeout(
+        Duration::from_secs(5),
+        zankyo::extension::register(
+            &new_client(),
+            &api_addr,
+            Duration::from_secs(4),
+            Duration::from_millis(10),
+        ),
+    )
+    .await
+    .expect("register must retry after a stalled error body");
+    assert_eq!(registered.unwrap(), "ext-test");
+    assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn agents_keep_polling_when_event_body_stalls() {
+    // /event/next の応答ボディが閉じなくても、読み取りを打ち切って再試行し、
+    // SHUTDOWN を受け取る。エラー応答と成功応答の両方で確かめる
+    let spawn_api = || async {
+        let polls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let (addr, _hits) = spawn_mock({
+            let polls = polls.clone();
+            move |_m, path, _h, _b| {
+                if path == "/2020-01-01/extension/register" {
+                    return Response::builder()
+                        .status(StatusCode::OK)
+                        .header("lambda-extension-identifier", "ext-test")
+                        .body(boxed_full(Bytes::new()))
+                        .unwrap();
+                }
+                match polls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) {
+                    0 => stalled(StatusCode::FORBIDDEN),
+                    1 => stalled(StatusCode::OK),
+                    _ => ok_body(json!({
+                        "eventType": "SHUTDOWN",
+                        "shutdownReason": "timeout",
+                        "deadlineMs": OffsetDateTime::now_utc().unix_timestamp() * 1000 + 60_000
+                    })),
+                }
+            }
+        })
+        .await;
+        (addr, polls)
+    };
+
+    let (api_addr, polls) = spawn_api().await;
+    let (s3_addr, s3_hits) = spawn_mock(|_m, _p, _h, _b| ok_empty()).await;
+    let (recorder, _spill) = recorder_with_env(&s3_addr, &[("ZANKYO_EXT_RETRY_MS", "1")]);
+    recorder.stage_inflight(&Invocation {
+        request_id: "req-stall".to_string(),
+        event: json!({"input": 1}),
+        encoding: EventEncoding::Json,
+        invoked_at: OffsetDateTime::now_utc(),
+    });
+    let done = tokio::time::timeout(
+        Duration::from_secs(10),
+        zankyo::extension::run_agent(new_client(), api_addr, recorder),
+    )
+    .await
+    .expect("recording agent must retry past stalled bodies and reach SHUTDOWN");
+    assert!(done, "recording agent");
+    assert_eq!(polls.load(std::sync::atomic::Ordering::SeqCst), 3);
+    assert!(wait_for(2_000, || !captured(&s3_hits).is_empty()).await);
+    let (_, path, _) = captured(&s3_hits).remove(0);
+    assert!(path.contains("req-stall.json"));
+
+    // 記録しない agent も同じ（既定の再試行間隔 500ms）
+    let (api_addr, polls) = spawn_api().await;
+    let env = HashMap::from([
+        ("ZANKYO_DISABLED".to_string(), "1".to_string()),
+        ("AWS_LAMBDA_RUNTIME_API".to_string(), api_addr),
+    ]);
+    let code = tokio::time::timeout(
+        Duration::from_secs(10),
+        zankyo::orchestrate::run_agent_with_env(&env),
+    )
+    .await
+    .expect("passthrough agent must retry past stalled bodies and reach SHUTDOWN");
+    assert_eq!(code, 0, "passthrough agent");
+    assert_eq!(polls.load(std::sync::atomic::Ordering::SeqCst), 3);
+}
+
 #[tokio::test]
 async fn oversized_body_is_rejected_without_forwarding() {
     let (api_addr, api_hits) = spawn_mock(|_m, _p, _h, _b| ok_empty()).await;

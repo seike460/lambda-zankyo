@@ -74,6 +74,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `/error`・`/init/error` だけで、ほかの経路はそのまま中継するとしていた。実際は
   経路を問わず、リクエストボディを `ZANKYO_MAX_BODY_KB` まで読んでから中継し、
   超えたら中継せずに 413 を返す。説明を実際の動作に合わせた
+- **proxy** — external extension（agent）が、Extensions API の応答ボディを
+  時間の上限なしに読んでいた。ヘッダーだけ返してボディを閉じない応答で、登録は
+  `ZANKYO_REGISTER_TIMEOUT_MS` を過ぎても戻らずに Init を遅らせ、`/event/next` は
+  再試行も `SHUTDOWN` の検知もできなくなっていた。ボディの読み取りは、ヘッダーの後
+  1 秒で打ち切る（登録では、残り時間がそれより短ければ残り時間で打ち切る）。
+  打ち切った応答は、ほかの一時的な失敗と同じく再試行する
 - **cli** — replay・diff・redrive は、非 JSON イベント（`eventIsRawText` /
   `eventIsBase64`）のレコードを、invoke の前に exit 4 で止める。Lambda の
   Invoke API は JSON でない本文を `InvalidRequestContentException` で拒否する。

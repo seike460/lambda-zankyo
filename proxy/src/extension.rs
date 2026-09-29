@@ -33,6 +33,12 @@ use tracing::{info, warn};
 
 const EXT_BASE: &str = "/2020-01-01/extension";
 
+/// 応答ヘッダーを受けてから、ボディを読み切るまでの上限時間。
+/// Extensions API はヘッダーに続けてボディをすぐ送る。ヘッダーだけ返して
+/// ボディを閉じない応答に、登録の期限や、再試行・SHUTDOWN の検知を
+/// 止められないようにする。
+const EXT_BODY_TIMEOUT: Duration = Duration::from_secs(1);
+
 /// Extensions API 呼び出しの失敗。再試行するかどうかを種類で決める。
 #[derive(Debug)]
 enum ApiError {
@@ -69,12 +75,31 @@ impl std::fmt::Display for ApiError {
     }
 }
 
+/// 応答のボディを `max_bytes` バイトまで、`within` の時間内で読む。
+/// サイズだけでなく時間でも打ち切る（`EXT_BODY_TIMEOUT` を参照）。
+async fn read_body(
+    body: hyper::body::Incoming,
+    max_bytes: usize,
+    within: Duration,
+) -> std::result::Result<bytes::Bytes, String> {
+    match tokio::time::timeout(
+        within,
+        http_body_util::Limited::new(body, max_bytes).collect(),
+    )
+    .await
+    {
+        Ok(Ok(c)) => Ok(c.to_bytes()),
+        Ok(Err(e)) => Err(format!("body read failed: {e}")),
+        Err(_) => Err("body read timed out".into()),
+    }
+}
+
 /// エラー応答のボディを診断用に読む（platform の拒否理由が分かる）。
-async fn error_body(body: hyper::body::Incoming) -> String {
-    http_body_util::Limited::new(body, 4096)
-        .collect()
+/// 読めなかったときは空にし、ステータスによる判断はそのまま続ける。
+async fn error_body(body: hyper::body::Incoming, within: Duration) -> String {
+    read_body(body, 4096, within)
         .await
-        .map(|c| String::from_utf8_lossy(&c.to_bytes()).into_owned())
+        .map(|b| String::from_utf8_lossy(&b).into_owned())
         .unwrap_or_default()
 }
 
@@ -144,13 +169,15 @@ async fn register_events(
     }
 }
 
-/// `/extension/register` を 1 回送る。
+/// `/extension/register` を 1 回送る。エラー応答のボディの読み取りも含めて
+/// `timeout` の内側で終える。
 async fn register_once(
     client: &HttpClient,
     upstream_api: &str,
     timeout: Duration,
     events: &[&str],
 ) -> std::result::Result<String, ApiError> {
+    let started = tokio::time::Instant::now();
     let body = serde_json::to_vec(&serde_json::json!({ "events": events }))
         .map_err(|e| ApiError::Other(e.to_string()))?;
     let req = Request::builder()
@@ -172,17 +199,24 @@ async fn register_once(
     {
         return Ok(id.to_string());
     }
-    Err(ApiError::Status(parts.status, error_body(body).await))
+    let within = timeout
+        .saturating_sub(started.elapsed())
+        .min(EXT_BODY_TIMEOUT);
+    Err(ApiError::Status(
+        parts.status,
+        error_body(body, within).await,
+    ))
 }
 
 /// `/event/next` はイベント到着までブロックするロングポーリング。
-/// タイムアウトを付けない（イベントなし＝正常な待機。AWS も付けないよう求めている）。
-/// ボディは異常なサイズを読まないよう `body_limit` バイトで切る。
+/// 応答ヘッダーを待つ間はタイムアウトを付けない（イベントなし＝正常な待機。
+/// AWS も付けないよう求めている）。ボディは異常なサイズを読まないよう
+/// `body_limit` バイトで切り、ヘッダーの後は `body_timeout` で打ち切る。
 async fn next_event(
     client: &HttpClient,
     upstream_api: &str,
     ext_id: &str,
-    body_limit: usize,
+    limits: &PollLimits,
 ) -> std::result::Result<ExtensionEvent, ApiError> {
     let req = Request::builder()
         .method(Method::GET)
@@ -193,13 +227,14 @@ async fn next_event(
     let resp = client.request(req).await.map_err(ApiError::from_client)?;
     let (parts, body) = resp.into_parts();
     if !parts.status.is_success() {
-        return Err(ApiError::Status(parts.status, error_body(body).await));
+        return Err(ApiError::Status(
+            parts.status,
+            error_body(body, limits.body_timeout).await,
+        ));
     }
-    let body = http_body_util::Limited::new(body, body_limit)
-        .collect()
+    let body = read_body(body, limits.body_limit, limits.body_timeout)
         .await
-        .map_err(|e| ApiError::Other(format!("event body read failed: {e}")))?
-        .to_bytes();
+        .map_err(|e| ApiError::Other(format!("event {e}")))?;
     serde_json::from_slice(&body).map_err(|e| ApiError::Other(format!("invalid event: {e}")))
 }
 
@@ -313,6 +348,7 @@ pub async fn run_agent(client: HttpClient, upstream_api: String, recorder: Arc<R
 pub async fn run_passthrough_agent(client: HttpClient, upstream_api: String) -> bool {
     let limits = PollLimits {
         body_limit: DEFAULT_EXT_BODY_KB * 1024,
+        body_timeout: EXT_BODY_TIMEOUT,
         retry_delay: Duration::from_millis(DEFAULT_EXT_RETRY_MS),
         max_failures: DEFAULT_EXT_MAX_POLL_FAILURES,
     };
@@ -340,6 +376,8 @@ pub async fn run_passthrough_agent(client: HttpClient, upstream_api: String) -> 
 /// register と `/event/next` ポーリングのノブ。
 struct PollLimits {
     body_limit: usize,
+    /// 応答ヘッダーを受けてから、ボディを読み切るまでの上限時間。
+    body_timeout: Duration,
     /// 失敗から次の試行までの間隔。
     retry_delay: Duration,
     /// Runtime API に接続できない状態が何回続いたら諦めるか。
@@ -350,6 +388,7 @@ impl PollLimits {
     fn from_config(cfg: &Config) -> Self {
         Self {
             body_limit: cfg.ext_body_kb.saturating_mul(1024),
+            body_timeout: EXT_BODY_TIMEOUT,
             retry_delay: Duration::from_millis(cfg.ext_retry_ms),
             max_failures: cfg.ext_max_poll_failures,
         }
@@ -376,7 +415,7 @@ async fn wait_for_shutdown(
     let mut failures: u32 = 0;
     let mut unreachable: u32 = 0;
     loop {
-        let err = match next_event(client, upstream_api, ext_id, limits.body_limit).await {
+        let err = match next_event(client, upstream_api, ext_id, limits).await {
             Ok(ev) if ev.event_type == "SHUTDOWN" => return Some(ev),
             Ok(_) => {
                 failures = 0;
@@ -486,6 +525,7 @@ mod tests {
             .to_string();
         let limits = PollLimits {
             body_limit: 1024,
+            body_timeout: Duration::from_millis(100),
             retry_delay: Duration::from_millis(1),
             max_failures: 3,
         };
