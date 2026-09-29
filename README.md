@@ -200,6 +200,12 @@ s3://{ZANKYO_BUCKET}/zankyo/{function-name}/{yyyy}/{mm}/{dd}/{requestId}.json
   対象は文字列値だけです。数値型の値（`"cardNo": 4111111111111111` 等）と
   オブジェクトのキー名（`{"alice@example.com": …}` 等）は検査しません。
   該当するフィールド名を `ZANKYO_SCRUB_FIELDS` に足すと、値ごとマスクされます。
+- **自由テキストには denylist が効きません**。`errorContext` の `errorMessage`・
+  `stackTrace` や、エラー応答の中のメッセージ・スタックトレースの文字列には、
+  パターン検出だけが掛かります（`ZANKYO_SCRUB_FIELDS` も効きません）。
+  `throw new Error('invalid: ' + JSON.stringify(event))` のように例外メッセージへ
+  イベントを埋め込むと、`password` などの値が平文のまま S3 に残ります。
+  例外メッセージには、イベントや秘密の値を入れないでください。
 - **mask モード**は形状保持（`j***@e***.com`、`***1234`）で再現性を維持。
 - **hash モード**は HMAC-SHA256 擬似名化（鍵は関数名+バケット由来の
   決定的 seed。暗号化ではなく「同じ値→同じハッシュ」の再現性が目的）。

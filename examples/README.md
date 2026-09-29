@@ -64,6 +64,9 @@ zankyo redrive <requestId> --confirm
   リージョンの設定で実行する。
 - デモのハンドラは `handlers/` のファイルで持つ。sam local は inline code
   （`Code.fromInline`）の関数を実行しない。
+- 手順 1 の `password` は、レコードの `event` の中で denylist によりマスクされる。
+  例外メッセージには denylist が効かないため（README「PII scrub」）、デモの例外メッセージには
+  イベントを入れていない。
 - timeout の SHUTDOWN フラッシュはベストエフォート。shutdown ウィンドウ内に
   PutObject が終わらないと、レコードは spill（既定 `/tmp/zankyo/<関数名>`）に残る。
   timeout 後の reset は `/tmp` を消さないため、同じ実行環境が次の呼び出しで
