@@ -341,3 +341,8 @@ LLVM の libunwind と crtbegin/crtend です。
 版は、`rust-toolchain.toml` の Rust 1.98.1 と、その Rust が musl ターゲットに同梱する
 musl 1.2.5・LLVM 22.1.8 です。Rust を上げるときは、部品の原文も更新します。
 rustc の版が違うと、`scripts/build-layer.mts` は梱包を止めます。
+
+これらの表示は、`cross build` か `cargo build` でビルドしたバイナリに合わせています。
+この 2 つでは、rustc が自分の musl libc と LLVM の部品をリンクします。
+`cargo zigbuild` などは、libc と CRT を別の版に置き換えることがあります。
+そのため、`scripts/build-layer.mts` の `BUILDER` は、この 2 つだけを受け付けます。

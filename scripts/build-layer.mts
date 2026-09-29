@@ -3,8 +3,8 @@
 //! Lambda が /opt に展開するレイアウト（ENTRIES）で zip 化する。
 //!
 //! 前提: cross (https://github.com/cross-rs/cross) か musl ツールチェーン。
-//! `BUILDER="cargo zigbuild"` のように `cargo build` 相当の
-//! コマンド行を差し替えられる。
+//! `BUILDER` で "cross build" と "cargo build" のどちらを使うかを選べる。
+//! ほかのビルダーは受け付けない（理由は TOOLCHAIN_NOTICES の説明）。
 //! `SKIP_BUILD=1` でビルドを省き target/ 済みのバイナリだけ梱包する。
 //! 梱包でも THIRD_PARTY_LICENSES の生成に `cargo metadata` と `rustc --version` を使う。
 //! Node 24+ は型注釈を strip してそのまま実行する（ビルド不要）。
@@ -69,8 +69,9 @@ const LICENSE_FALLBACK: Record<string, string> = {
 /// crate のほかに、musl ターゲットのバイナリへ静的リンクされるツールチェーンの部品。
 /// Rust 標準ライブラリと、その Rust が *-unknown-linux-musl に self-contained として
 /// 同梱する musl libc（libc.a と crt*.o）と、LLVM の libunwind.a・crtbegin/crtend。
-/// cross と cargo build の経路（CI とリリースの手順）では、rustc がこれらをリンクする。
-/// cargo zigbuild は crt と libc を zig が同梱する musl に置き換えるため、版が合わないことがある。
+/// cross build と cargo build（CI とリリースの手順）では、rustc がこれらをリンクする。
+/// ほかのビルダー（cargo zigbuild など）は libc と crt を別の版に置き換えうるため、
+/// BUILDER で受け付けない。
 /// 本文は source の版から scripts/licenses/ に写した。musl と LLVM の版は、Rust の
 /// src/ci/docker/scripts/musl-toolchain.sh と src/llvm-project（サブモジュール）が示す。
 /// rustc の版が RUST_VERSION と違えば梱包を止める。Rust を上げたら、ここと本文を見直す。
@@ -227,6 +228,29 @@ if (arches.length === 0) {
   console.error('ARCHES is empty; nothing to build');
   process.exit(1);
 }
+// BUILDER は `cargo build` 相当のコマンド行全体で、TOOLCHAIN_NOTICES の部品をリンクする
+// "cross build" と "cargo build" だけを受け付ける。分割は空白区切りのみで
+// シェル式のクォートは解釈しない。未指定なら cross があれば使い、
+// 無ければ cargo に落ちる。梱包専用（SKIP_BUILD=1）では builder に一切触れない。
+const BUILDERS = ['cross build', 'cargo build'];
+const skipBuild = process.env.SKIP_BUILD === '1';
+const builder = skipBuild
+  ? undefined
+  : (
+      process.env.BUILDER ??
+      (spawnSync('cross', ['--version'], { stdio: 'ignore' }).status === 0
+        ? 'cross build'
+        : 'cargo build')
+    )
+      .split(/\s+/)
+      .filter(Boolean)
+      .join(' ');
+if (builder !== undefined && !BUILDERS.includes(builder)) {
+  console.error(`BUILDER must be one of: ${BUILDERS.join(', ')} (got "${builder}")`);
+  process.exit(1);
+}
+const [builderCmd, ...builderArgs] = builder?.split(' ') ?? [];
+
 // TOOLCHAIN_NOTICES は RUST_VERSION の Rust の部品を表示する。rustc の版が違えば、ビルドの前に止める。
 const rustc = execFileSync('rustc', ['--version'], { cwd: ROOT, encoding: 'utf8' }).trim();
 if (rustc.split(' ')[1] !== RUST_VERSION) {
@@ -239,27 +263,6 @@ const outDirEnv = process.env.OUT_DIR ?? 'dist/layer';
 const outDir = isAbsolute(outDirEnv) ? outDirEnv : resolve(ROOT, outDirEnv);
 mkdirSync(outDir, { recursive: true });
 mkdirSync(join(ROOT, 'sar/dist'), { recursive: true });
-
-// BUILDER は `cargo build` 相当のコマンド行全体（"cross build" や
-// "cargo zigbuild"）として解釈する。分割は空白区切りのみで
-// シェル式のクォートは解釈しない。未指定なら cross があれば使い、
-// 無ければ cargo に落ちる。
-const builderArgv = () =>
-  (
-    process.env.BUILDER ??
-    (spawnSync('cross', ['--version'], { stdio: 'ignore' }).status === 0
-      ? 'cross build'
-      : 'cargo build')
-  )
-    .split(/\s+/)
-    .filter(Boolean);
-const skipBuild = process.env.SKIP_BUILD === '1';
-// 梱包専用（SKIP_BUILD=1）では builder に一切触れない。
-const [builderCmd, ...builderArgs] = skipBuild ? [] : builderArgv();
-if (!skipBuild && !builderCmd) {
-  console.error('BUILDER is empty');
-  process.exit(1);
-}
 const EPOCH = new Date(0);
 
 for (const arch of arches) {
@@ -268,7 +271,7 @@ for (const arch of arches) {
     console.error(`unknown arch: ${arch}`);
     process.exit(1);
   }
-  if (!skipBuild && builderCmd) {
+  if (builderCmd) {
     console.log(`== building ${target} ==`);
     execFileSync(
       builderCmd,

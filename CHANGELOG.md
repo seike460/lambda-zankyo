@@ -24,6 +24,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   source map は tarball に含まれない `src/` を指していた
 - **sar** — SAR の `SourceCodeUrl` を、リポジトリのルートから、その版のタグ
   （`/tree/v<版>`）に変えた。SAR の各版から、対応するソースをたどれる
+- **layer** — `scripts/build-layer.mts` の `BUILDER` は、`cross build` と
+  `cargo build` だけを受け付ける。`cargo zigbuild` などは、zig が持つ musl libc と
+  CRT をリンクしうる。その場合、Layer のライセンス表示と中身が食い違う
 
 ### Fixed
 

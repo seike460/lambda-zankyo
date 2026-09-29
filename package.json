@@ -10,7 +10,7 @@
     "lint": "biome check .",
     "format": "biome check --write .",
     "typecheck": "pnpm -r run typecheck && tsc -p scripts",
-    "test": "pnpm -r run test",
+    "test": "pnpm -r run test && node --test scripts/*.test.mts",
     "build": "pnpm -r --if-present run build",
     "check:versions": "node scripts/check-versions.mts",
     "gate": "pnpm lint && pnpm check:versions && pnpm build && pnpm typecheck && pnpm test"
