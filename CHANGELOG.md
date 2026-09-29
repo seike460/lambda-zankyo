@@ -61,6 +61,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `ZANKYO_*` で変えられると説明していた。実際は、Extensions API の応答ボディを
   読む上限時間（1 秒）など、設定で変えない安全のための上限がある。
   ARCHITECTURE.md に一覧（固定の安全上限）を置き、説明をこれに合わせた
+- **proxy** — README の設定表は、`ZANKYO_SPILL_DIR` が絶対パスだけを受け付け、
+  それ以外を warn を出して無視することを書いていなかった。あわせて、construct が
+  設定する `ZANKYO_BUCKET`・`ZANKYO_KMS_KEY` も SSM の JSON で上書きされ、
+  そのとき書き込みの権限を別に付与する必要があることを書いた
 - **proxy** — 空文字の `ZANKYO_SSM_PARAM` を未設定として扱う。以前は init の
   たびに空の名前で SSM を呼び、起動を遅らせていた
 - **proxy** — external extension 構成で、呼び出し中にランタイムがクラッシュすると、
