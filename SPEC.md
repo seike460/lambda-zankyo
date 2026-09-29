@@ -1,6 +1,6 @@
 # lambda-zankyo（残響）— 仕様書
 
-sync invoke で失敗した Lambda 呼び出しの「イベント＋エラー応答」を確実に残し、
+sync invoke で失敗した Lambda 呼び出しの「イベント＋エラー応答」を S3 に記録し、
 ローカル再現・差分リプレイ・本番再実行まで担う Layer＋CLI の OSS。
 
 ## 背景と存在理由
@@ -40,6 +40,7 @@ Lambda Service ──Runtime API──▶ zankyo proxy (Rust, Layer) ──▶ �
 - **成功呼び出しは記録しない**（S3 PUT・spill なし）。`/next` のイベントは timeout 捕捉のため `/tmp` に一時ステージし、完了時に削除する。
 - 失敗の定義: `/error` 呼出・`/init/error`・`/response` 内の errorType 含有・SHUTDOWN の時点で応答を返していない呼び出し（reason を問わず failureType=timeout。reason は errorContext.errorType に写す）。
 - timeout 捕捉: proxy が in-flight イベントを `/tmp` の `.inflight` にステージ → SHUTDOWN を受けた extension がそれを読み、S3 へベストエフォートフラッシュ（shutdown ウィンドウ内に PutObject が完了しない場合は取りこぼす旨を README に明記）。
+- 記録はベストエフォート（fail-open）: S3 に届かなかったレコードは `/tmp` に残し、生存中の定期回収と次回 init で再送する。`/tmp` にも残せなかった場合・再送の前に実行環境が破棄された場合・spill の上限を超えた場合は失われる（README の制限事項に明記）。
 - 対象ランタイム: `AWS_LAMBDA_EXEC_WRAPPER` を尊重する全 managed runtime（nodejs/python/java/dotnet/ruby）。`provided.*` は bootstrap が exec wrapper を尊重する場合のみ。
 
 ## データ仕様

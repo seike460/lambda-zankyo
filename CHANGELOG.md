@@ -130,6 +130,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   失敗していた
 - **construct** — npm のページに使い方が何も表示されなかった。props と
   Layer の入手先を書いた README をパッケージに含める
+- **docs** — README と SPEC の冒頭で、失敗した呼び出しを「確実に残す」と書いていた。
+  記録はベストエフォートで、S3 に届かず `/tmp` にも残せなかった場合や、再送の前に
+  実行環境が破棄された場合は失われる。表現を改め、README の制限事項に書き足した
 
 ### Security
 
@@ -149,7 +152,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   この関数を名乗るレコードを置けた。権限は role の DefaultPolicy ではなく、
   関数ごとの `AWS::IAM::Policy` に入る。既存のスタックを更新すると、デプロイ中の
   短い間だけ PUT が拒否されることがある。その間のレコードは spill に退避され、
-  後で再送される
+  実行環境が残っていれば、定期回収か次回 init で再送される
 - **cli** — S3 キーの関数名と本文の `functionName` が食い違うレコードを、
   exit 4 で拒否する。以前は本文の関数名をそのまま replay・diff・redrive の
   invoke 先にしていた。バケットに書ける別の関数が、運用者の権限で任意の関数へ

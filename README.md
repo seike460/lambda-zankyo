@@ -1,6 +1,6 @@
 # lambda-zankyo（残響）
 
-**sync invoke で失敗した Lambda 呼び出しの「イベント＋エラー応答」を確実に残し、
+**sync invoke で失敗した Lambda 呼び出しの「イベント＋エラー応答」を S3 に記録し、
 ローカル再現・差分リプレイ・本番再実行まで担う Layer＋CLI。**
 
 > **スコープ**: 対象は **sync（RequestResponse）呼び出し** のみ。
@@ -266,6 +266,10 @@ s3://{ZANKYO_BUCKET}/zankyo/{function-name}/{yyyy}/{mm}/{dd}/{requestId}.json
 - `provided.*` ランタイムは bootstrap が exec wrapper を尊重する場合のみ。
 - SnapStart・RESPONSE_STREAM・API Gateway 29s タイムアウト（Lambda は
   成功しているケース）は正式保証外（SPEC Open Questions）。
+- 記録はベストエフォートです。S3 に届かなかったレコードは `/tmp` に残し、
+  生存中の定期回収と次回 init で再送します。`/tmp` にも残せなかった場合、
+  再送の前に実行環境が破棄された場合、spill の上限（`ZANKYO_SPILL_MAX_FILES`・
+  `ZANKYO_SPILL_MAX_AGE_SECS`）を超えた場合は、そのレコードは失われます。
 - timeout フラッシュはベストエフォート（shutdown ウィンドウ制約あり）。
 
 ## リポジトリ構成
