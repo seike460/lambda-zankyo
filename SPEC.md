@@ -85,7 +85,7 @@ s3://{ZANKYO_BUCKET}/zankyo/{function-name}/{yyyy}/{mm}/{dd}/{requestId}.json
 ### scrub 規則（ハイブリッド）
 
 - **フィールド名 denylist**: `password, secret, token, apiKey, authorization, privateKey, sessionId, cookie, cookies, ssn, creditCard, cvv, pin`（大文字小文字・セパレータ不問）＋ `ZANKYO_SCRUB_FIELDS`。文字列化された JSON（API Gateway の `body` 等）の中のフィールドにも適用する。
-- **パターン検出**: email / クレカ番号（Luhn 検証付き）/ JWT / API キー形状 / 電話番号 / IPv4。対象は文字列値のみ（数値型の値・キー名は対象外）。
+- **パターン検出**: email / クレカ番号（Luhn 検証付き）/ JWT / AWS アクセスキー / Bearer トークン / 電話番号 / IPv4。対象は文字列値のみ（数値型の値・キー名は対象外）。
 - 既定 mask は `***` ではなく `j***@e***.com` 型の**形状保持マスク**（再現性を損なわないため）。
 
 ## CLI（TypeScript strict + Biome。npm パッケージ `lambda-zankyo`、コマンド名 `zankyo`。`npx lambda-zankyo` でも可）
