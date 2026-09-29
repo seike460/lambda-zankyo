@@ -137,7 +137,7 @@ CDK construct はこの権限を付けないので、別に付与してくださ
 | `ZANKYO_MAX_EVENT_KB` | `256` | イベント保存の上限（超過は先頭のみ + `truncated`） |
 | `ZANKYO_FLUSH_BUDGET_MS` | `1200` | 失敗レコードの PutObject 上限時間（呼び出し中の記録と SHUTDOWN フラッシュ）。失敗時の応答はこの時間まで遅れうる |
 | `ZANKYO_PUT_TIMEOUT_MS` | `5000` | spill 再送の PutObject 上限時間（起動時・定期回収） |
-| `ZANKYO_SPILL_DIR` | `/tmp/zankyo/<function>` | S3 失敗時・SHUTDOWN 時のローカル退避先（既定は関数名でスコープ） |
+| `ZANKYO_SPILL_DIR` | `/tmp/zankyo/<function>` | `.inflight` ステージと、PUT 前に先書きする失敗レコード（未送信分は再送まで残る）の置き場（既定は関数名でスコープ） |
 | `ZANKYO_SPILL_MAX_FILES` | `64` | spill 保持数の上限。超過分は古いものから破棄 |
 | `ZANKYO_SPILL_RETRY_MS` | `60000` | spill 再送を試みる間隔（生存中の定期回収） |
 | `ZANKYO_SPILL_MAX_AGE_SECS` | `604800` | spill ファイルの有効期間。超過分は再送せず破棄 |

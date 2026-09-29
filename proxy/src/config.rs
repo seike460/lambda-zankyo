@@ -70,7 +70,7 @@ pub struct Config {
     pub flush_budget_ms: u64,
     /// spill 再送（起動時・定期回収）の PutObject 上限時間。
     pub put_timeout_ms: u64,
-    /// S3 失敗時・SHUTDOWN 時のローカル退避先。
+    /// `.inflight` ステージと、PUT 前に先書きする失敗レコード（write-ahead spill）の置き場。
     pub spill_dir: String,
     /// spill dir に保持するファイル数の上限。超過分は古いものから破棄。
     pub spill_max_files: usize,
