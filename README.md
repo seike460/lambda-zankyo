@@ -277,6 +277,7 @@ SSM キー・build arch。spill は atomic 書き込み・上限・定期回収�
   `package.json` の `packageManager`（pnpm 10.13.1）。
 - CI の全 GitHub Actions はコミット SHA でピン留めしています
   （`.github/workflows/ci.yml` の `@<sha> # vN` コメント参照）。
+  aarch64 をビルドする cross のコンテナは、`Cross.toml` で digest に固定しています。
 - `scripts/build-layer.mts` は決定的 zip を生成します: エントリの
   mtime を最古（zip 表現の下限 1980-01-01）に揃え、`zip -X` で
   拡張属性を捨て、エントリ順を固定の引数順で渡します。

@@ -1,0 +1,5 @@
+# cross が aarch64 の Layer バイナリをビルドするコンテナ。タグは付け替えられるため、
+# digest で固定する。cross の版（.github/workflows/ci.yml の
+# `cargo install cross --version`）を上げるときは、同じ版のタグの digest に更新する。
+[target.aarch64-unknown-linux-musl]
+image = "ghcr.io/cross-rs/aarch64-unknown-linux-musl:0.2.5@sha256:702154f52b2d8091671aa2c84d5582d849f949977228c735ff8462f93cc0e1e4"
