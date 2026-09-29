@@ -269,8 +269,11 @@ cargo test --locked --workspace   # Rust のユニットテストと統合テス
 cargo fmt --all -- --check && cargo clippy --locked --workspace --all-targets -- -D warnings
 ```
 
-- TS: strict + `noUncheckedIndexedAccess` + `exactOptionalPropertyTypes`、
-  Biome でフォーマット統一。テストは `node --test`（外部サービス不要）。
+- TS: strict + `noUncheckedIndexedAccess`、Biome でフォーマット統一。
+  `cli/` と `scripts/` は `exactOptionalPropertyTypes` も有効です。`construct/` と
+  `examples/` では無効です。aws-cdk-lib の型がこの設定と合わないためです
+  （例: `s3.Bucket` を `s3.IBucket` に代入できない）。
+  テストは `node --test`（外部サービス不要）。
   `scripts/*.mts` は Node が型を除去して直接実行します。型は `pnpm typecheck` が
   `scripts/tsconfig.json` で検査します。
 - Rust: ロジック（scrub/record/config/inflight）は IO と分離した
