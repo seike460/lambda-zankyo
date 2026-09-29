@@ -115,7 +115,14 @@ zankyo redrive <requestId> --confirm             # 本番再投入（既定 dry-
 ```
 
 共通フラグ: `--bucket` / `--region` / `--profile` / `--json`。
-exit code: `0` 成功 / `1` diff差異・関数エラー / `2` 引数ミス / `3` AWS 失敗 / `4` レコード不在。
+
+| exit code | 意味 |
+|---|---|
+| 0 | 成功（diff: 応答一致 / replay・redrive: 関数が成功応答） |
+| 1 | diff: 応答に差異 / replay・redrive: 関数がエラーを返した |
+| 2 | 引数・設定ミス |
+| 3 | AWS API 呼び出しの失敗 |
+| 4 | レコードが見つからない / 形式不正（空・JSON でない・スキーマ不一致・キーと本文の関数名の食い違い） / サイズ超過（`ZANKYO_RECORD_MAX_MB`、既定 32 MiB を超える） / 再現不能（truncated・event 欠落・replay/diff/redrive での非 JSON イベント） |
 
 ## 設定（環境変数）
 

@@ -69,6 +69,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **cli** — `list --since` で古いページがすべて除外されると、
   `ZANKYO_LIST_MAX_PAGES` を超えてバケットを最後まで走査していた。
   走査の上限を、除外後の件数ではなくページ数で数える
+- **cli** — README の exit code の説明で、exit 4 を「レコード不在」だけとしていた。
+  形式不正・サイズ超過（`ZANKYO_RECORD_MAX_MB` 超）・再現不能のレコードも exit 4 に
+  なる。CLI の README からも、サイズ超過が抜けていた
 - **cli / construct** — npm の tarball に LICENSE を同梱する。以前は
   MIT の許諾文が配布物に入っていなかった
 - **layer** — Layer の zip に、LICENSE と `THIRD_PARTY_LICENSES` を同梱する
