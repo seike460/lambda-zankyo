@@ -57,6 +57,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   キー・環境変数の `ZANKYO_DISABLED` の真・環境変数の設定エラー）も書いた。
   README の設定表には、SSM の取得に成功すれば、SSM の JSON の `ZANKYO_BUCKET` だけでも
   記録することを書いた
+- **proxy** — README と ARCHITECTURE.md は、上限・タイムアウト・間隔をすべて
+  `ZANKYO_*` で変えられると説明していた。実際は、Extensions API の応答ボディを
+  読む上限時間（1 秒）など、設定で変えない安全のための上限がある。
+  ARCHITECTURE.md に一覧（固定の安全上限）を置き、説明をこれに合わせた
 - **proxy** — 空文字の `ZANKYO_SSM_PARAM` を未設定として扱う。以前は init の
   たびに空の名前で SSM を呼び、起動を遅らせていた
 - **proxy** — external extension 構成で、呼び出し中にランタイムがクラッシュすると、

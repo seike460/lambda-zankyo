@@ -52,10 +52,12 @@ Runtime API への接続不能の継続（`ZANKYO_EXT_MAX_POLL_FAILURES` 回）�
   例外は SSM を読む前に決まるもの。取得に使う `ZANKYO_SSM_PARAM`・
   `ZANKYO_SSM_TIMEOUT_MS` は env だけで決め、SSM の JSON では上書きしない
   （`ssm_overlay.rs` の `ENV_ONLY_KEYS`）。env の `ZANKYO_DISABLED` の真と
-  env の設定エラーは、SSM を読まずに passthrough を決める。動作ノブ
-  （上限・タイムアウト・間隔）をコードへ埋め込まない。新しい数値設定は
+  env の設定エラーは、SSM を読まずに passthrough を決める。
+- **利用者が調整する動作ノブ（上限・タイムアウト・間隔）をコードへ
+  埋め込まない**。`ZANKYO_*` で変えられるようにし、新しい数値設定は
   `config.rs` の env 読み取り + `ssm_overlay.rs` の
-  `SSM_NUM_FIELDS` に 1 行で済む。
+  `SSM_NUM_FIELDS` に 1 行で済む。例外は下の「固定の安全上限」に挙げた
+  定数だけで、足すときは名前付きの定数にして表にも載せる。
 - **拡張はデータの 1 エントリ追加で完結**。scrub パターンは
   `scrub_data.rs`、CLI コマンドは `bin.ts` のディスパッチ、
   SSM キーは `SSM_NUM_FIELDS`、build arch は `TARGETS`。
@@ -68,6 +70,29 @@ Runtime API への接続不能の継続（`ZANKYO_EXT_MAX_POLL_FAILURES` 回）�
   キャストなし（AWS 境界は `ports.ts` の構造的ポート）。Rust は
   `#![forbid(unsafe_code)]` + clippy -D warnings。書式は
   biome / rustfmt で CI 強制。
+
+## 固定の安全上限
+
+次の値は設定で変えず、コードの定数に固定する。どれもプロトコルや実装の都合で
+決まる安全のための上限か、短い待ち時間で、利用者の環境に合わせて変える値ではない。
+変えられる値は README の設定表（`ZANKYO_*`）にある。`proxy/tests/docs_it.rs` が、
+この表と `proxy/src` の定数を突き合わせる。
+
+| 定数 | 値 | 場所 | 役割 |
+|---|---|---|---|
+| `EXT_BODY_TIMEOUT` | 1 秒 | `extension.rs` | Extensions API の応答ヘッダーを受けてから、ボディを読み切るまでの上限。登録では、残り時間の方が短ければ残り時間 |
+| `ERROR_BODY_MAX_BYTES` | 4096 バイト | `extension.rs` | Extensions API のエラー応答のボディを、診断用に読む上限 |
+| `SHUTDOWN_DEADLINE_MARGIN_MS` | 200 ms | `extension.rs` | SHUTDOWN の `deadlineMs` の手前に残す余白。フラッシュ予算は、余白を引いた残り時間と `ZANKYO_FLUSH_BUDGET_MS` の小さい方 |
+| `SHUTDOWN_GRACE_CAP_MS` | 1 秒 | `orchestrate.rs` | 子が先に終了したとき、同じプロセスの extension に SHUTDOWN が届くのを待つ上限（`ZANKYO_FLUSH_BUDGET_MS` との小さい方） |
+| `DRAIN_SLACK_MS` | 1 秒 | `orchestrate.rs` | 終了時に保存の完了を待つ時間枠で、`ZANKYO_PUT_TIMEOUT_MS` に足す余白 |
+| `ACCEPT_BACKOFF` | 50 ms | `proxy.rs` | Runtime API の listen で、accept に失敗したときの再試行間隔 |
+| `DRAIN_POLL` | 10 ms | `proxy.rs` | 終了時に、実行中のハンドラが無くなったかを確かめる間隔 |
+| `PART_ORPHAN_GRACE` | 60 秒 | `spill.rs` | 書きかけの `.part` を、クラッシュ後の残りとみなして消すまでの猶予 |
+| `RECORDED_CAP` | 4096 件 | `inflight.rs` | 記録済みの requestId（二重記録の防止用）を覚えておく件数の上限 |
+
+設定を読んでも使わない場合が 1 つある。記録しない状態の agent は、設定が壊れている
+場合に備えて、Extensions API の 4 つの設定を読まず、既定値（`config.rs` の定数）を使う
+（上の「全体像」）。
 
 ## モジュール対応（proxy/src）
 

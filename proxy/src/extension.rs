@@ -33,11 +33,19 @@ use tracing::{info, warn};
 
 const EXT_BASE: &str = "/2020-01-01/extension";
 
+// 次の 3 つは設定で変えない固定の安全上限（ARCHITECTURE.md の「固定の安全上限」）。
+
 /// 応答ヘッダーを受けてから、ボディを読み切るまでの上限時間。
 /// Extensions API はヘッダーに続けてボディをすぐ送る。ヘッダーだけ返して
 /// ボディを閉じない応答に、登録の期限や、再試行・SHUTDOWN の検知を
 /// 止められないようにする。
 const EXT_BODY_TIMEOUT: Duration = Duration::from_secs(1);
+
+/// エラー応答のボディを診断用に読む上限（バイト）。拒否の理由が分かれば足りる。
+const ERROR_BODY_MAX_BYTES: usize = 4096;
+
+/// SHUTDOWN の deadlineMs の手前に残す余白（ms）。凍結の直前まで PUT を続けない。
+const SHUTDOWN_DEADLINE_MARGIN_MS: i64 = 200;
 
 /// Extensions API 呼び出しの失敗。再試行するかどうかを種類で決める。
 #[derive(Debug)]
@@ -97,7 +105,7 @@ async fn read_body(
 /// エラー応答のボディを診断用に読む（platform の拒否理由が分かる）。
 /// 読めなかったときは空にし、ステータスによる判断はそのまま続ける。
 async fn error_body(body: hyper::body::Incoming, within: Duration) -> String {
-    read_body(body, 4096, within)
+    read_body(body, ERROR_BODY_MAX_BYTES, within)
         .await
         .map(|b| String::from_utf8_lossy(&b).into_owned())
         .unwrap_or_default()
@@ -448,7 +456,8 @@ async fn wait_for_shutdown(
 }
 
 /// SHUTDOWN イベントの deadlineMs と設定予算から実際のフラッシュ予算を決める。
-/// 凍結期限の 200ms 手前までを残時間とみなし、設定予算との小さい方を取る。
+/// 凍結期限の `SHUTDOWN_DEADLINE_MARGIN_MS` 手前までを残時間とみなし、設定予算との
+/// 小さい方を取る。
 /// deadlineMs が無い・過去・負値のときは設定予算をそのまま使う。
 fn flush_budget_for(deadline_ms: Option<i64>, configured: Duration) -> Duration {
     deadline_ms
@@ -458,7 +467,7 @@ fn flush_budget_for(deadline_ms: Option<i64>, configured: Duration) -> Duration 
             let now_ms = time::OffsetDateTime::now_utc().unix_timestamp_nanos() / 1_000_000;
             let remaining = d
                 .saturating_sub(i64::try_from(now_ms).unwrap_or(i64::MAX))
-                .saturating_sub(200);
+                .saturating_sub(SHUTDOWN_DEADLINE_MARGIN_MS);
             u64::try_from(remaining).ok()
         })
         .map(|ms| configured.min(Duration::from_millis(ms)))
