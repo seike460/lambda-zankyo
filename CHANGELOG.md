@@ -11,6 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **proxy** — 宣言する MSRV（`rust-version`）を、ロック済み依存の実際の要件
   1.94.1 に合わせた。CI で宣言値のビルドを検証する
+- **proxy** — 依存の hmac を 0.13 に、sha2 を 0.11 に、base64 を 0.23 に上げた
 - **proxy** — denylist に一致した値が配列なら、要素ごとにマスクして配列の形を
   保つ。以前は配列全体を 1 つの文字列 `"***"` に置き換えていた
 - **proxy** — `ZANKYO_SSM_TIMEOUT_MS` の既定値を 10000 から 2000 に下げた。
@@ -121,12 +122,14 @@ proxy・CLI・construct のコードは、タグと 83e4929 で同じである�
   - `/opt/extensions/zankyo` の external extension が `SHUTDOWN` を捕捉し、
     `/tmp` の `.inflight` ステージから timeout レコードを復元
   - イベント保持は UTF-8 安全（JSON は JSON、非 JSON は raw text、
-    非 UTF-8 は base64）。denylist フィールドとカード番号パターンを scrub
+    非 UTF-8 は base64）。フィールド名 denylist とパターン検出（email・
+    カード番号（Luhn 検証付き）・JWT・AWS アクセスキー・Bearer トークン・
+    電話番号・IPv4）で scrub
   - SSM Parameter Store の JSON overlay で設定上書き可能。fail-open 設計で
     zankyo 側の障害はハンドラを止めない
-- **cli** (`lambda-zankyo`) — `list` / `show` / `diff` / `fixture` / `invoke` /
-  `store` コマンド。fixture 出力は `sam local invoke -e` にそのまま渡せる
-- **construct** (`zankyo-cdk`) — `new Zankyo(stack).attachTo(fn)` で SAR 参照・
+- **cli** (`lambda-zankyo`) — `list` / `fixture` / `replay` / `diff` / `redrive`
+  コマンド。fixture 出力は `sam local invoke -e` にそのまま渡せる
+- **construct** (`zankyo-cdk`) — `new Zankyo(this, 'Zankyo').attachTo(fn)` で SAR 参照・
   env 注入・IAM 権限を一括配線する CDK construct
 - **sar/** — Serverless Application Repository 公開用 SAM テンプレート
   （x86_64 / arm64 の 2 Layer を 1 アプリとして公開）
