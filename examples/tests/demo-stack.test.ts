@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, it } from 'node:test';
 import { pathToFileURL } from 'node:url';
@@ -57,6 +57,28 @@ describe('DemoStack', () => {
           ],
         },
       ],
+    });
+  });
+
+  it('outputs every name the README reads, so its steps run as written', () => {
+    const readme = readFileSync(join(import.meta.dirname, '../README.md'), 'utf8');
+    // 関数名は CloudFormation が生成する。固定名のプレースホルダは実行できない
+    assert.doesNotMatch(readme, /ZankyoDemo-\w+XXX/);
+    const keys = [...readme.matchAll(/stack_output (\w+)/g)].map((m) => m[1]);
+    assert.deepEqual(keys, ['ThrowerFunctionName', 'SleeperFunctionName', 'RecordsBucketName']);
+    const idOf = (type: string, prefix: string) =>
+      Object.keys(template.findResources(type)).find((id) => id.startsWith(prefix));
+    template.hasOutput('ThrowerFunctionName', {
+      Value: { Ref: idOf('AWS::Lambda::Function', 'Thrower') },
+    });
+    template.hasOutput('SleeperFunctionName', {
+      Value: { Ref: idOf('AWS::Lambda::Function', 'Sleeper') },
+    });
+    template.hasOutput('InitErrorFunctionName', {
+      Value: { Ref: idOf('AWS::Lambda::Function', 'InitError') },
+    });
+    template.hasOutput('RecordsBucketName', {
+      Value: { Ref: idOf('AWS::S3::Bucket', 'Zankyo') },
     });
   });
 

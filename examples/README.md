@@ -19,23 +19,35 @@ pnpm --filter zankyo-examples run deploy
 
 ## 検証の流れ
 
+関数名とバケット名は CloudFormation が生成します。デプロイ後、スタックの出力
+（`ThrowerFunctionName`・`SleeperFunctionName`・`InitErrorFunctionName`・
+`RecordsBucketName`）から読みます。`cdk deploy` の最後にも表示されます。
+
 ```bash
+# 0. スタックの出力から、関数名とバケット名を読む
+stack_output() {
+  aws cloudformation describe-stacks --stack-name ZankyoDemo \
+    --query "Stacks[0].Outputs[?OutputKey=='$1'].OutputValue" --output text
+}
+THROWER=$(stack_output ThrowerFunctionName)
+SLEEPER=$(stack_output SleeperFunctionName)
+export ZANKYO_BUCKET=$(stack_output RecordsBucketName)
+
 # 1. handler error を直接 invoke（RequestResponse = 同期呼び出し）
 #    AWS CLI v2 は --payload を base64 と解釈するため、JSON のまま渡す指定を付ける
-aws lambda invoke --function-name ZankyoDemo-ThrowerXXX \
+aws lambda invoke --function-name "$THROWER" \
   --cli-binary-format raw-in-base64-out \
   --payload '{"email":"a@b.com","password":"x"}' out.json
 
 # 2. timeout ケース（3s でタイムアウトする関数）
-aws lambda invoke --function-name ZankyoDemo-SleeperXXX \
+aws lambda invoke --function-name "$SLEEPER" \
   --cli-binary-format raw-in-base64-out --payload '{}' out.json
 
-# 3. レコードが S3 にあることを確認
-export ZANKYO_BUCKET=<デプロイで作られたバケット>
+# 3. レコードが S3 にあることを確認（ZANKYO_BUCKET は手順 0 で設定済み）
 zankyo list --since 1h
 
 # 4. fixture → sam local で再現（Docker が必要）
-zankyo fixture --last --function ZankyoDemo-ThrowerXXX --out event.json
+zankyo fixture --last --function "$THROWER" --out event.json
 pnpm --filter zankyo-examples run synth
 echo '{"Parameters":{"AWS_LAMBDA_EXEC_WRAPPER":""}}' > env.json
 sam local invoke -t examples/cdk.out/ZankyoDemo.template.json Thrower \
@@ -50,6 +62,8 @@ zankyo redrive <requestId> --confirm
 
 ## 注意
 
+- 手順 5・6 の `<requestId>` には、手順 3 の `zankyo list` が表示する `REQUEST_ID` を入れる。
+  手順 5 の `old`・`new` には、修正前と修正後の版に付けたエイリアスを指定する。
 - `InitError` はデプロイ直後の初回起動でしか init error を起こさない。
   実行環境が再利用されると再度 init error にならない点に注意
   （新しい実行環境の確保は、関数設定の軽微な変更→保存で誘発できる）。

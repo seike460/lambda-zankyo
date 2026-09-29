@@ -1,5 +1,5 @@
 import { join } from 'node:path';
-import { Duration, aws_lambda as lambda, Stack, type StackProps } from 'aws-cdk-lib';
+import { CfnOutput, Duration, aws_lambda as lambda, Stack, type StackProps } from 'aws-cdk-lib';
 import type { Construct } from 'constructs';
 import { Zankyo } from 'zankyo-cdk';
 
@@ -48,5 +48,12 @@ export class DemoStack extends Stack {
     for (const fn of [thrower, sleeper, initError]) {
       zankyo.attachTo(fn);
     }
+
+    // 関数名は CloudFormation が生成するため固定できない。README の手順は
+    // describe-stacks でこの出力を読み、invoke・fixture の対象を決める。
+    new CfnOutput(this, 'ThrowerFunctionName', { value: thrower.functionName });
+    new CfnOutput(this, 'SleeperFunctionName', { value: sleeper.functionName });
+    new CfnOutput(this, 'InitErrorFunctionName', { value: initError.functionName });
+    new CfnOutput(this, 'RecordsBucketName', { value: zankyo.bucket.bucketName });
   }
 }
