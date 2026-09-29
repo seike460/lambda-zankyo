@@ -6,7 +6,7 @@
 //! `BUILDER` で "cross build" と "cargo build" のどちらを使うかを選べる。
 //! ほかのビルダーは受け付けない（理由は TOOLCHAIN_NOTICES の説明）。
 //! `SKIP_BUILD=1` でビルドを省き target/ 済みのバイナリだけ梱包する。
-//! 梱包でも THIRD_PARTY_LICENSES の生成に `cargo metadata` と `rustc --version` を使う。
+//! 梱包でも THIRD_PARTY_LICENSES の生成に `cargo metadata` と `rustc -vV` を使う。
 //! Node 24+ は型注釈を strip してそのまま実行する（ビルド不要）。
 
 import { execFileSync, spawnSync } from 'node:child_process';
@@ -79,7 +79,8 @@ const LICENSE_FALLBACK: Record<string, string> = {
 /// BUILDER で受け付けない。
 /// 本文は source の版から scripts/licenses/ に写した。musl と LLVM の版は、Rust の
 /// src/ci/docker/scripts/musl-toolchain.sh と src/llvm-project（サブモジュール）が示す。
-/// rustc の版が RUST_VERSION と違えば梱包を止める。Rust を上げたら、ここと本文を見直す。
+/// rustc の版か、rustc の LLVM の版が違えば梱包を止める。musl の版は rustc から
+/// 読めないため、Rust を上げたら、ここと本文を見直す。
 const RUST_VERSION = '1.98.1';
 const MUSL_VERSION = '1.2.5';
 const LLVM_VERSION = '22.1.8';
@@ -266,11 +267,14 @@ if (builder !== undefined && !BUILDERS.includes(builder)) {
 }
 const [builderCmd, ...builderArgs] = builder?.split(' ') ?? [];
 
-// TOOLCHAIN_NOTICES は RUST_VERSION の Rust の部品を表示する。rustc の版が違えば、ビルドの前に止める。
-const rustc = execFileSync('rustc', ['--version'], { cwd: ROOT, encoding: 'utf8' }).trim();
-if (rustc.split(' ')[1] !== RUST_VERSION) {
+// TOOLCHAIN_NOTICES は RUST_VERSION の Rust と、その LLVM の部品を表示する。
+// rustc の版か LLVM の版が違えば、ビルドの前に止める。
+const rustcInfo = execFileSync('rustc', ['-vV'], { cwd: ROOT, encoding: 'utf8' });
+const rustcField = (key: string) => new RegExp(`^${key}: (.*)$`, 'm').exec(rustcInfo)?.[1];
+const rustcLlvm = rustcField('LLVM version');
+if (rustcField('release') !== RUST_VERSION || rustcLlvm !== LLVM_VERSION) {
   console.error(
-    `${rustc} is not Rust ${RUST_VERSION}; update TOOLCHAIN_NOTICES and scripts/licenses/`,
+    `${rustcInfo.split('\n')[0]} (LLVM ${rustcLlvm}) is not Rust ${RUST_VERSION} (LLVM ${LLVM_VERSION}); update TOOLCHAIN_NOTICES and scripts/licenses/`,
   );
   process.exit(1);
 }

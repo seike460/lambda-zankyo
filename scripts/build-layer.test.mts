@@ -27,6 +27,7 @@ const constant = (name: string) => {
   return value;
 };
 const RUST_VERSION = constant('RUST_VERSION');
+const LLVM_VERSION = constant('LLVM_VERSION');
 const LIBRARY_NOTICE = fileURLToPath(
   new URL(`./licenses/rust-${RUST_VERSION}/COPYRIGHT-library.html`, import.meta.url),
 );
@@ -36,6 +37,7 @@ after(() => rmSync(work, { recursive: true, force: true }));
 
 interface Toolchain {
   release?: string;
+  llvm?: string;
   /// sysroot の share/doc/rust/COPYRIGHT-library.html。null なら置かない
   libraryNotice?: string | null;
 }
@@ -60,7 +62,7 @@ function run(env: Record<string, string>, toolchain: Toolchain = {}) {
   const tools: Record<string, string> = {
     rustc: [
       'case "$1" in',
-      `  --version) echo 'rustc ${release} (fake)' ;;`,
+      `  -vV) printf 'rustc %s (fake)\\nrelease: %s\\nLLVM version: %s\\n' '${release}' '${release}' '${toolchain.llvm ?? LLVM_VERSION}' ;;`,
       `  --print) echo '${sysroot}' ;;`,
       '  *) exit 2 ;;',
       'esac',
@@ -120,6 +122,27 @@ describe('build-layer.mts', () => {
       );
       assert.equal(r.started, '');
     }
+  });
+
+  it('stops when rustc is not RUST_VERSION', () => {
+    const r = run({ SKIP_BUILD: '1' }, { release: '0.0.0' });
+    assert.equal(r.status, 1);
+    assert.match(r.stderr, new RegExp(`is not Rust ${RUST_VERSION}`));
+    assert.equal(r.started, '');
+    assert.equal(r.outDirCreated, false);
+  });
+
+  it("stops when rustc's LLVM is not LLVM_VERSION", () => {
+    const r = run({ SKIP_BUILD: '1' }, { llvm: '0.0.0' });
+    assert.equal(r.status, 1);
+    assert.ok(
+      r.stderr.includes(
+        `(LLVM 0.0.0) is not Rust ${RUST_VERSION} (LLVM ${LLVM_VERSION}); update TOOLCHAIN_NOTICES`,
+      ),
+      r.stderr,
+    );
+    assert.equal(r.started, '');
+    assert.equal(r.outDirCreated, false);
   });
 
   it('stops when COPYRIGHT-library.html differs from the one shipped with rustc', () => {

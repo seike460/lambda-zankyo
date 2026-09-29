@@ -345,7 +345,7 @@ LLVM の libunwind と crtbegin/crtend です。
 musl 1.2.5・LLVM 22.1.8 です。Rust を上げるときは、部品の原文も更新します。
 次の場合、`scripts/build-layer.mts` は梱包を止めます。
 
-- rustc の版が違う
+- rustc の版か、rustc の LLVM の版が違う
 - `COPYRIGHT-library.html` の写しが、rustc に同梱されたものと違う
 
 これらの表示は、`cross build` か `cargo build` でビルドしたバイナリに合わせています。
