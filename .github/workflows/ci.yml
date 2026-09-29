@@ -8,8 +8,10 @@ on:
 permissions:
   contents: read
 
+# PR は新しい push で古い run を取り消す。main の push は run ごとの group にして、
+# 取り消しも待機中の run の置き換えも起こさず、どのコミットにも結果を残す
 concurrency:
-  group: ci-${{ github.ref }}
+  group: ci-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
   cancel-in-progress: true
 
 jobs:
