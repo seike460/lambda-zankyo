@@ -10,12 +10,12 @@ sync invoke で失敗した Lambda 呼び出しの「イベント＋エラー応
 - AWS が sync 向けに payload を永続化するフックを持たないのは構造的（sync は応答が呼び出し元に返る設計。AWS の責任分界は「エラーを返す、リトライは client」）。10 年追加されていない。
 - Powertools `logEvent`・Middy はコード変更前提。Datadog は商用で fixture 出力・sam local 連携・差分リプレイなし。Keploy は開発時記録が主眼で eBPF は Lambda 環境内で不可。
 
-## 決定事項（ユーザー確定済み）
+## 決定事項
 
 | 項目 | 決定 |
 |---|---|
 | 名称 | **lambda-zankyo**（残響） |
-| プロキシ実装 | **Rust 単一バイナリ**（依存ゼロ、x86_64/arm64） |
+| プロキシ実装 | **Rust 単一バイナリ**（musl 静的リンクで実行時の共有ライブラリ依存なし、x86_64/arm64） |
 | timeout 捕捉 | **Extension API の SHUTDOWN イベント**（reason=timeout）で in-flight イベントをフラッシュ |
 | PII scrub | **ハイブリッド**（フィールド名 denylist＋パターン検出）、既定 ON |
 | 配布 | **SAR（Serverless Application Repository）公開** |
@@ -27,15 +27,16 @@ sync invoke で失敗した Lambda 呼び出しの「イベント＋エラー応
 
 ```
 Lambda Service ──Runtime API──▶ zankyo proxy (Rust, Layer) ──▶ 実ランタイム(handler)
-                     ▲                │
-                     │                ├─ Extensions API /register（SHUTDOWN 受信のため）
-                     │                └─ 失敗時のみ: イベント+エラー → scrub → S3(+KMS)
+                     ▲                │        └─ /tmp に .inflight ステージ共有
+                     │                ├─ 失敗時のみ: イベント+エラー → scrub → S3(+KMS)
+                     │                └─ zankyo agent (/opt/extensions 起動)
+                     │                     └─ Extensions API /register（SHUTDOWN 受信用）
                      └── AWS_LAMBDA_EXEC_WRAPPER=/opt/zankyo-wrapper で差し込み
 ```
 
-- Layer 内の単一バイナリが **Runtime API proxy と external extension を兼務**する。
-  - proxy: `AWS_LAMBDA_RUNTIME_API` を localhost の自分に向け、`/next`・`/response`・`/error`・`/init/error` を中継。
-  - extension: `/extension/register` して `/event/next` をポーリングし、INVOKE/SHUTDOWN（reason=timeout/failure/spindown）を受信。
+- Layer 内の単一バイナリが **Runtime API proxy と external extension を兼務**する（起動方法でモードが分かれる）。プロセス構成とデータフローの詳細は ARCHITECTURE.md。
+  - proxy: exec wrapper から起動し、`AWS_LAMBDA_RUNTIME_API` を localhost の自分に向け、`/next`・`/response`・`/error`・`/init/error` を中継。
+  - extension（agent）: layer の `/opt/extensions/zankyo` から platform が別プロセスとして起動する（internal extension には SHUTDOWN が届かないため）。`/extension/register` して `/event/next` をポーリングし、INVOKE/SHUTDOWN（reason=timeout/failure/spindown）を受信。
 - **成功呼び出しは記録しない**（S3 PUT・spill なし）。`/next` のイベントは timeout 捕捉のため `/tmp` に一時ステージし、完了時に削除する。
 - 失敗の定義: `/error` 呼出・`/init/error`・`/response` 内の errorType 含有・SHUTDOWN の時点で応答を返していない呼び出し（reason を問わず failureType=timeout。reason は errorContext.errorType に写す）。
 - timeout 捕捉: proxy が in-flight イベントを `/tmp` の `.inflight` にステージ → SHUTDOWN を受けた extension がそれを読み、S3 へベストエフォートフラッシュ（shutdown ウィンドウ内に PutObject が完了しない場合は取りこぼす旨を README に明記）。
@@ -67,7 +68,7 @@ s3://{ZANKYO_BUCKET}/zankyo/{function-name}/{yyyy}/{mm}/{dd}/{requestId}.json
 ```
 
 - scrub は **記録に `scrubReport` を併記**して「何をどう消したか」を監査可能にする（再現の障害にならない範囲で構造は保持）。
-- 6MB を超えるイベントは先頭 N KB＋`truncated: true` フラグ（既定 N=256KB、env で変更可）。
+- `ZANKYO_MAX_EVENT_KB`（既定 256）を超えるイベントは先頭だけを保持し、`truncated: true` を付ける。`truncated` のレコードは fixture・replay・diff・redrive の対象外。
 
 ## 設定（環境変数。`ZANKYO_SSM_PARAM` 指定時は SSM の JSON を優先）
 
@@ -87,7 +88,7 @@ s3://{ZANKYO_BUCKET}/zankyo/{function-name}/{yyyy}/{mm}/{dd}/{requestId}.json
 - **パターン検出**: email / クレカ番号（Luhn 検証付き）/ JWT / API キー形状 / 電話番号 / IPv4。対象は文字列値のみ（数値型の値・キー名は対象外）。
 - 既定 mask は `***` ではなく `j***@e***.com` 型の**形状保持マスク**（再現性を損なわないため）。
 
-## CLI（TypeScript strict + Biome。`npx zankyo`）
+## CLI（TypeScript strict + Biome。npm パッケージ `lambda-zankyo`、コマンド名 `zankyo`。`npx lambda-zankyo` でも可）
 
 | コマンド | 内容 |
 |---|---|
@@ -110,13 +111,14 @@ new Zankyo(this, 'Zankyo', { bucket?, kmsKey?, scrubFields? })
 
 ## 配布
 
-- **Layer**: SAR で公開（1 クリック導入）。GitHub Releases にも zip を同時添付（SAR 審査中・セルフホスト用）。
-- **CLI**: npm で公開（`zankyo` または `lambda-zankyo`。パッケージ名空きは初回 publish 時に確認）。
-- **Construct**: npm（`zankyo-cdk` 等）または CLI と同一パッケージで export。
+- **Layer**: SAR で公開（1 クリック導入。`arn:aws:serverlessrepo:ap-northeast-1:446537410535:applications/lambda-zankyo`）。GitHub Releases にも zip を添付（セルフホスト用）。
+- **CLI**: npm パッケージ `lambda-zankyo`（コマンド名 `zankyo`）。
+- **Construct**: npm パッケージ `zankyo-cdk`。
+- 公開の手順は RELEASING.md。
 - リポジトリ構成（monorepo）:
   ```
   lambda-zankyo/
-    proxy/      # Rust（cargo lambda または cross で x86_64/arm64 ビルド）
+    proxy/      # Rust（cross または cargo build で x86_64/arm64 の musl 静的バイナリ。梱包は scripts/build-layer.mts）
     cli/        # TypeScript + Biome + AWS SDK v3
     construct/  # TypeScript + Biome + aws-cdk-lib
     examples/   # 失敗するデモ関数（throw / timeout / init error）
@@ -135,14 +137,14 @@ new Zankyo(this, 'Zankyo', { bucket?, kmsKey?, scrubFields? })
 
 - scrub は**既定 ON**、無効化は `ZANKYO_SCRUB_MODE=off` の明示のみ。`scrubReport` で適用結果を証跡化。
 - レコードの保存先は**利用者自身のアカウントの S3**（外部送信ゼロ）。IAM 権限は `s3:PutObject` 限定。
-- 依存の vendoring/lockfile、CI での `cargo audit` / `npm audit`。
+- 依存は lockfile（`Cargo.lock` / `pnpm-lock.yaml`）で固定し、CI で `cargo audit` / `pnpm audit` を実行する。
 
 ## Open Questions
 
 1. exec wrapper の chain（`ZANKYO_CHAIN_WRAPPER=/opt/other-wrapper` で次の wrapper を呼ぶ方式）は実現可能か。
 2. SnapStart 環境で extension ライフサイクルが変わるか（init タイミングのずれ）。
 3. RESPONSE_STREAM 呼出での失敗応答捕捉（チャンク応答中の error）。
-4. timeout 時の SHUTDOWN ウィンドウに PutObject が間に合うか実測（バッファ先を /tmp にも残し次 init で回収する二重化は有効か）。
+4. timeout 時の SHUTDOWN ウィンドウに PutObject が間に合うか実測。/tmp にも残して次の init で回収する二重化は実装済み（`.inflight` ステージと write-ahead spill。ARCHITECTURE.md のデータフロー参照）。
 5. API Gateway 29s timeout のような「呼び出し元側 timeout」（Lambda は成功している）の扱い。
 
 ## E2E 検証手順
