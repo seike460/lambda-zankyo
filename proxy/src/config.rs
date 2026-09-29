@@ -1,9 +1,14 @@
 //! 設定の解決。
 //!
-//! 環境変数が既定の供給元。`ZANKYO_SSM_PARAM` が指定されている場合は
-//! SSM Parameter Store の JSON を読み、同じキーがあれば env を上書きする
-//! （複数関数で設定を一元管理したい利用者のため）。SSM 側のスキーマは
-//! env 名と同じキーを持つフラットな JSON オブジェクト。
+//! 既定値 → 環境変数 → SSM の順に重ね、後から重ねた値が優先する。
+//! `ZANKYO_SSM_PARAM` が指定されている場合は SSM Parameter Store の JSON を
+//! 読み、同じキーがあれば env を上書きする（複数関数で設定を一元管理したい
+//! 利用者のため）。SSM 側のスキーマは env 名と同じキーを持つフラットな
+//! JSON オブジェクト。ただし次は SSM を読む前に決まる（`setup.rs`）。
+//! - `ZANKYO_SSM_PARAM`・`ZANKYO_SSM_TIMEOUT_MS` は env だけで決める
+//!   （`ssm_overlay.rs` の `ENV_ONLY_KEYS`）。
+//! - env の `ZANKYO_DISABLED` が真なら、SSM を読まずに passthrough にする。
+//! - env の値が不正なら設定エラーとし、SSM を読まずに passthrough にする。
 
 use crate::error::{Result, ZankyoError};
 use std::collections::{BTreeSet, HashMap};

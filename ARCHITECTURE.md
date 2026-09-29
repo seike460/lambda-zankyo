@@ -45,7 +45,11 @@ Runtime API への接続不能の継続（`ZANKYO_EXT_MAX_POLL_FAILURES` 回）�
 
 このプロジェクトは次の不変条件を守る。レビュー・生成コードも同じ基準。
 
-- **設定は env → SSM overlay → 既定値の順で解決**。動作ノブ
+- **設定は既定値 → env → SSM overlay の順に重ねて解決**（後が優先）。
+  例外は SSM を読む前に決まるもの。取得に使う `ZANKYO_SSM_PARAM`・
+  `ZANKYO_SSM_TIMEOUT_MS` は env だけで決め、SSM の JSON では上書きしない
+  （`ssm_overlay.rs` の `ENV_ONLY_KEYS`）。env の `ZANKYO_DISABLED` の真と
+  env の設定エラーは、SSM を読まずに passthrough を決める。動作ノブ
   （上限・タイムアウト・間隔）をコードへ埋め込まない。新しい数値設定は
   `config.rs` の env 読み取り + `ssm_overlay.rs` の
   `SSM_NUM_FIELDS` に 1 行で済む。
@@ -89,7 +93,8 @@ Runtime API への接続不能の継続（`ZANKYO_EXT_MAX_POLL_FAILURES` 回）�
   パターン自体は `scrub_data.rs` に 1 エントリ。
 - **設定項目**: `Config` + env 読み取りに追加。SSM は
   `SSM_NUM_FIELDS` に 1 行（フィールド単位パースで 1 キーの
-  書き損じが全体を壊さない）。
+  書き損じが全体を壊さない）。SSM を読む前に使う値は表に載せず、
+  `ENV_ONLY_KEYS` に足す。
 - **CLI コマンド**: `cli/src/commands/` に 1 ファイル + `bin.ts` に
   1 行。AWS 境界は `ports.ts` の構造的ポートに閉じる。
 - **failure type**: `record.rs` enum・写像・CLI の

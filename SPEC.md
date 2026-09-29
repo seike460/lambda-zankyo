@@ -20,7 +20,7 @@ sync invoke で失敗した Lambda 呼び出しの「イベント＋エラー応
 | PII scrub | **ハイブリッド**（フィールド名 denylist＋パターン検出）、既定 ON |
 | 配布 | **SAR（Serverless Application Repository）公開** |
 | CLI スコープ | **fixture 生成＋差分リプレイ＋本番再実行（redrive）** まで MVP |
-| 設定供給 | **両方**（環境変数を既定、SSM Parameter 指定時はそちら優先） |
+| 設定供給 | **両方**（既定値 → 環境変数 → SSM Parameter の順に重ね、SSM の JSON にあるキーが最優先） |
 | CDK | **construct 同梱**（Layer 参照＋S3 bucket＋IAM を一発配線） |
 
 ## アーキテクチャ
@@ -73,15 +73,20 @@ s3://{ZANKYO_BUCKET}/zankyo/{function-name}/{yyyy}/{mm}/{dd}/{requestId}.json
 
 ## 設定（環境変数。`ZANKYO_SSM_PARAM` 指定時は SSM の JSON を優先）
 
+既定値 → 環境変数 → SSM の JSON の順に重ね、後から重ねた値が優先する。ただし SSM を読む前に
+決まるものは、SSM の値では変わらない。`ZANKYO_SSM_PARAM` と `ZANKYO_SSM_TIMEOUT_MS` は環境変数だけで
+指定する。環境変数の `ZANKYO_DISABLED` が真のときと、環境変数の値が不正なときは、SSM を読まずに
+記録を止める（passthrough）。
+
 | env | 既定 | 用途 |
 |---|---|---|
-| `ZANKYO_BUCKET` | （必須） | 失敗レコードの保存先 |
+| `ZANKYO_BUCKET` | （必須） | 失敗レコードの保存先。SSM の取得に成功すれば、SSM の JSON の値だけでもよい |
 | `ZANKYO_KMS_KEY` | SSE-S3 | 暗号化キー |
-| `ZANKYO_SSM_PARAM` | なし | 設定 JSON を保持する SSM Parameter 名。指定時は env より優先 |
+| `ZANKYO_SSM_PARAM` | なし | 設定 JSON を保持する SSM Parameter 名。指定時は、JSON にあるキーが env より優先。この名前自体は env だけで指定する |
 | `ZANKYO_SCRUB_FIELDS` | 既定 denylist | 追加フィールド名（カンマ区切り） |
 | `ZANKYO_SCRUB_MODE` | `mask` | `mask` / `hash`（HMAC 擬似名化）/ `off` |
 | `ZANKYO_MAX_EVENT_KB` | `256` | イベント保存の上限 |
-| `ZANKYO_DISABLED` | `false` | 緊急停止スイッチ |
+| `ZANKYO_DISABLED` | `false` | 緊急停止スイッチ。環境変数の真は SSM を読む前に効き、SSM の値では解除できない |
 
 ### scrub 規則（ハイブリッド）
 

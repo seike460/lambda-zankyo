@@ -139,17 +139,29 @@ zankyo redrive <requestId> --confirm             # 本番再投入（既定 dry-
 
 ## 設定（環境変数）
 
-`ZANKYO_SSM_PARAM` 指定時は SSM Parameter の JSON（同じキー名）が
-env を部分上書きします。複数関数で設定を一元管理するための経路です。
+設定は、既定値・環境変数・SSM Parameter の順に重ねて決めます。後から重ねた値が優先です。
+`ZANKYO_SSM_PARAM` を指定すると、SSM Parameter の JSON（キーは環境変数と同じ名前）を読みます。
+JSON にあるキーだけが、環境変数の値を上書きします。複数関数で設定を一元管理するための経路です。
 このとき関数のロールに `ssm:GetParameter` が要ります。カスタマー管理キーで暗号化した
 SecureString なら、そのキーの `kms:Decrypt` も要ります
 （[AWS ドキュメント](https://docs.aws.amazon.com/kms/latest/developerguide/services-parameter-store.html#parameter-policy-kms-encryption)）。
-CDK construct はこの権限を付けないので、別に付与してください。取得に失敗すると、warn を
-出して env の設定だけで動きます（バケットを SSM 側にだけ書いた場合は、記録しません）。
+CDK construct はこの権限を付けないので、別に付与してください。取得に失敗したときと、値が
+JSON のオブジェクトでないときは、warn を出して env の設定だけで動きます
+（バケットを SSM 側にだけ書いた場合は、記録しません）。
+
+次の 3 つは SSM を読む前に決まるので、SSM の値では変わりません。
+
+- `ZANKYO_SSM_PARAM` と `ZANKYO_SSM_TIMEOUT_MS` は、環境変数でだけ指定できます。
+  SSM の JSON に書くと、warn を出して無視します。
+- 環境変数の `ZANKYO_DISABLED` が真（`true`・`1`・`yes`・`on`）なら、SSM を読まずに
+  記録を止めます。SSM の値で記録を再開することはできません。
+- 環境変数の値が不正なとき（数値の設定に正の整数でない値や範囲を超える値、不正な `ZANKYO_SCRUB_MODE`）は、
+  設定エラーとして、SSM を読まずに記録を止めます。SSM の JSON の不正な値は、
+  そのキーだけ warn を出して無視します。
 
 | env | 既定 | 用途 |
 |---|---|---|
-| `ZANKYO_BUCKET` | （必須※） | 失敗レコードの保存先。未設定なら記録せず passthrough |
+| `ZANKYO_BUCKET` | （必須※） | 失敗レコードの保存先。環境変数にも SSM の JSON にも無ければ、記録せず passthrough |
 | `ZANKYO_KMS_KEY` | SSE-S3 | SSE-KMS のキー ARN |
 | `ZANKYO_SSM_PARAM` | なし | 設定 JSON を保持する SSM Parameter 名。環境変数でだけ指定できる |
 | `ZANKYO_SCRUB_FIELDS` | 既定 denylist | 追加フィールド名（カンマ区切り） |
@@ -168,9 +180,11 @@ CDK construct はこの権限を付けないので、別に付与してくださ
 | `ZANKYO_EXT_MAX_POLL_FAILURES` | `120` | Runtime API に接続できない状態が続いたときの再試行回数の上限（超過で agent が終了する）。応答が返る失敗は数えない |
 | `ZANKYO_SSM_TIMEOUT_MS` | `2000` | SSM get_parameter の上限時間。Lambda の Init 上限（10 秒）に含まれる。SSM を読む前に使うので、環境変数でだけ指定できる（SSM の JSON に書いても無視する） |
 | `ZANKYO_FORWARD_TIMEOUT_MS` | `60000` | 上流転送の上限時間。`/next` は応答ヘッダーまで無制限に待ち（ロングポーリング）、応答ボディの読み取りにだけ使う |
-| `ZANKYO_DISABLED` | `false` | 緊急停止スイッチ（passthrough） |
+| `ZANKYO_DISABLED` | `false` | 緊急停止スイッチ（passthrough）。環境変数の真は SSM を読む前に効き、SSM の値では解除できない |
 
 ※「必須」は記録を有効にする条件です。未設定でも関数は正常に動きます。
+`ZANKYO_SSM_PARAM` を指定して SSM の取得に成功した場合は、SSM の JSON の `ZANKYO_BUCKET` だけでも
+記録します。このとき環境変数の `ZANKYO_BUCKET` は要りません。
 
 ## データ仕様
 
@@ -315,7 +329,7 @@ cargo fmt --all -- --check && cargo clippy --locked --workspace --all-targets --
 
 ### 保守性の指針
 
-設定は env → SSM overlay → 既定値の順で解決され、動作ノブはすべて
+設定は既定値 → env → SSM overlay の順に重ねて解決され（後が優先。例外は「設定」の節）、動作ノブはすべて
 `ZANKYO_*` 環境変数で外から変えられます（一覧は上の表）。拡張は
 データの 1 エントリ追加で済みます: scrub パターン・CLI コマンド・
 SSM キー・build arch。spill は atomic 書き込み・上限・定期回収・

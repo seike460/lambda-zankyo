@@ -49,6 +49,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   受け付けていたが、効いていなかった。SSM の取得の上限時間は、取得の前に
   環境変数の値で決まるため。このキーは `ZANKYO_SSM_PARAM` と同じく、環境変数で
   だけ指定できるものとした。SSM の JSON に書かれていたら、warn を出して無視する
+- **proxy** — README と ARCHITECTURE.md は、設定の解決順を「env → SSM → 既定値」と
+  説明していた。実際は既定値・環境変数・SSM の順に重ね、SSM の JSON にあるキーが
+  優先する。説明を実際の動作に合わせ、SSM の値では変わらない場合（環境変数だけの
+  キー・環境変数の `ZANKYO_DISABLED` の真・環境変数の設定エラー）も書いた。
+  README の設定表には、SSM の取得に成功すれば、SSM の JSON の `ZANKYO_BUCKET` だけでも
+  記録することを書いた
 - **proxy** — 空文字の `ZANKYO_SSM_PARAM` を未設定として扱う。以前は init の
   たびに空の名前で SSM を呼び、起動を遅らせていた
 - **proxy** — external extension 構成で、呼び出し中にランタイムがクラッシュすると、
