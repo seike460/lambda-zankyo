@@ -63,6 +63,7 @@ agent は `SHUTDOWN` だけを購読して待機します。登録前や `SHUTDO
   （[AWS ドキュメント](https://docs.aws.amazon.com/serverlessrepo/latest/devguide/serverlessrepo-publishing-applications.html)）。
 - **セルフホスト**: `node scripts/build-layer.mts` で両 arch の zip を作り、
   通常の Lambda Layer として発行します（GitHub Releases にも zip を添付）。
+  v0.1.0 より後のリリースには、zip の `SHA256SUMS` も添付します。
 
 いずれも関数に Layer を付け、環境変数を設定します:
 
@@ -234,6 +235,7 @@ examples/    # デモスタック（handler error / timeout / init error）
 sar/         # SAR 公開用 SAM テンプレート
 scripts/     # build-layer.mts（musl 静的バイナリ → layer zip）、check-versions.mts（版の一致）
 SPEC.md      # 仕様書（決定事項・スコープ外・Open Questions）
+RELEASING.md # リリースの手順（SAR・npm・GitHub Release）
 ```
 
 ## 開発
@@ -257,6 +259,7 @@ cargo fmt --all -- --check && cargo clippy -- -D warnings
   同じ版に上げます。SAR の `SourceCodeUrl` はその版のタグを指し、`CHANGELOG.md` には
   その版の見出しを置きます。`pnpm check:versions`（`pnpm gate` と CI が実行）で確かめます。
   construct の既定の SAR 版は、construct のテストが `sar/template.yaml` と突き合わせます。
+  公開までの手順は [RELEASING.md](https://github.com/seike460/lambda-zankyo/blob/main/RELEASING.md) にあります。
 
 ### 保守性の指針
 

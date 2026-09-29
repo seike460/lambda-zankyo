@@ -21,7 +21,8 @@ Metadata:
     SourceCodeUrl: https://github.com/seike460/lambda-zankyo/tree/v0.1.0
 
 Resources:
-  # scripts/build-layer.mts の出力を配置して sam publish する。
+  # ContentUri は scripts/build-layer.mts が書き出す zip。sam package で S3 に上げ、
+  # 書き出したテンプレートを sam publish する（手順は RELEASING.md）。
   # Layer zip の中身は bin/zankyo・extensions/zankyo・zankyo-wrapper（exec wrapper 入口）と、
   # share/licenses/zankyo/ のライセンス表示（LICENSE・THIRD_PARTY_LICENSES）。
   ZankyoLayerX86:
