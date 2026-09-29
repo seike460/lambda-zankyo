@@ -22,7 +22,7 @@ export const ZANKYO_APPLICATION_ID =
 const SAR_LAYER_OUTPUT = 'LayerVersionArn';
 const SAR_LAYER_OUTPUT_ARM64 = 'LayerVersionArnArm64';
 
-const DEFAULT_SEMANTIC_VERSION = '0.1.0';
+const DEFAULT_SEMANTIC_VERSION = '0.1.1';
 const DEFAULT_RETENTION_DAYS = 30;
 const WRAPPER_PATH = '/opt/zankyo-wrapper';
 /** レコードの S3 キー接頭辞。proxy/src/record.rs の KEY_PREFIX と揃える。 */

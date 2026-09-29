@@ -17,8 +17,8 @@ Metadata:
     ReadmeUrl: ../README.md
     Labels: [lambda, observability, replay, debugging, incidents]
     HomePageUrl: https://github.com/seike460/lambda-zankyo
-    SemanticVersion: 0.1.0
-    SourceCodeUrl: https://github.com/seike460/lambda-zankyo/tree/v0.1.0
+    SemanticVersion: 0.1.1
+    SourceCodeUrl: https://github.com/seike460/lambda-zankyo/tree/v0.1.1
 
 Resources:
   # ContentUri は scripts/build-layer.mts が書き出す zip。sam package で S3 に上げ、

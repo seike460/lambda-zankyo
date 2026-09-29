@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-09-30
+
 ### Changed
 
 - **proxy** — 宣言する MSRV（`rust-version`）を、ロック済み依存の実際の要件
@@ -212,5 +214,6 @@ proxy・CLI・construct のコードは、タグと 83e4929 で同じである�
   （x86_64 / arm64 の 2 Layer を 1 アプリとして公開）
 - examples、CI（fmt/clippy/test/biome/typecheck/build）、決定的 zip 梱包
 
-[Unreleased]: https://github.com/seike460/lambda-zankyo/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/seike460/lambda-zankyo/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/seike460/lambda-zankyo/releases/tag/v0.1.1
 [0.1.0]: https://github.com/seike460/lambda-zankyo/releases/tag/v0.1.0

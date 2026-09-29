@@ -1,6 +1,6 @@
 {
   "name": "zankyo-cdk",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "CDK construct that wires the zankyo Lambda layer, records bucket, and IAM to a function",
   "type": "module",
   "license": "MIT",
