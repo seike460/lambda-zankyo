@@ -132,11 +132,38 @@ jobs:
         env:
           SKIP_BUILD: '1'
         run: node scripts/build-layer.mts
-      - name: check the license files in the layer zips
+      # エントリの並びと mode（実行ファイルは 755、ライセンス表示は 644）と CRC を確かめる。
+      # bin/zankyo は arch どおりの ELF で、動的リンカ（PT_INTERP）を要求しない静的リンクであること
+      - name: check the layer zips
         run: |
-          for z in dist/layer/*.zip; do
-            unzip -tq "$z" share/licenses/zankyo/LICENSE share/licenses/zankyo/THIRD_PARTY_LICENSES
+          expected=$(printf '%s\n' \
+            '-rwxr-xr-x bin/zankyo' \
+            '-rwxr-xr-x extensions/zankyo' \
+            '-rwxr-xr-x zankyo-wrapper' \
+            '-rw-r--r-- share/licenses/zankyo/LICENSE' \
+            '-rw-r--r-- share/licenses/zankyo/THIRD_PARTY_LICENSES')
+          for pair in x86_64:X86-64 aarch64:AArch64; do
+            arch=${pair%%:*} machine=${pair#*:}
+            z=dist/layer/zankyo-$arch.zip
+            unzip -tq "$z"
+            diff <(echo "$expected") <(unzip -Z "$z" | awk '$3 == "unx" { print $1, $NF }')
+            unzip -q "$z" -d "$RUNNER_TEMP/layer-$arch"
+            bin=$RUNNER_TEMP/layer-$arch/bin/zankyo
+            if ! readelf -h "$bin" | grep -q "Machine: .*$machine\$"; then
+              echo "$z: bin/zankyo is not $machine" >&2
+              exit 1
+            fi
+            if readelf -l "$bin" | grep -q INTERP; then
+              echo "$z: bin/zankyo is dynamically linked" >&2
+              exit 1
+            fi
           done
+      # 引数なし・Lambda の外（AWS_LAMBDA_RUNTIME_API なし）では、usage を出して EX_USAGE（64）で終わる
+      - name: smoke-test the x86_64 binary in the zip
+        run: |
+          rc=0
+          "$RUNNER_TEMP/layer-x86_64/bin/zankyo" || rc=$?
+          test "$rc" -eq 64
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: zankyo-layer
