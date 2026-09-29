@@ -36,7 +36,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **proxy** — 記録しない状態（`ZANKYO_DISABLED`・バケット未設定・設定エラー）で、
   external extension が register せずに終了していた。Lambda はこれを
   Extension.Crash とみなし、関数の Init を失敗させうる。`SHUTDOWN` だけを
-  購読して待機するようにした
+  購読して待機するようにした。このとき、設定が壊れている場合に備えて、
+  `ZANKYO_REGISTER_TIMEOUT_MS`・`ZANKYO_EXT_RETRY_MS`・`ZANKYO_EXT_BODY_KB`・
+  `ZANKYO_EXT_MAX_POLL_FAILURES` は読まず、既定値を使う
 - **proxy** — external extension（agent）が、Extensions API の一時的な失敗で
   `SHUTDOWN` の前に終了していた。登録は 1 回の失敗で、`/event/next` は連続失敗が
   `ZANKYO_EXT_MAX_POLL_FAILURES` に達すると、終了コード 0 で終わっていた。

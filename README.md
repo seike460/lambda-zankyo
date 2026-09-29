@@ -64,7 +64,8 @@ agent は `SHUTDOWN` だけを購読して待機します。登録前や `SHUTDO
 同じ理由で、agent は Extensions API の一時的な失敗では終了しません。
 登録は `ZANKYO_REGISTER_TIMEOUT_MS` の時間内で再試行します。
 `/event/next` は、`SHUTDOWN` を受けるまで `ZANKYO_EXT_RETRY_MS` の間隔で再試行します。
-記録しない状態では、設定が壊れている場合に備えて、これらの既定値を使います。
+記録しない状態では、設定が壊れている場合に備えて、`ZANKYO_REGISTER_TIMEOUT_MS`・
+`ZANKYO_EXT_RETRY_MS`・`ZANKYO_EXT_BODY_KB`・`ZANKYO_EXT_MAX_POLL_FAILURES` を読まず、既定値を使います。
 `SHUTDOWN` の前に終了するのは、次の 3 つの場合だけです。このときの終了コードは 1 です。
 
 - 登録が 4xx で拒否された
@@ -174,10 +175,10 @@ JSON のオブジェクトでないときは、warn を出して env の設定�
 | `ZANKYO_SPILL_RETRY_MS` | `60000` | spill 再送を試みる間隔（生存中の定期回収） |
 | `ZANKYO_SPILL_MAX_AGE_SECS` | `604800` | spill ファイルの有効期間。超過分は再送せず破棄 |
 | `ZANKYO_MAX_BODY_KB` | `8192` | Runtime API が受け付けるボディ上限（KiB） |
-| `ZANKYO_EXT_BODY_KB` | `1024` | Extensions API イベントボディ上限（KiB） |
-| `ZANKYO_REGISTER_TIMEOUT_MS` | `10000` | extension 登録の上限時間（一時的な失敗の再試行を含む） |
-| `ZANKYO_EXT_RETRY_MS` | `500` | Extensions API（登録・event/next）が失敗したときの再試行間隔 |
-| `ZANKYO_EXT_MAX_POLL_FAILURES` | `120` | Runtime API に接続できない状態が続いたときの再試行回数の上限（超過で agent が終了する）。応答が返る失敗は数えない |
+| `ZANKYO_EXT_BODY_KB` | `1024`※2 | Extensions API イベントボディ上限（KiB） |
+| `ZANKYO_REGISTER_TIMEOUT_MS` | `10000`※2 | extension 登録の上限時間（一時的な失敗の再試行を含む） |
+| `ZANKYO_EXT_RETRY_MS` | `500`※2 | Extensions API（登録・event/next）が失敗したときの再試行間隔 |
+| `ZANKYO_EXT_MAX_POLL_FAILURES` | `120`※2 | Runtime API に接続できない状態が続いたときの再試行回数の上限（超過で agent が終了する）。応答が返る失敗は数えない |
 | `ZANKYO_SSM_TIMEOUT_MS` | `2000` | SSM get_parameter の上限時間。Lambda の Init 上限（10 秒）に含まれる。SSM を読む前に使うので、環境変数でだけ指定できる（SSM の JSON に書いても無視する） |
 | `ZANKYO_FORWARD_TIMEOUT_MS` | `60000` | 上流転送の上限時間。`/next` は応答ヘッダーまで無制限に待ち（ロングポーリング）、応答ボディの読み取りにだけ使う |
 | `ZANKYO_DISABLED` | `false` | 緊急停止スイッチ（passthrough）。環境変数の真は SSM を読む前に効き、SSM の値では解除できない |
@@ -185,6 +186,9 @@ JSON のオブジェクトでないときは、warn を出して env の設定�
 ※「必須」は記録を有効にする条件です。未設定でも関数は正常に動きます。
 `ZANKYO_SSM_PARAM` を指定して SSM の取得に成功した場合は、SSM の JSON の `ZANKYO_BUCKET` だけでも
 記録します。このとき環境変数の `ZANKYO_BUCKET` は要りません。
+
+※2 記録しない状態（`ZANKYO_DISABLED`・バケット未設定・設定エラー）の agent は、この値を読まず、
+既定値を使います（「timeout 捕捉」の節）。
 
 ## データ仕様
 
