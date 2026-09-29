@@ -85,15 +85,18 @@ ZANKYO_BUCKET=<記録用バケット名>
 import { Zankyo } from 'zankyo-cdk';
 
 const zankyo = new Zankyo(this, 'Zankyo', {
-  // bucket?, kmsKey?, scrubFields?, layer? (セルフホスト時), arm64?
+  // bucket?, recordRetentionDays?, kmsKey?, scrubFields?,
+  // sarApplicationId?, semanticVersion?, layer? (セルフホスト時), arm64?
 });
 zankyo.attachTo(myFunction);
 // → Layer 追加 + AWS_LAMBDA_EXEC_WRAPPER/ZANKYO_* env 注入
 //   + s3:PutObject（+ kms:Encrypt/GenerateDataKey）権限を role へ
 ```
 
-bucket 未指定なら「パブリックアクセス全ブロック + lifecycle 30 日 +
-enforceSSL」のバケットを自動作成します。
+bucket 未指定なら「パブリックアクセス全ブロック + lifecycle 30 日
+（`recordRetentionDays` で変更）+ enforceSSL」のバケットを自動作成します。
+このバケットは `RemovalPolicy.RETAIN` で、`cdk destroy` でスタックを消しても
+レコードごと残ります。不要になったら、中身を消してからバケットを削除してください。
 layer 未指定なら、上の SAR アプリを参照します。`arm64` は関数のアーキテクチャに
 揃えてください。食い違うと `attachTo` が例外を投げます
 （props の一覧は [construct/README.md](https://github.com/seike460/lambda-zankyo/blob/main/construct/README.md)）。
@@ -118,6 +121,11 @@ exit code: `0` 成功 / `1` diff差異・関数エラー / `2` 引数ミス / `3
 
 `ZANKYO_SSM_PARAM` 指定時は SSM Parameter の JSON（同じキー名）が
 env を部分上書きします。複数関数で設定を一元管理するための経路です。
+このとき関数のロールに `ssm:GetParameter` が要ります。カスタマー管理キーで暗号化した
+SecureString なら、そのキーの `kms:Decrypt` も要ります
+（[AWS ドキュメント](https://docs.aws.amazon.com/kms/latest/developerguide/services-parameter-store.html#parameter-policy-kms-encryption)）。
+CDK construct はこの権限を付けないので、別に付与してください。取得に失敗すると、warn を
+出して env の設定だけで動きます（バケットを SSM 側にだけ書いた場合は、記録しません）。
 
 | env | 既定 | 用途 |
 |---|---|---|
@@ -217,6 +225,7 @@ s3://{ZANKYO_BUCKET}/zankyo/{function-name}/{yyyy}/{mm}/{dd}/{requestId}.json
 - 関数に付与するのは `s3:PutObject` のみ（+KMS 時は Encrypt/GenerateDataKey）。
   書き込み先は `zankyo/{function-name}/` 配下に限るので、バケットを共有する
   別の関数のレコードは書けません（CDK construct の場合）。
+  `ZANKYO_SSM_PARAM` を使う場合だけ、`ssm:GetParameter` を別に付与します（「設定」参照）。
 - CLI は、キーの関数名と本文の `functionName` が食い違うレコードを
   replay・diff・redrive に使いません（exit 4）。
 - proxy が listen するのは `127.0.0.1` のみ。
@@ -256,8 +265,8 @@ RELEASING.md # リリースの手順（SAR・npm・GitHub Release）
 ```bash
 pnpm install            # JS/TS 依存
 pnpm gate               # lint + 版の一致 + build + typecheck + test（全パッケージ）
-cargo test --workspace  # Rust ユニットテスト
-cargo fmt --all -- --check && cargo clippy -- -D warnings
+cargo test --locked --workspace   # Rust のユニットテストと統合テスト
+cargo fmt --all -- --check && cargo clippy --locked --workspace --all-targets -- -D warnings
 ```
 
 - TS: strict + `noUncheckedIndexedAccess` + `exactOptionalPropertyTypes`、

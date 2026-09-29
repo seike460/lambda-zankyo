@@ -67,6 +67,8 @@ zankyo redrive <requestId> --confirm
 - 手順 1 の `password` は、レコードの `event` の中で denylist によりマスクされる。
   例外メッセージには denylist が効かないため（README「PII scrub」）、デモの例外メッセージには
   イベントを入れていない。
+- `cdk destroy` しても、レコード用のバケットは残る（`RemovalPolicy.RETAIN`）。
+  不要なら、中のレコードを消してからバケットを削除する。
 - timeout の SHUTDOWN フラッシュはベストエフォート。shutdown ウィンドウ内に
   PutObject が終わらないと、レコードは spill（既定 `/tmp/zankyo/<関数名>`）に残る。
   timeout 後の reset は `/tmp` を消さないため、同じ実行環境が次の呼び出しで
