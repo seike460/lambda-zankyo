@@ -14,7 +14,7 @@ use crate::spill;
 use aws_sdk_s3::primitives::ByteStream;
 use aws_sdk_s3::types::ServerSideEncryption;
 use serde_json::Value;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 use time::OffsetDateTime;
 use tracing::{info, warn};
@@ -170,16 +170,29 @@ impl Recorder {
         spill::clear_inflight(Path::new(&self.cfg.spill_dir), request_id);
     }
 
+    /// 残っている inflight ステージを列挙する。
+    /// 稼働中に列挙すると進行中の呼び出しまで含むため、init 時は
+    /// serve 開始前、それ以外は SHUTDOWN 受信後にだけ呼ぶ。
+    pub fn pending_inflights(&self) -> Vec<PathBuf> {
+        spill::pending_inflights(Path::new(&self.cfg.spill_dir))
+    }
+
     /// 残った inflight ステージを timeout レコードへ変換する。
-    /// 「応答を返す前に環境が畳まれた呼び出し」の回収で、init 直後
-    /// （前環境の残滓、reason 不明 → None）と external extension の
-    /// SHUTDOWN フラッシュ（reason あり）から呼ぶ。
+    /// external extension の SHUTDOWN フラッシュ（reason あり）から呼ぶ。
     /// 稼働中に呼ぶと進行中の呼び出しを未完と誤認するため禁。
+    pub async fn recover_inflights(&self, reason: Option<&str>) {
+        self.recover_inflight_paths(self.pending_inflights(), reason)
+            .await;
+    }
+
+    /// 列挙済みの inflight ステージを timeout レコードへ変換する。
+    /// 「応答を返す前に環境が畳まれた呼び出し」の回収で、init 直後
+    /// （前環境の残滓、reason 不明 → None）は serve 開始前に確定した
+    /// 一覧を、SHUTDOWN 時は `recover_inflights` 経由で渡す。
     /// 変換後、レコードが spill か S3 に残った場合だけステージを消す。
     /// spill 済みなら PUT に失敗しても recover_spills が拾う。
-    pub async fn recover_inflights(&self, reason: Option<&str>) {
-        let dir = Path::new(&self.cfg.spill_dir);
-        for path in spill::pending_inflights(dir) {
+    pub async fn recover_inflight_paths(&self, paths: Vec<PathBuf>, reason: Option<&str>) {
+        for path in paths {
             let body = match std::fs::read(&path) {
                 Ok(b) => b,
                 // 読めないのは一時的な失敗でありうる。最後の証跡なので消さず、

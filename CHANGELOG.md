@@ -53,6 +53,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   このステージはレコードの最後のコピーで、記録が失われていた。どちらかが
   成功したときだけ削除し、両方失敗したら次の回収まで残す。読み取りに失敗した
   ステージも、削除せずに残す
+- **proxy** — init 時の回収は、Runtime API の中継を始めた後に `.inflight`
+  ステージを列挙していた。初回の `/next` が先に届くと、実行中の呼び出しを
+  timeout として S3 に記録しうる。回収する一覧は、中継を始める前に確定する
 - **cli** — replay・diff・redrive は、非 JSON イベント（`eventIsRawText` /
   `eventIsBase64`）のレコードを、invoke の前に exit 4 で止める。Lambda の
   Invoke API は JSON でない本文を `InvalidRequestContentException` で拒否する。

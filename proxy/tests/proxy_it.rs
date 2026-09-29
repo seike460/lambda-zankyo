@@ -720,6 +720,49 @@ async fn leftover_inflight_stage_becomes_timeout_record() {
     assert!(!spill_dir.join("zankyo-req-stuck.json").exists());
 }
 
+#[tokio::test]
+async fn startup_recovery_leaves_the_first_invocation_alone() {
+    // 起動時回収の対象は serve 開始前に確定する。回収が動き出す前に
+    // 初回 /next が届いても、実行中の呼び出しを timeout と誤記録しない。
+    let (api_addr, _api) = spawn_mock(runtime_api_handler()).await;
+    let (s3_addr, s3_hits) = spawn_mock(|_m, _p, _h, _b| ok_empty()).await;
+    let (recorder, spill_dir) = recorder_to(&s3_addr);
+    // 前の実行環境が残したステージ
+    recorder.stage_inflight(&Invocation {
+        request_id: "req-leftover".to_string(),
+        event: json!({"input": 1}),
+        encoding: EventEncoding::Json,
+        invoked_at: OffsetDateTime::now_utc(),
+    });
+    let recovery = zankyo::orchestrate::startup_recovery(recorder.clone());
+    let proxy = spawn_proxy(&api_addr, Arc::new(InFlight::new()), recorder).await;
+
+    // 回収を後回しにし、その前に初回 /next を通す
+    call(
+        &proxy,
+        Method::GET,
+        "/2018-06-01/runtime/invocation/next",
+        None,
+    )
+    .await;
+    let running = spill_dir.join("zankyo-req-123.inflight");
+    assert!(running.exists());
+    recovery.await;
+
+    let puts: Vec<String> = captured(&s3_hits)
+        .into_iter()
+        .filter(|(m, _, _)| m == "PUT")
+        .map(|(_, p, _)| p)
+        .collect();
+    assert_eq!(puts.len(), 1, "{puts:?}");
+    assert!(puts[0].contains("req-leftover.json"));
+    assert!(!spill_dir.join("zankyo-req-leftover.inflight").exists());
+    assert!(
+        running.exists(),
+        "the running invocation must not be recorded as a timeout"
+    );
+}
+
 /// `up` が false の間は PutObject を 403 で拒否する S3 モック。
 /// 403 は SDK が再試行しないため、失敗が 1 回の PUT で確定する。
 async fn spawn_switchable_s3() -> (String, Captured, Arc<std::sync::atomic::AtomicBool>) {

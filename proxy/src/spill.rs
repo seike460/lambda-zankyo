@@ -98,8 +98,8 @@ pub fn clear_inflight(dir: &Path, request_id: &str) {
 
 /// 残っている inflight ステージを列挙する。
 /// 実行環境が応答を返す前に畳まれた呼び出し＝未完の証跡。
-/// init 直後と SHUTDOWN 受信時のみ呼ぶこと（稼働中に読むと
-/// 進行中の呼び出しを未完と誤認する）。
+/// init 時は serve 開始前、それ以外は SHUTDOWN 受信時のみ呼ぶこと
+/// （稼働中に読むと進行中の呼び出しを未完と誤認する）。
 pub fn pending_inflights(dir: &Path) -> Vec<PathBuf> {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return Vec::new();

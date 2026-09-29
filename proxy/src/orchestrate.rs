@@ -94,17 +94,11 @@ pub async fn run(argv: &[OsString]) -> u8 {
     // 前回の実行で残った spill があれば再送する。非同期・ベストエフォートで、
     // 起動経路を遅らせない。初回再送は pending へ積み、終了時の drain に
     // 含める（早期終了時に PUT が途中で切られないようにする）。
-    // 先に inflight 残滓を変換する — 「応答なく環境が畳まれた呼び出し」
-    // を timeout レコード化してから、溜まった spill 全件を再送する順。
-    // 順序不変条件: このタスクは serve 開始前に積む。稼働後に
-    // recover_inflights を呼ぶと進行中の呼び出しを未完と誤認する。
+    // 順序不変条件: 回収する inflight 残滓の一覧は serve 開始前に確定する
+    // （startup_recovery）。稼働後に列挙すると進行中の呼び出しを未完と誤認する。
     {
-        let rec = recorder.clone();
-        pending.lock().await.set.spawn(async move {
-            // 前環境の残滓は shutdown reason が分からない（None=unknown）
-            rec.recover_inflights(None).await;
-            rec.recover_spills().await;
-        });
+        let recovery = startup_recovery(recorder.clone());
+        pending.lock().await.set.spawn(recovery);
     }
     // 生存中も定期再送する。S3 の一時障害が回復した時点で
     // /tmp を空に戻し、溜まったままの状態を放置しない。
@@ -192,6 +186,22 @@ pub async fn run(argv: &[OsString]) -> u8 {
     server.abort();
     crate::proxy::drain_pending(&state, drain_budget).await;
     code
+}
+
+/// 起動時の回収処理を作る。先に inflight 残滓を変換する —
+/// 「応答なく環境が畳まれた呼び出し」を timeout レコード化してから、
+/// 溜まった spill 全件を再送する順。
+/// 回収する `.inflight` の一覧は、この関数を呼んだ時点で確定させる。
+/// 返す Future の中で列挙すると、serve 開始後に届いた初回 `/next` の
+/// ステージまで拾い、実行中の呼び出しを timeout と誤記録しうる。
+/// そのため serve を始める前に呼ぶ。
+pub fn startup_recovery(recorder: Arc<Recorder>) -> impl std::future::Future<Output = ()> + Send {
+    let leftovers = recorder.pending_inflights();
+    async move {
+        // 前環境の残滓は shutdown reason が分からない（None=unknown）
+        recorder.recover_inflight_paths(leftovers, None).await;
+        recorder.recover_spills().await;
+    }
 }
 
 /// 自分自身を Runtime API として listen する。
