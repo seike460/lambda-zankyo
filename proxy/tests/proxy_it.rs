@@ -588,6 +588,43 @@ async fn error_context_pii_is_scrubbed() {
 }
 
 #[tokio::test]
+async fn scrub_off_keeps_error_context_verbatim() {
+    // ZANKYO_SCRUB_MODE=off は errorMessage・stackTrace の自由テキストも書き換えない
+    let (api_addr, _api) = spawn_mock(runtime_api_handler()).await;
+    let (s3_addr, s3_hits) = spawn_mock(|_m, _p, _h, _b| ok_empty()).await;
+    let inflight = Arc::new(InFlight::new());
+    let (recorder, _spill) = recorder_with_env(&s3_addr, &[("ZANKYO_SCRUB_MODE", "off")]);
+    let proxy = spawn_proxy(&api_addr, inflight, recorder).await;
+
+    call(
+        &proxy,
+        Method::GET,
+        "/2018-06-01/runtime/invocation/next",
+        None,
+    )
+    .await;
+    let message = "duplicate email alice@example.com key AKIAIOSFODNN7EXAMPLE";
+    let trace = [
+        "Error: Bearer abcdefghijk123",
+        "    at handler (index.js:3:9)",
+    ];
+    call(
+        &proxy,
+        Method::POST,
+        "/2018-06-01/runtime/invocation/req-123/error",
+        Some(json!({"errorType": "E", "errorMessage": message, "stackTrace": trace})),
+    )
+    .await;
+    assert!(wait_for(2_000, || !captured(&s3_hits).is_empty()).await);
+    let (_, _, body) = captured(&s3_hits).remove(0);
+    let rec: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(rec["event"]["password"], "hunter2");
+    assert_eq!(rec["errorContext"]["errorMessage"], message);
+    assert_eq!(rec["errorContext"]["stackTrace"], trace.join("\n"));
+    assert_eq!(rec["scrubReport"]["patternsApplied"], json!([]));
+}
+
+#[tokio::test]
 async fn second_error_call_does_not_overwrite_record() {
     // 同一 requestId の /error 再試行は記録済みフラグで抑止される
     let (api_addr, _api) = spawn_mock(runtime_api_handler()).await;

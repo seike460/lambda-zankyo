@@ -215,7 +215,11 @@ impl Scrubber {
 
     /// 自由テキスト（errorMessage 等）に対するパターン置換。
     /// denylist 照合はフィールド名を持たないテキストには適用しない。
+    /// `ScrubMode::Off` では `scrub` と同じく何も置き換えない。
     pub fn scrub_text(&self, s: &str, report: &mut ScrubReport) -> String {
+        if self.mode == ScrubMode::Off {
+            return s.to_string();
+        }
         self.scrub_string(s, report)
     }
 
@@ -499,6 +503,16 @@ mod tests {
         s.scrub(&mut v, &mut r);
         assert_eq!(v["password"], "plain");
         assert_eq!(r.fields_redacted, 0);
+    }
+
+    #[test]
+    fn off_mode_leaves_free_text() {
+        // off は errorMessage 等の自由テキストにもパターン置換を掛けない
+        let s = Scrubber::new(ScrubMode::Off, &BTreeSet::new(), "seed");
+        let text = "alice@example.com AKIAIOSFODNN7EXAMPLE Authorization: Bearer abcdefghijk123";
+        let mut r = ScrubReport::default();
+        assert_eq!(s.scrub_text(text, &mut r), text);
+        assert!(r.patterns_applied.is_empty());
     }
 
     #[test]

@@ -217,7 +217,8 @@ s3://{ZANKYO_BUCKET}/zankyo/{function-name}/{yyyy}/{mm}/{dd}/{requestId}.json
 - **mask モード**は形状保持（`j***@e***.com`、`***1234`）で再現性を維持。
 - **hash モード**は HMAC-SHA256 擬似名化（鍵は関数名+バケット由来の
   決定的 seed。暗号化ではなく「同じ値→同じハッシュ」の再現性が目的）。
-- 無効化は `ZANKYO_SCRUB_MODE=off` の明示設定のみ。
+- 無効化は `ZANKYO_SCRUB_MODE=off` の明示設定のみ。off では自由テキストを含め、
+  何も置き換えません。
 
 ## セキュリティ
 

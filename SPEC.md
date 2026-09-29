@@ -78,7 +78,7 @@ s3://{ZANKYO_BUCKET}/zankyo/{function-name}/{yyyy}/{mm}/{dd}/{requestId}.json
 | `ZANKYO_KMS_KEY` | SSE-S3 | 暗号化キー |
 | `ZANKYO_SSM_PARAM` | なし | 設定 JSON を保持する SSM Parameter 名。指定時は env より優先 |
 | `ZANKYO_SCRUB_FIELDS` | 既定 denylist | 追加フィールド名（カンマ区切り） |
-| `ZANKYO_SCRUB_MODE` | `mask` | `mask` / `hash`（HMAC 擬似名化） |
+| `ZANKYO_SCRUB_MODE` | `mask` | `mask` / `hash`（HMAC 擬似名化）/ `off` |
 | `ZANKYO_MAX_EVENT_KB` | `256` | イベント保存の上限 |
 | `ZANKYO_DISABLED` | `false` | 緊急停止スイッチ |
 
