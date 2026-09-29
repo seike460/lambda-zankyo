@@ -720,6 +720,98 @@ async fn leftover_inflight_stage_becomes_timeout_record() {
     assert!(!spill_dir.join("zankyo-req-stuck.json").exists());
 }
 
+/// `up` が false の間は PutObject を 403 で拒否する S3 モック。
+/// 403 は SDK が再試行しないため、失敗が 1 回の PUT で確定する。
+async fn spawn_switchable_s3() -> (String, Captured, Arc<std::sync::atomic::AtomicBool>) {
+    let up = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let (addr, hits) = spawn_mock({
+        let up = up.clone();
+        move |_m, _p, _h, _b| {
+            if up.load(std::sync::atomic::Ordering::SeqCst) {
+                return ok_empty();
+            }
+            Response::builder()
+                .status(StatusCode::FORBIDDEN)
+                .body(boxed_full(Bytes::from_static(
+                    b"<Error><Code>AccessDenied</Code><Message>Access Denied</Message></Error>",
+                )))
+                .unwrap()
+        }
+    })
+    .await;
+    (addr, hits, up)
+}
+
+#[tokio::test]
+async fn inflight_stage_survives_when_spill_and_put_both_fail() {
+    // spill の書き込みと S3 PUT がともに失敗すると、.inflight ステージが
+    // timeout レコードの最後のコピーになる。消さずに残し、両方が回復した後の
+    // 回収で記録できること。
+    let (s3_addr, s3_hits, s3_up) = spawn_switchable_s3().await;
+    let (recorder, spill_dir) = recorder_to(&s3_addr);
+    recorder.stage_inflight(&Invocation {
+        request_id: "req-last".to_string(),
+        event: json!({"input": 1}),
+        encoding: EventEncoding::Json,
+        invoked_at: OffsetDateTime::now_utc(),
+    });
+    let stage = spill_dir.join("zankyo-req-last.inflight");
+    // spill の書き込み先をディレクトリで塞ぎ、rename を失敗させる
+    let spill_blocker = spill_dir.join("zankyo-req-last.json");
+    std::fs::create_dir(&spill_blocker).unwrap();
+    let record_puts = || {
+        captured(&s3_hits)
+            .into_iter()
+            .filter(|(m, p, _)| m == "PUT" && p.contains("req-last.json"))
+            .count()
+    };
+
+    recorder.recover_inflights(None).await;
+
+    assert_eq!(record_puts(), 1, "the PUT must have been attempted");
+    assert!(stage.exists(), "the last copy of the record must survive");
+
+    std::fs::remove_dir(&spill_blocker).unwrap();
+    s3_up.store(true, std::sync::atomic::Ordering::SeqCst);
+    recorder.recover_inflights(None).await;
+
+    assert_eq!(record_puts(), 2);
+    assert!(!stage.exists());
+    assert!(!spill_blocker.exists());
+}
+
+#[tokio::test]
+async fn unreadable_inflight_stage_is_kept_for_retry() {
+    // 読み取りの失敗は一時的でありうる。パースできないステージとは違い、
+    // 最後の証跡なので消さない。読めるようになった後の回収で記録する。
+    use std::os::unix::fs::PermissionsExt;
+    let (s3_addr, s3_hits) = spawn_mock(|_m, _p, _h, _b| ok_empty()).await;
+    let (recorder, spill_dir) = recorder_to(&s3_addr);
+    recorder.stage_inflight(&Invocation {
+        request_id: "req-locked".to_string(),
+        event: json!({"input": 1}),
+        encoding: EventEncoding::Json,
+        invoked_at: OffsetDateTime::now_utc(),
+    });
+    let stage = spill_dir.join("zankyo-req-locked.inflight");
+    std::fs::set_permissions(&stage, std::fs::Permissions::from_mode(0o000)).unwrap();
+    if std::fs::read(&stage).is_ok() {
+        // root はモードに関係なく読めるため、この条件を作れない
+        return;
+    }
+
+    recorder.recover_inflights(None).await;
+
+    assert!(stage.exists(), "an unreadable stage must not be deleted");
+    assert!(captured(&s3_hits).is_empty());
+
+    std::fs::set_permissions(&stage, std::fs::Permissions::from_mode(0o600)).unwrap();
+    recorder.recover_inflights(None).await;
+
+    assert_eq!(captured(&s3_hits).len(), 1);
+    assert!(!stage.exists());
+}
+
 #[tokio::test]
 async fn failed_put_keeps_spill_until_recovery_resends_it() {
     // S3 が PutObject を拒否する間は spill が残り、回復後の recover_spills が

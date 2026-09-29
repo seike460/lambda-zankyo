@@ -48,6 +48,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **proxy** — `ZANKYO_SCRUB_MODE=off` でも、`errorContext` の `errorMessage`・
   `stackTrace` などの自由テキストにはパターン検出のマスクが掛かっていた。
   説明どおり、off では自由テキストも原文のまま記録する
+- **proxy** — 残った `.inflight` ステージを timeout レコードへ変換するとき、
+  `/tmp` への spill と S3 への PUT がともに失敗しても、ステージを削除していた。
+  このステージはレコードの最後のコピーで、記録が失われていた。どちらかが
+  成功したときだけ削除し、両方失敗したら次の回収まで残す。読み取りに失敗した
+  ステージも、削除せずに残す
 - **cli** — replay・diff・redrive は、非 JSON イベント（`eventIsRawText` /
   `eventIsBase64`）のレコードを、invoke の前に exit 4 で止める。Lambda の
   Invoke API は JSON でない本文を `InvalidRequestContentException` で拒否する。

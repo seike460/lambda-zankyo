@@ -38,11 +38,14 @@ pub struct EventInput {
 }
 
 /// `stage_save` と `stage_timeout` が返す PUT 待ちジョブ。
-/// spill 済みのため、PUT が間に合わなくてもレコードは残る。
+/// spill 済みなら、PUT が間に合わなくてもレコードは残る。
 pub struct StagedRecord {
     pub request_id: String,
     pub key: String,
     pub body: Vec<u8>,
+    /// spill の書き込みに成功したか。false の間は、PUT が届くまで
+    /// 元の `.inflight` ステージがこのレコードの最後のコピーになる。
+    pub spilled: bool,
 }
 
 pub struct Recorder {
@@ -110,13 +113,15 @@ impl Recorder {
         // spill に残った時点でレコードは保全済み — inflight ステージを
         // 消してよい。spill 失敗時はステージを残し、init 時の
         // timeout 変換に救いを残す（PUT 成功でも消える）。
-        if self.spill(&request_id, &body) {
+        let spilled = self.spill(&request_id, &body);
+        if spilled {
             self.clear_inflight(&request_id);
         }
         Some(StagedRecord {
             request_id,
             key,
             body,
+            spilled,
         })
     }
 
@@ -170,27 +175,40 @@ impl Recorder {
     /// （前環境の残滓、reason 不明 → None）と external extension の
     /// SHUTDOWN フラッシュ（reason あり）から呼ぶ。
     /// 稼働中に呼ぶと進行中の呼び出しを未完と誤認するため禁。
-    /// 変換後はステージを消す — レコードは spill json として残るので
-    /// PUT に失敗しても recover_spills が拾う。
+    /// 変換後、レコードが spill か S3 に残った場合だけステージを消す。
+    /// spill 済みなら PUT に失敗しても recover_spills が拾う。
     pub async fn recover_inflights(&self, reason: Option<&str>) {
         let dir = Path::new(&self.cfg.spill_dir);
         for path in spill::pending_inflights(dir) {
-            let Some(inv) = std::fs::read(&path)
-                .ok()
-                .and_then(|b| Invocation::from_staged(&b))
-            else {
-                // 読めない・パースできないステージは復旧不能 — 消す
+            let body = match std::fs::read(&path) {
+                Ok(b) => b,
+                // 読めないのは一時的な失敗でありうる。最後の証跡なので消さず、
+                // 次回の回収に回す（完了して消えたステージは黙って飛ばす）
+                Err(e) => {
+                    if e.kind() != std::io::ErrorKind::NotFound {
+                        warn!(path = %path.display(), error = %e, "failed to read inflight stage; kept");
+                    }
+                    continue;
+                }
+            };
+            let Some(inv) = Invocation::from_staged(&body) else {
+                // パースできないステージは復旧不能 — 消す
                 if std::fs::remove_file(&path).is_ok() {
-                    warn!(path = %path.display(), "dropping unreadable inflight stage");
+                    warn!(path = %path.display(), "dropping malformed inflight stage");
                 }
                 continue;
             };
             if let Some(job) = self.stage_timeout(&inv, reason) {
-                self.commit_staged(&job).await;
-                // 変換済みのステージは消す（stage_timeout 側でも
-                // 正規名を消すが、ファイル名と埋め込み rid が
-                // 食い違う場合に備えて path 側も消す）
-                let _ = std::fs::remove_file(&path);
+                let saved = self.commit_staged(&job).await;
+                // spill か S3 に残ったときだけステージを消す（stage_timeout 側でも
+                // 正規名を消すが、ファイル名と埋め込み rid が食い違う場合に
+                // 備えて path 側も消す）。両方失敗したらステージが最後の
+                // コピーなので残し、次回の回収で変換し直す。
+                if job.spilled || saved {
+                    let _ = std::fs::remove_file(&path);
+                } else {
+                    warn!(request_id = %inv.request_id, "timed-out record not persisted; inflight stage kept");
+                }
             } else {
                 // 変換に失敗したステージは残し、次回 init の再試行に任せる
                 warn!(request_id = %inv.request_id, "failed to stage timed-out record");
@@ -200,8 +218,9 @@ impl Recorder {
 
     /// stage 済みのレコードを S3 へ PUT する（時間は flush budget で
     /// 打ち切る）。届いたら spill を消す（残すと次回 init で同一キーへ
-    /// 冗長な PUT が走る）。失敗しても spill は残るため記録は保全される。
-    pub async fn commit_staged(&self, job: &StagedRecord) {
+    /// 冗長な PUT が走る）。失敗しても spill 済みなら記録は保全される。
+    /// 戻り値は PUT が届いたか。
+    pub async fn commit_staged(&self, job: &StagedRecord) -> bool {
         match tokio::time::timeout(self.flush_budget(), self.put(&job.key, job.body.clone())).await
         {
             Ok(Ok(())) => {
@@ -212,12 +231,15 @@ impl Recorder {
                 // S3 に届いたのでローカルの証跡は全部消す
                 // （spill 失敗で残った .inflight もここで拾う）
                 self.clear_inflight(&job.request_id);
+                true
             }
             Ok(Err(e)) => {
-                warn!(request_id = %job.request_id, error = %e, "s3 put failed; spill kept")
+                warn!(request_id = %job.request_id, error = %e, "s3 put failed; spill kept");
+                false
             }
             Err(_) => {
-                warn!(request_id = %job.request_id, "s3 put exceeded budget; spill kept")
+                warn!(request_id = %job.request_id, "s3 put exceeded budget; spill kept");
+                false
             }
         }
     }
