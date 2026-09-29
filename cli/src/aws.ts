@@ -19,18 +19,23 @@ import type {
 } from './ports.ts';
 
 /**
- * 正の整数の環境変数を読む汎用ヘルパ。未設定・非数値・0 以下は
- * fallback に倒す（壊れた設定で CLI を止めない）。
+ * 正の整数の環境変数を読む汎用ヘルパ。未設定・非数値・0 以下・小数・
+ * `max` 超えは fallback に倒す（壊れた設定で CLI を止めない）。
+ * 小数は切り捨てない。0.5 が 0 になり、件数や上限を 0 にしてしまうため。
  */
-export const envNum = (name: string, fallback: number): number => {
+export const envNum = (name: string, fallback: number, max = Number.MAX_SAFE_INTEGER): number => {
   const v = process.env[name];
   if (v === undefined || v === '') return fallback;
   const n = Number(v);
-  return Number.isFinite(n) && n > 0 ? Math.floor(n) : fallback;
+  return Number.isSafeInteger(n) && n > 0 && n <= max ? n : fallback;
 };
 
-/** タイムアウト系 env の読み取り（envNum の別名。用途を名前で示す）。 */
-export const envTimeout = envNum;
+/** Node.js のタイマーが扱える上限（ms）。超えると 1ms で発火する。 */
+const TIMER_MAX_MS = 2_147_483_647;
+
+/** タイムアウト系 env の読み取り。タイマーの上限を超える値も fallback に倒す。 */
+export const envTimeout = (name: string, fallback: number): number =>
+  envNum(name, fallback, TIMER_MAX_MS);
 
 /**
  * 個別の send() 呼び出しへ渡す abort シグナル。

@@ -61,6 +61,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Invoke API は JSON でない本文を `InvalidRequestContentException` で拒否する。
   以前は原文のまま送り、README もそれで再送できると説明していた。
   fixture は従来どおり、保存された形のまま書き出す
+- **cli** — 数値の環境変数（`ZANKYO_LIST_PAGE_SIZE`・`ZANKYO_RECORD_MAX_MB` など）の
+  小数を切り捨てていた。`0.5` は 0 になり、`MaxKeys: 0` の一覧や、上限 0 バイトの
+  読み取りになっていた。正の整数でない値は、既定値を使う。タイムアウトの値が
+  Node.js のタイマーの上限（2147483647 ms）を超える場合も、既定値を使う。以前は
+  1 ms で打ち切られ、AWS API の呼び出しがすべて失敗していた
 - **cli** — `list --since` で古いページがすべて除外されると、
   `ZANKYO_LIST_MAX_PAGES` を超えてバケットを最後まで走査していた。
   走査の上限を、除外後の件数ではなくページ数で数える

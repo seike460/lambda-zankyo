@@ -8,6 +8,15 @@ function obj(key: string, lastModified?: string) {
   return { Key: key, LastModified: lastModified ? new Date(lastModified) : undefined };
 }
 
+/** 差し替えた env を元の値へ戻す。 */
+function restoreEnv(name: string, saved: string | undefined): void {
+  if (saved === undefined) {
+    delete process.env[name];
+  } else {
+    process.env[name] = saved;
+  }
+}
+
 const VALID_RECORD = JSON.stringify({
   version: '1',
   functionName: 'fn',
@@ -112,6 +121,18 @@ describe('listRecordKeys', () => {
     assert.deepEqual(refs, []);
     assert.equal(s3.listInputs.length, 2);
     assert.ok(warnings.some((w) => w.includes('listing truncated after 2 pages')));
+  });
+
+  it('uses the default page size when ZANKYO_LIST_PAGE_SIZE is not a positive integer', async (t) => {
+    const saved = process.env.ZANKYO_LIST_PAGE_SIZE;
+    t.after(() => restoreEnv('ZANKYO_LIST_PAGE_SIZE', saved));
+    // 切り捨てると 0.5 は MaxKeys: 0 になり、S3 から 1 件も取れない
+    for (const v of ['0.5', '1.5']) {
+      process.env.ZANKYO_LIST_PAGE_SIZE = v;
+      const s3 = fakeS3([{ Contents: [] }]);
+      await listRecordKeys(s3, 'bkt', {});
+      assert.equal(s3.listInputs[0]?.MaxKeys, 200, v);
+    }
   });
 
   it('filters by since', async () => {
@@ -220,6 +241,24 @@ describe('fetchRecord', () => {
       (e: unknown) => e instanceof CliError && e.exitCode === 4,
     );
     assert.equal(read, false);
+  });
+
+  it('uses the default size limit when ZANKYO_RECORD_MAX_MB is not a positive integer', async (t) => {
+    const saved = process.env.ZANKYO_RECORD_MAX_MB;
+    t.after(() => restoreEnv('ZANKYO_RECORD_MAX_MB', saved));
+    // 切り捨てると 0.5 は上限 0 バイトになり、どのレコードも読めない
+    process.env.ZANKYO_RECORD_MAX_MB = '0.5';
+    const s3 = {
+      ...fakeS3([]),
+      async getObject() {
+        return {
+          ContentLength: VALID_RECORD.length,
+          Body: { transformToString: async () => VALID_RECORD },
+        };
+      },
+    };
+    const rec = await fetchRecord(s3, 'bkt', 'zankyo/fn/2026/09/22/r1.json');
+    assert.equal(rec.requestId, 'r1');
   });
 
   it('throws on schema mismatch', async () => {

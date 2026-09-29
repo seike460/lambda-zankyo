@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import { LambdaClient } from '@aws-sdk/client-lambda';
 import { S3Client } from '@aws-sdk/client-s3';
-import { envTimeout, makeClients } from '../src/aws.ts';
+import { envNum, envTimeout, makeClients } from '../src/aws.ts';
 
 describe('envTimeout', () => {
   it('returns fallback when unset or empty', () => {
@@ -20,6 +20,28 @@ describe('envTimeout', () => {
     process.env.ZANKYO_TEST_TMO = '-5';
     assert.equal(envTimeout('ZANKYO_TEST_TMO', 100), 100);
     delete process.env.ZANKYO_TEST_TMO;
+  });
+
+  it('falls back when the value does not fit a Node.js timer', () => {
+    // タイマーは 2^31-1 ms を超えると 1ms で発火し、全呼び出しを打ち切る
+    process.env.ZANKYO_TEST_TMO = '2147483648';
+    assert.equal(envTimeout('ZANKYO_TEST_TMO', 100), 100);
+    process.env.ZANKYO_TEST_TMO = '2147483647';
+    assert.equal(envTimeout('ZANKYO_TEST_TMO', 100), 2147483647);
+    delete process.env.ZANKYO_TEST_TMO;
+  });
+});
+
+describe('envNum', () => {
+  it('falls back unless the value is a positive integer', () => {
+    // 切り捨てると 0.5 は 0 になり、1.5 は指定と違う 1 になる
+    for (const v of ['0.5', '1.5', '0', '-1', 'NaN', 'Infinity']) {
+      process.env.ZANKYO_TEST_NUM = v;
+      assert.equal(envNum('ZANKYO_TEST_NUM', 7), 7, v);
+    }
+    process.env.ZANKYO_TEST_NUM = '12';
+    assert.equal(envNum('ZANKYO_TEST_NUM', 7), 12);
+    delete process.env.ZANKYO_TEST_NUM;
   });
 });
 
