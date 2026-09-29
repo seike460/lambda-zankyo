@@ -121,6 +121,10 @@ async fn handle(req: Request<Incoming>, st: &ProxyState) -> Response<BoxedBody> 
         .to_string();
     let path = parts.uri.path().to_string();
     let body_limit = st.cfg.max_body_kb.saturating_mul(1024);
+    // ランタイムから届くボディの読み取りには、時間の上限を付けない。送り手は
+    // この関数自身のランタイムで、止まって待たされるのはその要求だけになる
+    // （関数のタイムアウトが上限になる）。時間で切ると、時間をかけて書き出す
+    // 応答（RESPONSE_STREAM）を途中で切ってしまう。
     let body_bytes = match collect_bounded(body, body_limit).await {
         Ok(b) => b,
         Err(CollectError::TooLarge) => {

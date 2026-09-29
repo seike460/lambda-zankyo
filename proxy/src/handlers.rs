@@ -40,7 +40,8 @@ pub(crate) async fn handle_next(
     body: Bytes,
     body_limit: usize,
 ) -> Response<BoxedBody> {
-    // /next の転送はランタイムのロングポーリングを壊さないよう無制限に待つ
+    // /next の転送はランタイムのロングポーリングを壊さないよう、
+    // 応答ヘッダーまでは無制限に待つ
     let resp = match forward_or_502(st, method, pq, headers, body, None, "invocation/next").await {
         Ok(r) => r,
         Err(r) => return *r,
@@ -48,14 +49,24 @@ pub(crate) async fn handle_next(
     let (mut parts, resp_body) = resp.into_parts();
     // 上流の応答ヘッダにも hop-by-hop 規則を適用してからランタイムへ返す
     strip_hop_by_hop(&mut parts.headers);
-    let bytes = match collect_bounded(resp_body, body_limit).await {
-        Ok(b) => b,
-        Err(CollectError::TooLarge) => {
+    // ヘッダーの後のボディは、ほかの経路の転送と同じ上限時間で打ち切る。
+    // ヘッダーだけ返してボディを閉じない上流に、/next を止められないように
+    let read = tokio::time::timeout(
+        std::time::Duration::from_millis(st.cfg.forward_timeout_ms),
+        collect_bounded(resp_body, body_limit),
+    );
+    let bytes = match read.await {
+        Ok(Ok(b)) => b,
+        Ok(Err(CollectError::TooLarge)) => {
             warn!("next response body exceeded limit; forwarding is skipped");
             return plain(StatusCode::BAD_GATEWAY, "zankyo: upstream body too large");
         }
-        Err(CollectError::Read(e)) => {
+        Ok(Err(CollectError::Read(e))) => {
             warn!(error = %e, "failed to read next response");
+            return plain(StatusCode::BAD_GATEWAY, "zankyo: upstream body error");
+        }
+        Err(_) => {
+            warn!("next response body timed out");
             return plain(StatusCode::BAD_GATEWAY, "zankyo: upstream body error");
         }
     };

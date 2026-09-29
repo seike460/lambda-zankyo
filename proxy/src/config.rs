@@ -35,8 +35,9 @@ pub const DEFAULT_EXT_MAX_POLL_FAILURES: u32 = 120;
 /// SSM get_parameter の上限時間（ms）。取得は子の起動と extension 登録の
 /// 前に待つため、Lambda の Init 上限（10 秒）を使い切らない短めの既定にする。
 pub const DEFAULT_SSM_TIMEOUT_MS: u64 = 2_000;
-/// `/next` 以外の上流転送の上限時間（ms）。localhost 上の Runtime API が
-/// 60 秒応えない状況は実行環境の異常とみなす。
+/// 上流転送の上限時間（ms）。localhost 上の Runtime API が
+/// 60 秒応えない状況は実行環境の異常とみなす。`/next` はロングポーリングなので
+/// 応答ヘッダーまでは無制限に待ち、その後のボディの読み取りにだけ使う。
 pub const DEFAULT_FORWARD_TIMEOUT_MS: u64 = 60_000;
 /// spill 再送の間隔（ms）。起動時だけでなく生存中も定期的に
 /// /tmp を空に戻し、S3 の一時障害からの回復を早める。
@@ -93,7 +94,7 @@ pub struct Config {
     pub ext_max_poll_failures: u32,
     /// SSM get_parameter の上限時間（ms）。
     pub ssm_timeout_ms: u64,
-    /// `/next` 以外の上流転送の上限時間（ms）。
+    /// 上流転送の上限時間（ms）。`/next` では応答ボディの読み取りにだけ使う。
     pub forward_timeout_ms: u64,
     pub disabled: bool,
 }

@@ -1543,6 +1543,31 @@ async fn agents_keep_polling_when_event_body_stalls() {
 }
 
 #[tokio::test]
+async fn stalled_next_body_is_cut_by_forward_timeout() {
+    // 上流の /next が応答ヘッダーだけ返してボディを閉じなくても、proxy は
+    // ZANKYO_FORWARD_TIMEOUT_MS で読み取りを打ち切り、ランタイムへ 502 を返す
+    let (api_addr, _api) = spawn_mock(|_m, _p, _h, _b| stalled(StatusCode::OK)).await;
+    let (s3_addr, _s3) = spawn_mock(|_m, _p, _h, _b| ok_empty()).await;
+    let inflight = Arc::new(InFlight::new());
+    let (recorder, _spill) = recorder_with_env(&s3_addr, &[("ZANKYO_FORWARD_TIMEOUT_MS", "200")]);
+    let proxy = spawn_proxy(&api_addr, inflight.clone(), recorder).await;
+
+    let (status, _) = tokio::time::timeout(
+        Duration::from_secs(5),
+        call(
+            &proxy,
+            Method::GET,
+            "/2018-06-01/runtime/invocation/next",
+            None,
+        ),
+    )
+    .await
+    .expect("/next must not hang on a stalled upstream body");
+    assert_eq!(status, StatusCode::BAD_GATEWAY);
+    assert_eq!(inflight.len(), 0);
+}
+
+#[tokio::test]
 async fn oversized_body_is_rejected_without_forwarding() {
     let (api_addr, api_hits) = spawn_mock(|_m, _p, _h, _b| ok_empty()).await;
     let (s3_addr, _s3) = spawn_mock(|_m, _p, _h, _b| ok_empty()).await;

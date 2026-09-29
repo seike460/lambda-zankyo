@@ -80,6 +80,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   再試行も `SHUTDOWN` の検知もできなくなっていた。ボディの読み取りは、ヘッダーの後
   1 秒で打ち切る（登録では、残り時間がそれより短ければ残り時間で打ち切る）。
   打ち切った応答は、ほかの一時的な失敗と同じく再試行する
+- **proxy** — `/next` の応答ボディを、時間の上限なしに読んでいた。Runtime API が
+  ヘッダーだけ返してボディを閉じないと、ランタイムの `/next` が止まったままになる。
+  ヘッダーの後のボディは `ZANKYO_FORWARD_TIMEOUT_MS` で打ち切り、ランタイムへ
+  502 を返す。ヘッダーまでは従来どおり無制限に待つ（ロングポーリング）
 - **cli** — replay・diff・redrive は、非 JSON イベント（`eventIsRawText` /
   `eventIsBase64`）のレコードを、invoke の前に exit 4 で止める。Lambda の
   Invoke API は JSON でない本文を `InvalidRequestContentException` で拒否する。

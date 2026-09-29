@@ -167,7 +167,7 @@ CDK construct はこの権限を付けないので、別に付与してくださ
 | `ZANKYO_EXT_RETRY_MS` | `500` | Extensions API（登録・event/next）が失敗したときの再試行間隔 |
 | `ZANKYO_EXT_MAX_POLL_FAILURES` | `120` | Runtime API に接続できない状態が続いたときの再試行回数の上限（超過で agent が終了する）。応答が返る失敗は数えない |
 | `ZANKYO_SSM_TIMEOUT_MS` | `2000` | SSM get_parameter の上限時間。Lambda の Init 上限（10 秒）に含まれる |
-| `ZANKYO_FORWARD_TIMEOUT_MS` | `60000` | `/next` 以外の上流転送の上限時間 |
+| `ZANKYO_FORWARD_TIMEOUT_MS` | `60000` | 上流転送の上限時間。`/next` は応答ヘッダーまで無制限に待ち（ロングポーリング）、応答ボディの読み取りにだけ使う |
 | `ZANKYO_DISABLED` | `false` | 緊急停止スイッチ（passthrough） |
 
 ※「必須」は記録を有効にする条件です。未設定でも関数は正常に動きます。
