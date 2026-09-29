@@ -331,4 +331,13 @@ MIT
 
 Layer の zip は `share/licenses/zankyo/`（Lambda 上では `/opt/share/licenses/zankyo/`）に、
 この LICENSE と `THIRD_PARTY_LICENSES` を含みます。`THIRD_PARTY_LICENSES` は、
-バイナリに入る Rust crate のライセンスと著作権表示の原文です。
+バイナリに静的リンクされるもののライセンスと著作権表示の原文です。
+対象は、Rust の crate と、Rust の musl ターゲットがリンクするツールチェーンの部品です。
+部品は、Rust 標準ライブラリ（compiler_builtins を含む）・musl libc・
+LLVM の libunwind と crtbegin/crtend です。
+
+部品の原文は `scripts/licenses/` にあります。写した元の URL と版は、
+`scripts/build-layer.mts` の `TOOLCHAIN_NOTICES` にあります。
+版は、`rust-toolchain.toml` の Rust 1.98.1 と、その Rust が musl ターゲットに同梱する
+musl 1.2.5・LLVM 22.1.8 です。Rust を上げるときは、部品の原文も更新します。
+rustc の版が違うと、`scripts/build-layer.mts` は梱包を止めます。

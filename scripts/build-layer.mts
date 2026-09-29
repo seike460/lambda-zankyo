@@ -6,7 +6,7 @@
 //! `BUILDER="cargo zigbuild"` のように `cargo build` 相当の
 //! コマンド行を差し替えられる。
 //! `SKIP_BUILD=1` でビルドを省き target/ 済みのバイナリだけ梱包する。
-//! 梱包でも THIRD_PARTY_LICENSES の生成に `cargo metadata` を使う。
+//! 梱包でも THIRD_PARTY_LICENSES の生成に `cargo metadata` と `rustc --version` を使う。
 //! Node 24+ は型注釈を strip してそのまま実行する（ビルド不要）。
 
 import { execFileSync, spawnSync } from 'node:child_process';
@@ -66,12 +66,78 @@ const LICENSE_FALLBACK: Record<string, string> = {
   vsimd: 'scripts/licenses/nugine-simd-LICENSE',
 };
 
+/// crate のほかに、musl ターゲットのバイナリへ静的リンクされるツールチェーンの部品。
+/// Rust 標準ライブラリと、その Rust が *-unknown-linux-musl に self-contained として
+/// 同梱する musl libc（libc.a と crt*.o）と、LLVM の libunwind.a・crtbegin/crtend。
+/// cross と cargo build の経路（CI とリリースの手順）では、rustc がこれらをリンクする。
+/// cargo zigbuild は crt と libc を zig が同梱する musl に置き換えるため、版が合わないことがある。
+/// 本文は source の版から scripts/licenses/ に写した。musl と LLVM の版は、Rust の
+/// src/ci/docker/scripts/musl-toolchain.sh と src/llvm-project（サブモジュール）が示す。
+/// rustc の版が RUST_VERSION と違えば梱包を止める。Rust を上げたら、ここと本文を見直す。
+const RUST_VERSION = '1.98.1';
+const MUSL_VERSION = '1.2.5';
+const LLVM_VERSION = '22.1.8';
+const LLVM_COMMIT = '52ed14fcd56afc30f9cccd8ca8ce237c2eef7e04';
+interface Notice {
+  /// scripts/licenses/ からの相対パス
+  path: string;
+  /// 写した元（版を固定した URL）
+  source: string;
+}
+const rust = (path: string): Notice => ({
+  path: `rust-${RUST_VERSION}/${path}`,
+  source: `https://github.com/rust-lang/rust/blob/${RUST_VERSION}/${path}`,
+});
+const llvm = (path: string): Notice => ({
+  path: `llvm-${LLVM_VERSION}/${path}`,
+  source: `https://github.com/rust-lang/llvm-project/blob/${LLVM_COMMIT}/${path}`,
+});
+const TOOLCHAIN_NOTICES: { component: string; license: string; notices: Notice[] }[] = [
+  {
+    component: `Rust standard library ${RUST_VERSION}`,
+    // Unicode-3.0 は core の Unicode データ（library/core/src/unicode/unicode_data.rs）
+    license: '(MIT OR Apache-2.0) AND Unicode-3.0',
+    notices: [
+      rust('COPYRIGHT'),
+      rust('LICENSE-APACHE'),
+      rust('LICENSE-MIT'),
+      rust('LICENSES/Unicode-3.0.txt'),
+    ],
+  },
+  {
+    component: `Rust ${RUST_VERSION} compiler_builtins`,
+    license: 'MIT AND Apache-2.0 WITH LLVM-exception',
+    notices: [rust('library/compiler-builtins/LICENSE.txt')],
+  },
+  {
+    component: `musl libc ${MUSL_VERSION}`,
+    license: 'MIT',
+    notices: [
+      {
+        path: `musl-${MUSL_VERSION}/COPYRIGHT`,
+        source: `https://git.musl-libc.org/cgit/musl/tree/COPYRIGHT?h=v${MUSL_VERSION}`,
+      },
+    ],
+  },
+  {
+    component: `LLVM ${LLVM_VERSION} libunwind`,
+    license: 'Apache-2.0 WITH LLVM-exception',
+    notices: [llvm('libunwind/LICENSE.TXT')],
+  },
+  {
+    component: `LLVM ${LLVM_VERSION} compiler-rt crtbegin/crtend`,
+    license: 'Apache-2.0 WITH LLVM-exception',
+    notices: [llvm('compiler-rt/LICENSE.TXT')],
+  },
+];
+
 const byCodePoint = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0);
 
 /**
- * バイナリに入る crate の、ライセンスと著作権表示の原文を 1 つのテキストにまとめる。
- * 対象は zankyo から normal 依存でたどれる crate（build-/dev-dependencies は配布物に入らない）。
- * 同じ本文は 1 回だけ載せ、見出しにその本文を持つ crate をすべて並べる。
+ * バイナリに入る crate とツールチェーンの部品の、ライセンスと著作権表示の原文を
+ * 1 つのテキストにまとめる。crate は zankyo から normal 依存でたどれるもの
+ * （build-/dev-dependencies は配布物に入らない）。部品は TOOLCHAIN_NOTICES。
+ * 同じ本文は 1 回だけ載せ、見出しにその本文を持つものをすべて並べる。
  */
 function thirdPartyLicenses(target: string): string {
   const meta: CargoMetadata = JSON.parse(
@@ -101,6 +167,12 @@ function thirdPartyLicenses(target: string): string {
     .sort((a, b) => byCodePoint(a.name, b.name) || byCodePoint(a.version, b.version));
 
   const headingsByText = new Map<string, string[]>();
+  const add = (heading: string, path: string) => {
+    const text = readFileSync(path, 'utf8').replace(/\r\n?/g, '\n').trimEnd();
+    const headings = headingsByText.get(text);
+    if (headings) headings.push(heading);
+    else headingsByText.set(text, [heading]);
+  };
   for (const c of crates) {
     const dir = dirname(c.manifest_path);
     const files = new Set(
@@ -118,11 +190,12 @@ function thirdPartyLicenses(target: string): string {
       sources.push({ label: `LICENSE from ${c.repository}`, path: join(ROOT, fallback) });
     }
     for (const { label, path } of sources) {
-      const text = readFileSync(path, 'utf8').replace(/\r\n?/g, '\n').trimEnd();
-      const heading = `${c.name} ${c.version}: ${label}`;
-      const headings = headingsByText.get(text);
-      if (headings) headings.push(heading);
-      else headingsByText.set(text, [heading]);
+      add(`${c.name} ${c.version}: ${label}`, path);
+    }
+  }
+  for (const { component, notices } of TOOLCHAIN_NOTICES) {
+    for (const { path, source } of notices) {
+      add(`${component}: ${source}`, join(ROOT, 'scripts/licenses', path));
     }
   }
 
@@ -131,10 +204,19 @@ function thirdPartyLicenses(target: string): string {
     `Third-party licenses for zankyo ${root.version} (${target})`,
     '',
     'The zankyo binary in this layer is built from the Rust crates listed below.',
-    'This file reproduces the license and notice files that each crate ships.',
-    'A text shared by several crates appears once, under all of their names.',
+    `It also statically links the parts of the Rust ${RUST_VERSION} toolchain listed after`,
+    'them: the Rust standard library, and the musl libc and LLVM runtime code that',
+    'Rust ships for the musl targets.',
+    'This file reproduces the license and notice files of each of them.',
+    'A text shared by several of them appears once, under all of their names.',
+    'Per-file notices of the Rust standard library are in COPYRIGHT-library.html,',
+    'which ships in share/doc/rust/ of the Rust toolchain.',
     '',
+    'Rust crates:',
     ...crates.map((c) => `  ${c.name} ${c.version} (${c.license ?? c.license_file})`),
+    '',
+    'Rust toolchain parts:',
+    ...TOOLCHAIN_NOTICES.map((t) => `  ${t.component} (${t.license})`),
     ...[...headingsByText].flatMap(([text, headings]) => ['', rule, ...headings, rule, '', text]),
     '',
   ].join('\n');
@@ -143,6 +225,14 @@ function thirdPartyLicenses(target: string): string {
 const arches = (process.env.ARCHES ?? 'x86_64 aarch64').split(/\s+/).filter(Boolean);
 if (arches.length === 0) {
   console.error('ARCHES is empty; nothing to build');
+  process.exit(1);
+}
+// TOOLCHAIN_NOTICES は RUST_VERSION の Rust の部品を表示する。rustc の版が違えば、ビルドの前に止める。
+const rustc = execFileSync('rustc', ['--version'], { cwd: ROOT, encoding: 'utf8' }).trim();
+if (rustc.split(' ')[1] !== RUST_VERSION) {
+  console.error(
+    `${rustc} is not Rust ${RUST_VERSION}; update TOOLCHAIN_NOTICES and scripts/licenses/`,
+  );
   process.exit(1);
 }
 const outDirEnv = process.env.OUT_DIR ?? 'dist/layer';

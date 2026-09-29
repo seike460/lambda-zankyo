@@ -133,21 +133,43 @@ jobs:
           SKIP_BUILD: '1'
         run: node scripts/build-layer.mts
       # エントリの並びと mode（実行ファイルは 755、ライセンス表示は 644）と CRC を確かめる。
+      # THIRD_PARTY_LICENSES は、crate でない静的リンクの部品（Rust 標準ライブラリ・musl libc・
+      # LLVM の libunwind と crtbegin/crtend）の表示も、scripts/licenses/ の原文のまま含むこと。
       # bin/zankyo は arch どおりの ELF で、動的リンカ（PT_INTERP）を要求しない静的リンクであること
       - name: check the layer zips
         run: |
+          shopt -s failglob
           expected=$(printf '%s\n' \
             '-rwxr-xr-x bin/zankyo' \
             '-rwxr-xr-x extensions/zankyo' \
             '-rwxr-xr-x zankyo-wrapper' \
             '-rw-r--r-- share/licenses/zankyo/LICENSE' \
             '-rw-r--r-- share/licenses/zankyo/THIRD_PARTY_LICENSES')
+          notices=(
+            scripts/licenses/rust-*/COPYRIGHT
+            scripts/licenses/rust-*/LICENSE-APACHE
+            scripts/licenses/rust-*/LICENSE-MIT
+            scripts/licenses/rust-*/LICENSES/Unicode-3.0.txt
+            scripts/licenses/rust-*/library/compiler-builtins/LICENSE.txt
+            scripts/licenses/musl-*/COPYRIGHT
+            scripts/licenses/llvm-*/libunwind/LICENSE.TXT
+            scripts/licenses/llvm-*/compiler-rt/LICENSE.TXT)
           for pair in x86_64:X86-64 aarch64:AArch64; do
             arch=${pair%%:*} machine=${pair#*:}
             z=dist/layer/zankyo-$arch.zip
             unzip -tq "$z"
             diff <(echo "$expected") <(unzip -Z "$z" | awk '$3 == "unx" { print $1, $NF }')
             unzip -q "$z" -d "$RUNNER_TEMP/layer-$arch"
+            node -e '
+              const { readFileSync } = require("node:fs");
+              const [file, ...notices] = process.argv.slice(1);
+              const text = readFileSync(file, "utf8");
+              const missing = notices.filter((n) => !text.includes(readFileSync(n, "utf8").trimEnd()));
+              if (missing.length > 0) {
+                console.error(file + " lacks:\n  " + missing.join("\n  "));
+                process.exit(1);
+              }
+            ' "$RUNNER_TEMP/layer-$arch/share/licenses/zankyo/THIRD_PARTY_LICENSES" "${notices[@]}"
             bin=$RUNNER_TEMP/layer-$arch/bin/zankyo
             if ! readelf -h "$bin" | grep -q "Machine: .*$machine\$"; then
               echo "$z: bin/zankyo is not $machine" >&2
