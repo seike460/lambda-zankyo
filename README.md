@@ -265,7 +265,7 @@ cli/         # TypeScript CLI (node --test、AWS SDK v3、引数は node:util)
 construct/   # CDK construct (aws-cdk-lib v2、SAR 参照 + bucket/IAM 配線)
 examples/    # デモスタック（handler error / timeout / init error）
 sar/         # SAR 公開用 SAM テンプレート
-scripts/     # build-layer.mts（musl 静的バイナリ → layer zip）、check-versions.mts（版の一致）
+scripts/     # build-layer.mts（musl 静的バイナリ → layer zip）とそのテスト、check-versions.mts（版の一致）
 SPEC.md      # 仕様書（決定事項・スコープ外・Open Questions）
 RELEASING.md # リリースの手順（SAR・npm・GitHub Release）
 ```
@@ -285,7 +285,9 @@ cargo fmt --all -- --check && cargo clippy --locked --workspace --all-targets --
   （例: `s3.Bucket` を `s3.IBucket` に代入できない）。
   テストは `node --test`（外部サービス不要）。
   `scripts/*.mts` は Node が型を除去して直接実行します。型は `pnpm typecheck` が
-  `scripts/tsconfig.json` で検査します。
+  `scripts/tsconfig.json` で検査します。`scripts/*.test.mts` も `pnpm test` が実行します。
+  build-layer.mts のテストは、rustc と cargo を偽物に差し替えます。
+  梱包の中身を確かめるため、`zip` と `unzip` は本物を使います。
 - Rust: ロジック（scrub/record/config/inflight）は IO と分離した
   ユニットテスト。proxy/extension 経路はモック Runtime API/S3 への
   統合テスト（`proxy/tests/`）で検証。
