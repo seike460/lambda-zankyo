@@ -333,6 +333,8 @@ Layer の zip は `share/licenses/zankyo/`（Lambda 上では `/opt/share/licens
 この LICENSE と `THIRD_PARTY_LICENSES`・`COPYRIGHT-library.html` を含みます。
 `THIRD_PARTY_LICENSES` は、バイナリに静的リンクされるもののライセンスと著作権表示の原文です。
 対象は、Rust の crate と、Rust の musl ターゲットがリンクするツールチェーンの部品です。
+crate の表示には、crate のサブディレクトリにあるものも含めます。crate が別のプロジェクトから
+取り込んだコード（ring の once_cell や fiat-crypto など）の表示です。
 部品は、Rust 標準ライブラリ（compiler_builtins を含む）・musl libc・
 LLVM の libunwind と crtbegin/crtend です。
 `COPYRIGHT-library.html` は、Rust 標準ライブラリのファイルごとの著作権表示と、

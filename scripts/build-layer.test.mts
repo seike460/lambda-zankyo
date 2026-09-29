@@ -1,11 +1,12 @@
-//! build-layer.mts が、ビルドと梱包の前に止まる場合を確かめる。
+//! build-layer.mts が、ビルドと梱包の前に止まる場合と、梱包（SKIP_BUILD=1）の中身を確かめる。
 //! rustc・cargo・cross は PATH の先頭に置いた偽物に差し替え、本物は起動しない。
-//! 偽の cargo と cross は、起動されたことを記録して失敗する。
+//! 偽の cargo と cross は、起動されたことを記録して失敗する（cargo metadata は除く）。
 
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import {
   chmodSync,
+  cpSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -14,10 +15,11 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { after, describe, it } from 'node:test';
 import { fileURLToPath } from 'node:url';
 
+const REPO = fileURLToPath(new URL('..', import.meta.url));
 const SCRIPT = fileURLToPath(new URL('./build-layer.mts', import.meta.url));
 const constant = (name: string) => {
   const value = new RegExp(`^const ${name} = '([^']+)';$`, 'm').exec(
@@ -40,10 +42,12 @@ interface Toolchain {
   llvm?: string;
   /// sysroot の share/doc/rust/COPYRIGHT-library.html。null なら置かない
   libraryNotice?: string | null;
+  /// `cargo metadata` が出力する JSON のファイル。無ければ cargo metadata も失敗する
+  metadata?: string;
 }
 
-/// 偽の rustc・cargo・cross を PATH に置いて build-layer.mts を実行する。
-function run(env: Record<string, string>, toolchain: Toolchain = {}) {
+/// 偽の rustc・cargo・cross を PATH に置いて build-layer.mts（既定はこのリポジトリのもの）を実行する。
+function run(env: Record<string, string>, toolchain: Toolchain = {}, script = SCRIPT) {
   const dir = mkdtempSync(join(work, 'run-'));
   const bin = join(dir, 'bin');
   const sysroot = join(dir, 'sysroot');
@@ -67,7 +71,10 @@ function run(env: Record<string, string>, toolchain: Toolchain = {}) {
       '  *) exit 2 ;;',
       'esac',
     ].join('\n'),
-    cargo: `echo "cargo $*" >> '${started}'; exit 1`,
+    cargo: [
+      ...(toolchain.metadata ? [`[ "$1" = metadata ] && exec cat '${toolchain.metadata}'`] : []),
+      `echo "cargo $*" >> '${started}'; exit 1`,
+    ].join('\n'),
     cross: `echo "cross $*" >> '${started}'; exit 1`,
   };
   for (const [name, body] of Object.entries(tools)) {
@@ -78,7 +85,7 @@ function run(env: Record<string, string>, toolchain: Toolchain = {}) {
   const inherited = Object.fromEntries(
     Object.entries(process.env).filter(([key]) => !['BUILDER', 'SKIP_BUILD'].includes(key)),
   );
-  const r = spawnSync(process.execPath, [SCRIPT], {
+  const r = spawnSync(process.execPath, [script], {
     env: {
       ...inherited,
       PATH: `${bin}:${process.env.PATH}`,
@@ -91,6 +98,7 @@ function run(env: Record<string, string>, toolchain: Toolchain = {}) {
   return {
     status: r.status,
     stderr: r.stderr,
+    outDir: out,
     outDirCreated: existsSync(out),
     started: existsSync(started) ? readFileSync(started, 'utf8') : '',
   };
@@ -158,5 +166,79 @@ describe('build-layer.mts', () => {
       assert.equal(r.started, '');
       assert.equal(r.outDirCreated, false);
     }
+  });
+});
+
+describe('build-layer.mts packaging (SKIP_BUILD=1)', () => {
+  it('packs COPYRIGHT-library.html, and the license files in the subdirectories of a crate', () => {
+    // 梱包に要るファイルだけを持つリポジトリの写しと、ビルド済みの体のバイナリを作る
+    const root = mkdtempSync(join(work, 'repo-'));
+    for (const path of ['scripts/build-layer.mts', 'scripts/licenses', 'LICENSE', 'proxy/layer']) {
+      cpSync(join(REPO, path), join(root, path), { recursive: true });
+    }
+    const binary = join(root, 'target/x86_64-unknown-linux-musl/release/zankyo');
+    mkdirSync(dirname(binary), { recursive: true });
+    writeFileSync(binary, 'zankyo');
+    // 別のプロジェクトのコードを取り込み、その表示をサブディレクトリに持つ crate
+    const crate = join(root, 'registry/vendoring-1.0.0');
+    const files: Record<string, string> = {
+      'LICENSE-MIT': 'vendoring: its own license',
+      'src/vendored/LICENSE': 'vendored code: the license of the project it came from',
+      'tests/data/LICENSE': 'test data: not built into the binary',
+    };
+    for (const [path, text] of Object.entries(files)) {
+      mkdirSync(dirname(join(crate, path)), { recursive: true });
+      writeFileSync(join(crate, path), text);
+    }
+    const zankyo = 'path+file:///zankyo#0.1.0';
+    const vendoring = 'registry+https://github.com/rust-lang/crates.io-index#vendoring@1.0.0';
+    const pkg = (id: string, name: string, dir: string) => ({
+      id,
+      name,
+      version: id.endsWith('1.0.0') ? '1.0.0' : '0.1.0',
+      license: 'MIT',
+      license_file: null,
+      repository: null,
+      manifest_path: join(dir, 'Cargo.toml'),
+    });
+    const metadata = join(root, 'metadata.json');
+    writeFileSync(
+      metadata,
+      JSON.stringify({
+        packages: [pkg(zankyo, 'zankyo', join(root, 'proxy')), pkg(vendoring, 'vendoring', crate)],
+        workspace_members: [zankyo],
+        resolve: {
+          nodes: [
+            { id: zankyo, deps: [{ pkg: vendoring, dep_kinds: [{ kind: null }] }] },
+            { id: vendoring, deps: [] },
+          ],
+        },
+      }),
+    );
+
+    const r = run({ SKIP_BUILD: '1' }, { metadata }, join(root, 'scripts/build-layer.mts'));
+    assert.equal(r.status, 0, r.stderr);
+    const zip = join(r.outDir, 'zankyo-x86_64.zip');
+    const entry = (path: string) =>
+      execFileSync('unzip', ['-p', zip, path], { maxBuffer: 64 * 1024 * 1024 });
+    assert.deepEqual(execFileSync('unzip', ['-Z1', zip], { encoding: 'utf8' }).split('\n'), [
+      'bin/zankyo',
+      'extensions/zankyo',
+      'zankyo-wrapper',
+      'share/licenses/zankyo/LICENSE',
+      'share/licenses/zankyo/THIRD_PARTY_LICENSES',
+      'share/licenses/zankyo/COPYRIGHT-library.html',
+      '',
+    ]);
+    assert.ok(
+      entry('share/licenses/zankyo/COPYRIGHT-library.html').equals(readFileSync(LIBRARY_NOTICE)),
+    );
+    const thirdParty = entry('share/licenses/zankyo/THIRD_PARTY_LICENSES').toString('utf8');
+    assert.match(thirdParty, /^vendoring 1\.0\.0: LICENSE-MIT\n=+\n\nvendoring: its own license$/m);
+    assert.match(
+      thirdParty,
+      /^vendoring 1\.0\.0: src\/vendored\/LICENSE\n=+\n\nvendored code: the license of the project it came from$/m,
+    );
+    assert.doesNotMatch(thirdParty, /test data/);
   });
 });

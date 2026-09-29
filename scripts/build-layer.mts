@@ -148,6 +148,24 @@ const TOOLCHAIN_NOTICES: { component: string; license: string; notices: Notice[]
 
 const byCodePoint = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0);
 
+/// crate のパッケージの中で、バイナリに入らないディレクトリ。
+const NOT_BUILT = new Set(['tests', 'benches', 'examples']);
+
+/**
+ * crate のパッケージにあるライセンスの本文を、パッケージのルートからの相対パスで返す。
+ * サブディレクトリも見る。crate が取り込んだ別のプロジェクトのコード（ring の once_cell と
+ * fiat-crypto、regex-syntax の Unicode の表など）の表示は、そこにあるため。
+ */
+function licenseFiles(dir: string, sub = ''): string[] {
+  return readdirSync(join(dir, sub), { withFileTypes: true })
+    .sort((a, b) => byCodePoint(a.name, b.name))
+    .flatMap((e) => {
+      const path = sub ? `${sub}/${e.name}` : e.name;
+      if (e.isDirectory()) return NOT_BUILT.has(e.name) ? [] : licenseFiles(dir, path);
+      return LICENSE_FILE.test(e.name) && statSync(join(dir, path)).isFile() ? [path] : [];
+    });
+}
+
 /**
  * バイナリに入る crate とツールチェーンの部品の、ライセンスと著作権表示の原文を
  * 1 つのテキストにまとめる。crate は zankyo から normal 依存でたどれるもの
@@ -190,11 +208,7 @@ function thirdPartyLicenses(target: string): string {
   };
   for (const c of crates) {
     const dir = dirname(c.manifest_path);
-    const files = new Set(
-      readdirSync(dir)
-        .filter((f) => LICENSE_FILE.test(f) && statSync(join(dir, f)).isFile())
-        .sort(byCodePoint),
-    );
+    const files = new Set(licenseFiles(dir));
     if (c.license_file) files.add(c.license_file);
     const sources = [...files].map((f) => ({ label: f, path: join(dir, f) }));
     if (sources.length === 0) {
@@ -222,7 +236,9 @@ function thirdPartyLicenses(target: string): string {
     `It also statically links the parts of the Rust ${RUST_VERSION} toolchain listed after`,
     'them: the Rust standard library, and the musl libc and LLVM runtime code that',
     'Rust ships for the musl targets.',
-    'This file reproduces the license and notice files of each of them.',
+    'This file reproduces the license and notice files of each of them. For a crate,',
+    'these include the files in its subdirectories, which cover code it bundles from',
+    'other projects.',
     'A text shared by several of them appears once, under all of their names.',
     'The copyright notices of the Rust standard library, for its in-tree files and its',
     'out-of-tree dependencies, are in COPYRIGHT-library.html next to this file.',
