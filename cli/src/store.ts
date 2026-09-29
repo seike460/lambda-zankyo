@@ -107,7 +107,11 @@ export async function fetchRecord(
       'zankyo records are expected to be small; refusing to buffer a huge object',
     );
   }
-  const text = await out.Body?.transformToString('utf-8');
+  // 本文は getObject の応答後にストリームで読む。読み取り途中の通信断も
+  // AWS 側の失敗なので、getObject の失敗と同じ exit 3 にする。
+  const text = await out.Body?.transformToString('utf-8').catch((e) => {
+    throw new CliError(`failed to read s3://${bucket}/${key}: ${errMessage(e)}`, 3);
+  });
   if (text === undefined) {
     throw new CliError(`empty object: s3://${bucket}/${key}`, 4);
   }

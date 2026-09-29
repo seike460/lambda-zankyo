@@ -72,6 +72,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **cli** — README の exit code の説明で、exit 4 を「レコード不在」だけとしていた。
   形式不正・サイズ超過（`ZANKYO_RECORD_MAX_MB` 超）・再現不能のレコードも exit 4 に
   なる。CLI の README からも、サイズ超過が抜けていた
+- **cli** — S3 からレコードの本文を読む途中で通信が切れると、exit 2（引数・設定ミス）で
+  終わっていた。getObject の失敗と同じく、AWS 側の失敗として exit 3 にする
 - **cli / construct** — npm の tarball に LICENSE を同梱する。以前は
   MIT の許諾文が配布物に入っていなかった
 - **layer** — Layer の zip に、LICENSE と `THIRD_PARTY_LICENSES` を同梱する

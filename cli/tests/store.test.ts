@@ -220,6 +220,27 @@ describe('fetchRecord', () => {
     );
   });
 
+  it('maps a failure while reading the S3 body to exitCode 3', async () => {
+    // getObject が応答した後でも、本文のストリームは通信断で失敗しうる
+    const s3 = {
+      ...fakeS3([]),
+      async getObject() {
+        return {
+          Body: {
+            transformToString: async (): Promise<string> => {
+              throw new Error('socket hang up');
+            },
+          },
+        };
+      },
+    };
+    await assert.rejects(
+      () => fetchRecord(s3, 'bkt', 'k'),
+      (e: unknown) =>
+        e instanceof CliError && e.exitCode === 3 && e.message.includes('socket hang up'),
+    );
+  });
+
   it('refuses an object over ZANKYO_RECORD_MAX_MB with exitCode 4 without reading it', async () => {
     let read = false;
     const s3 = {
