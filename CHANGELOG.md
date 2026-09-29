@@ -56,6 +56,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **proxy** — init 時の回収は、Runtime API の中継を始めた後に `.inflight`
   ステージを列挙していた。初回の `/next` が先に届くと、実行中の呼び出しを
   timeout として S3 に記録しうる。回収する一覧は、中継を始める前に確定する
+- **proxy** — README とコードの説明では、ボディを読むのは `/next`・`/response`・
+  `/error`・`/init/error` だけで、ほかの経路はそのまま中継するとしていた。実際は
+  経路を問わず、リクエストボディを `ZANKYO_MAX_BODY_KB` まで読んでから中継し、
+  超えたら中継せずに 413 を返す。説明を実際の動作に合わせた
 - **cli** — replay・diff・redrive は、非 JSON イベント（`eventIsRawText` /
   `eventIsBase64`）のレコードを、invoke の前に exit 4 で止める。Lambda の
   Invoke API は JSON でない本文を `InvalidRequestContentException` で拒否する。

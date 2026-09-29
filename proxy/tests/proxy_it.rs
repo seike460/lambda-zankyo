@@ -1165,16 +1165,16 @@ async fn oversized_body_is_rejected_without_forwarding() {
     let (recorder, _spill) = recorder_to(&s3_addr);
     let proxy = spawn_proxy(&api_addr, inflight, recorder).await;
 
-    // MAX_BODY_BYTES (8MiB) を超えるボディは上流へ転送せず 413 を返す
+    // MAX_BODY_BYTES (8MiB) を超えるボディは上流へ転送せず 413 を返す。
+    // 記録しない経路（/restore/error 等）も、経路判定の前に同じ上限で読む
     let big = Bytes::from(vec![b'x'; 9 * 1024 * 1024]);
-    let (status, _) = call_raw(
-        &proxy,
-        Method::POST,
+    for path in [
         "/2018-06-01/runtime/invocation/req-x/response",
-        big,
-    )
-    .await;
-    assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
+        "/2018-06-01/runtime/restore/error",
+    ] {
+        let (status, _) = call_raw(&proxy, Method::POST, path, big.clone()).await;
+        assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE, "{path}");
+    }
     tokio::time::sleep(Duration::from_millis(200)).await;
     assert!(captured(&api_hits).is_empty());
 }
