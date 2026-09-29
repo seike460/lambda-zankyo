@@ -247,6 +247,8 @@ cargo fmt --all -- --check && cargo clippy -- -D warnings
 
 - TS: strict + `noUncheckedIndexedAccess` + `exactOptionalPropertyTypes`、
   Biome でフォーマット統一。テストは `node --test`（外部サービス不要）。
+  `scripts/*.mts` は Node が型を除去して直接実行します。型は `pnpm typecheck` が
+  `scripts/tsconfig.json` で検査します。
 - Rust: ロジック（scrub/record/config/inflight）は IO と分離した
   ユニットテスト。proxy/extension 経路はモック Runtime API/S3 への
   統合テスト（`proxy/tests/`）で検証。

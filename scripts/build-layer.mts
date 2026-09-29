@@ -165,7 +165,7 @@ const builderArgv = () =>
     .filter(Boolean);
 const skipBuild = process.env.SKIP_BUILD === '1';
 // 梱包専用（SKIP_BUILD=1）では builder に一切触れない。
-const [builderCmd, ...builderArgs] = skipBuild ? [undefined] : builderArgv();
+const [builderCmd, ...builderArgs] = skipBuild ? [] : builderArgv();
 if (!skipBuild && !builderCmd) {
   console.error('BUILDER is empty');
   process.exit(1);

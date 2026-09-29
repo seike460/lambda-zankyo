@@ -9,7 +9,7 @@
   "scripts": {
     "lint": "biome check .",
     "format": "biome check --write .",
-    "typecheck": "pnpm -r run typecheck",
+    "typecheck": "pnpm -r run typecheck && tsc -p scripts",
     "test": "pnpm -r run test",
     "build": "pnpm -r --if-present run build",
     "check:versions": "node scripts/check-versions.mts",
@@ -17,6 +17,7 @@
   },
   "devDependencies": {
     "@biomejs/biome": "2.5.14",
+    "@types/node": "26.6.2",
     "typescript": "7.0.2"
   },
   "pnpm": {
