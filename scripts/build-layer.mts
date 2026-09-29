@@ -196,7 +196,7 @@ for (const arch of arches) {
     cpSync(join(ROOT, 'target', target, 'release', 'zankyo'), join(stage, 'bin/zankyo'));
     cpSync(join(ROOT, 'proxy/layer/zankyo-wrapper'), join(stage, 'zankyo-wrapper'));
     // /opt/extensions/zankyo: platform が external extension として
-    // 別プロセス起動し、SHUTDOWN（timeout）イベントを届ける。
+    // 別プロセス起動し、SHUTDOWN イベント（reason は問わない）を届ける。
     cpSync(join(ROOT, 'proxy/layer/extensions/zankyo'), join(stage, 'extensions/zankyo'));
     cpSync(join(ROOT, 'LICENSE'), join(stage, NOTICE_DIR, 'LICENSE'));
     writeFileSync(join(stage, NOTICE_DIR, 'THIRD_PARTY_LICENSES'), thirdParty);

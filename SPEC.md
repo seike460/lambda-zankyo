@@ -16,7 +16,7 @@ sync invoke で失敗した Lambda 呼び出しの「イベント＋エラー応
 |---|---|
 | 名称 | **lambda-zankyo**（残響） |
 | プロキシ実装 | **Rust 単一バイナリ**（musl 静的リンクで実行時の共有ライブラリ依存なし、x86_64/arm64） |
-| timeout 捕捉 | **Extension API の SHUTDOWN イベント**（reason=timeout）で in-flight イベントをフラッシュ |
+| timeout 捕捉 | **Extension API の SHUTDOWN イベント**で in-flight イベントをフラッシュ（reason を問わない。timeout/failure/spindown のどれでも記録） |
 | PII scrub | **ハイブリッド**（フィールド名 denylist＋パターン検出）、既定 ON |
 | 配布 | **SAR（Serverless Application Repository）公開** |
 | CLI スコープ | **fixture 生成＋差分リプレイ＋本番再実行（redrive）** まで MVP |

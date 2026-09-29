@@ -1,7 +1,7 @@
 //! in-flight 呼び出しの保持。
 //!
 //! `/next` でイベントを観測してから `/response`・`/error` で確定するまでの間、
-//! イベントをメモリに置く。SHUTDOWN（timeout）時には残っているものを
+//! イベントをメモリに置く。SHUTDOWN 時には reason を問わず、残っているものを
 //! 「応答が返らなかった失敗」としてフラッシュする。
 
 use serde_json::Value;
