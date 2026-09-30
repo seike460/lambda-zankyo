@@ -12,7 +12,7 @@ commit から公開したため、タグと SAR のメタデータが食い違�
 ## 準備
 
 - docker と cross 0.2.5（`cargo install cross --locked --version 0.2.5`）。
-  aarch64 のコンテナは `Cross.toml` が digest で固定しています。
+  cross のコンテナは、x86_64 と aarch64 の両方を `Cross.toml` が digest で固定しています。
 - SAM CLI と、アカウント 446537410535 の AWS 認証情報。
 - `sam package` が成果物を置く S3 バケット。公開するリージョン（ap-northeast-1）に作り、
   SAR が読めるようにバケットポリシーを付けます
@@ -78,12 +78,15 @@ git push origin v0.1.1
 ## 3. Layer の zip を作る
 
 ```bash
-node scripts/build-layer.mts
+BUILDER="cross build" node scripts/build-layer.mts
 (cd dist/layer && shasum -a 256 zankyo-x86_64.zip zankyo-aarch64.zip > SHA256SUMS)
 ```
 
 `dist/layer/zankyo-{x86_64,aarch64}.zip` と、SAR 用の同じ zip
 `sar/dist/layer-{x86_64,aarch64}.zip` ができます。
+
+`BUILDER="cross build"` を付けると、両 arch とも `Cross.toml` で固定したコンテナでビルドします。
+cross が無いときは、手元の cargo に切り替えずに失敗します。
 
 ## 4. SAR に公開する
 
