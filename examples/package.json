@@ -11,7 +11,7 @@
     "deploy": "cdk deploy"
   },
   "dependencies": {
-    "aws-cdk-lib": "2.270.0",
+    "aws-cdk-lib": "2.271.0",
     "constructs": "10.8.1",
     "zankyo-cdk": "workspace:*"
   },
