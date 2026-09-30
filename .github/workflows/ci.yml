@@ -116,13 +116,14 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
-      - name: install musl tools + cmake (aws-lc-sys build)
-        run: sudo apt-get update && sudo apt-get install -y musl-tools cmake zip
-      - name: build x86_64
-        run: cargo build --locked --release --target x86_64-unknown-linux-musl -p zankyo
-      - name: build aarch64 via cross (docker)
+      - name: install zip (layer packaging)
+        run: sudo apt-get update && sudo apt-get install -y zip
+      # 両 arch とも、Cross.toml で digest に固定したコンテナでビルドする。
+      # リリースの zip は、タグの commit でこの job が作った artifact を使う（RELEASING.md）
+      - name: build x86_64 and aarch64 via cross (docker)
         run: |
           cargo install cross --locked --version 0.2.5
+          cross build --locked --release --target x86_64-unknown-linux-musl -p zankyo
           cross build --locked --release --target aarch64-unknown-linux-musl -p zankyo
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:

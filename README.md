@@ -358,7 +358,8 @@ SSM キー・build arch。spill は atomic 書き込み・上限・定期回収�
 - CI の全 GitHub Actions はコミット SHA でピン留めしています
   （`.github/workflows/ci.yml` の `@<sha> # vN` コメント参照）。
   cross がビルドに使うコンテナは、x86_64 と aarch64 の両方を `Cross.toml` で digest に固定しています。
-  CI の x86_64 は cross を使わず、runner の musl ツールチェーンでビルドします。
+  CI は両 arch をこのコンテナでビルドし、リリースの Layer の zip にはタグの commit で CI が作った
+  artifact を使います（`RELEASING.md`）。
 - `scripts/build-layer.mts` は決定的 zip を生成します: エントリの
   mtime を最古（zip 表現の下限 1980-01-01）に揃え、`zip -X` で
   拡張属性を捨て、エントリ順を固定の引数順で渡します。

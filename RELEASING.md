@@ -11,8 +11,9 @@ commit から公開したため、タグと SAR のメタデータが食い違�
 
 ## 準備
 
-- docker と cross 0.2.5（`cargo install cross --locked --version 0.2.5`）。
-  cross のコンテナは、x86_64 と aarch64 の両方を `Cross.toml` が digest で固定しています。
+- Layer の zip を手元でビルドする場合だけ、x86_64 の Linux と docker と cross 0.2.5
+  （`cargo install cross --locked --version 0.2.5`）。cross のコンテナは、x86_64 と aarch64 の
+  両方を `Cross.toml` が digest で固定しています。通常は CI の artifact を使うので要りません（手順 3）。
 - SAM CLI と、アカウント 446537410535 の AWS 認証情報。
 - `sam package` が成果物を置く S3 バケット。公開するリージョン（ap-northeast-1）に作り、
   SAR が読めるようにバケットポリシーを付けます
@@ -75,18 +76,37 @@ git push origin v0.1.1
 
 以降の手順は、この commit（main の先端＝タグ）のまま、作業ツリーを変えずに行います。
 
-## 3. Layer の zip を作る
+## 3. Layer の zip を用意する
+
+Layer の zip は、タグの commit で main の CI（`layer binary (musl)` job）が作った artifact
+`zankyo-layer` を使います。この job は、両 arch とも `Cross.toml` で digest に固定したコンテナで
+ビルドし、zip の中身（エントリと mode・ライセンス表示・ELF の arch・静的リンク）を確かめてから
+artifact に上げます。
+
+```bash
+run=$(gh run list --workflow ci --branch main --event push --status success \
+  --commit "$(git rev-parse HEAD)" --json databaseId --jq '.[0].databaseId // empty')
+test -n "$run"                    # main の CI が、この commit で成功していること
+gh run download "$run" -n zankyo-layer -D dist/layer
+mkdir -p sar/dist
+cp dist/layer/zankyo-x86_64.zip sar/dist/layer-x86_64.zip
+cp dist/layer/zankyo-aarch64.zip sar/dist/layer-aarch64.zip
+(cd dist/layer && shasum -a 256 zankyo-x86_64.zip zankyo-aarch64.zip > SHA256SUMS)
+```
+
+`dist/layer/zankyo-{x86_64,aarch64}.zip` と、SAR 用の同じ zip
+`sar/dist/layer-{x86_64,aarch64}.zip` がそろいます。`dist/` と `sar/dist/` は git の管理外です。
+
+x86_64 の Linux では、CI と同じコンテナで手元からビルドすることもできます。
 
 ```bash
 BUILDER="cross build" node scripts/build-layer.mts
 (cd dist/layer && shasum -a 256 zankyo-x86_64.zip zankyo-aarch64.zip > SHA256SUMS)
 ```
 
-`dist/layer/zankyo-{x86_64,aarch64}.zip` と、SAR 用の同じ zip
-`sar/dist/layer-{x86_64,aarch64}.zip` ができます。
-
-`BUILDER="cross build"` を付けると、両 arch とも `Cross.toml` で固定したコンテナでビルドします。
-cross が無いときは、手元の cargo に切り替えずに失敗します。
+`BUILDER="cross build"` を付けると、cross が無いときに手元の cargo へ切り替えずに失敗します。
+cross 0.2.5 は、Linux 以外のホストでは Linux 用の Rust toolchain を別に要求します。
+そのため、macOS などでは CI の artifact を使います。
 
 ## 4. SAR に公開する
 

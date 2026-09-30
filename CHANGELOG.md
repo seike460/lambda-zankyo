@@ -33,9 +33,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `cargo build` だけを受け付ける。`cargo zigbuild` などは、zig が持つ musl libc と
   CRT をリンクしうる。その場合、Layer のライセンス表示と中身が食い違う
 - **layer** — cross が x86_64 の Layer バイナリをビルドするコンテナも、aarch64 と同じく
-  `Cross.toml` で digest に固定した。タグが付け替えられても、同じ commit から同じ環境で
-  ビルドできる。RELEASING.md の手順は `BUILDER="cross build"` で両 arch をこのコンテナで
-  ビルドし、cross が無ければ手元の cargo に切り替えずに失敗する
+  `Cross.toml` で digest に固定した。CI も x86_64 を runner の musl ツールチェーンではなく
+  cross でビルドし、両 arch を固定したコンテナで作る。リリースの Layer の zip には、
+  タグの commit で CI が作り、中身を検査した artifact を使う（RELEASING.md）
 
 ### Fixed
 
