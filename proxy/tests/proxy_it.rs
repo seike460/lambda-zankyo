@@ -1576,8 +1576,11 @@ async fn oversized_body_is_rejected_without_forwarding() {
     let proxy = spawn_proxy(&api_addr, inflight, recorder).await;
 
     // MAX_BODY_BYTES (8MiB) を超えるボディは上流へ転送せず 413 を返す。
-    // 記録しない経路（/restore/error 等）も、経路判定の前に同じ上限で読む
-    let big = Bytes::from(vec![b'x'; 9 * 1024 * 1024]);
+    // 記録しない経路（/restore/error 等）も、経路判定の前に同じ上限で読む。
+    // 上限を超えた分は読み捨ててから返すので、書き込み中の送り手にも 413 が届く。
+    // 超過分をソケットのバッファより十分大きくして、未読のまま閉じる実装なら
+    // 送り手が必ず接続のリセットを受けるようにしている
+    let big = Bytes::from(vec![b'x'; 32 * 1024 * 1024]);
     for path in [
         "/2018-06-01/runtime/invocation/req-x/response",
         "/2018-06-01/runtime/restore/error",

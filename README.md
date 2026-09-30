@@ -33,7 +33,7 @@ Lambda Service ──Runtime API──▶ zankyo proxy (Rust, Layer) ──▶ �
 - **成功呼び出しは記録しません**。S3 への PUT も spill もしません。ボディを解釈するのは
   `/next`・`/response`・`/error`・`/init/error` だけで、ほかの経路は記録せずに中継します。
   ランタイムが送るリクエストボディは、経路を問わず `ZANKYO_MAX_BODY_KB` まで読んでから
-  中継します。上限を超えたら中継せず、413 を返します。
+  中継します。上限を超えたら中継せず、残りを読み捨ててから 413 を返します。
   `/next` のイベントは timeout 捕捉のため `/tmp` に置き、呼び出しが完了したら消します
   （下の「timeout 捕捉」）。
 - 失敗の定義: `/error` 呼出 / `/init/error` / `/response` 内の `errorType`

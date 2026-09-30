@@ -119,6 +119,38 @@ pub async fn collect_bounded(
         })
 }
 
+/// ランタイムからの要求ボディを `limit` バイトまで読む。超えたら、残りを読み捨ててから
+/// `TooLarge` を返す。未読のデータを残して接続を閉じると OS が RST を送るため、
+/// まだ書き込んでいるランタイムには 413 ではなく接続のリセットが届いてしまう。
+/// 読み捨てる分はメモリに溜めない。時間の上限を付けない理由は `proxy::handle` の説明のとおり。
+pub async fn collect_or_discard(
+    mut body: Incoming,
+    limit: usize,
+) -> std::result::Result<Bytes, CollectError> {
+    let mut buf = bytes::BytesMut::new();
+    let mut too_large = false;
+    while let Some(frame) = body.frame().await {
+        let frame = frame.map_err(|e| CollectError::Read(Box::new(e)))?;
+        let Ok(data) = frame.into_data() else {
+            continue; // trailers
+        };
+        if too_large {
+            continue;
+        }
+        if data.len() > limit - buf.len() {
+            too_large = true;
+            buf = bytes::BytesMut::new();
+        } else {
+            buf.extend_from_slice(&data);
+        }
+    }
+    if too_large {
+        Err(CollectError::TooLarge)
+    } else {
+        Ok(buf.freeze())
+    }
+}
+
 /// プレーンテキスト応答の組み立て。
 pub fn plain(status: StatusCode, msg: &'static str) -> Response<BoxedBody> {
     Response::builder()

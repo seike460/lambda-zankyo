@@ -100,6 +100,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `/error`・`/init/error` だけで、ほかの経路はそのまま中継するとしていた。実際は
   経路を問わず、リクエストボディを `ZANKYO_MAX_BODY_KB` まで読んでから中継し、
   超えたら中継せずに 413 を返す。説明を実際の動作に合わせた
+- **proxy** — 上限（`ZANKYO_MAX_BODY_KB`）を超えるリクエストボディに 413 を返すとき、
+  残りを読まないまま接続を閉じていた。OS が RST を送るため、まだ書き込んでいる
+  ランタイムには 413 ではなく接続のリセットが届くことがあった。残りを読み捨てて
+  （メモリには溜めない）から 413 を返す
 - **proxy** — external extension（agent）が、Extensions API の応答ボディを
   時間の上限なしに読んでいた。ヘッダーだけ返してボディを閉じない応答で、登録は
   `ZANKYO_REGISTER_TIMEOUT_MS` を過ぎても戻らずに Init を遅らせ、`/event/next` は

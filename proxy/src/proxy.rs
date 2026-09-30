@@ -2,16 +2,17 @@
 //!
 //! 子プロセス（実ランタイム）から見ると zankyo が Runtime API 本体に
 //! 見える。リクエストボディは経路を問わず `ZANKYO_MAX_BODY_KB` まで読んで
-//! から転送し、超えたら上流へ中継せず 413 を返す。ボディを解釈して記録に
-//! 使うのは `/next`・`/response`・`/error`・`/init/error` だけで、それ以外の
-//! パス（`/restore/*` や、子プロセスから届く Extensions API・Telemetry API
-//! など）は記録せず中継する。
+//! から転送し、超えたら上流へ中継せず 413 を返す。超えた分は読み捨ててから返す
+//! （未読のまま閉じると、ランタイムには 413 ではなく接続のリセットが届くため）。
+//! ボディを解釈して記録に使うのは `/next`・`/response`・`/error`・`/init/error`
+//! だけで、それ以外のパス（`/restore/*` や、子プロセスから届く Extensions API・
+//! Telemetry API など）は記録せず中継する。
 //! `/next` のイベントは timeout 捕捉のため `/tmp` にステージし、完了時に消す。
 //! 成功呼び出しでは spill も S3 への PUT もしない。
 //! 各ルートの処理は `handlers.rs`、上流転送は `upstream.rs`。
 
 use crate::store::Recorder;
-use crate::upstream::{collect_bounded, forward, plain, strip_hop_by_hop, CollectError};
+use crate::upstream::{collect_or_discard, forward, plain, strip_hop_by_hop, CollectError};
 use bytes::Bytes;
 use http::{HeaderMap, Method, Request, Response, StatusCode};
 use http_body_util::{BodyExt, Full};
@@ -125,7 +126,7 @@ async fn handle(req: Request<Incoming>, st: &ProxyState) -> Response<BoxedBody> 
     // この関数自身のランタイムで、止まって待たされるのはその要求だけになる
     // （関数のタイムアウトが上限になる）。時間で切ると、時間をかけて書き出す
     // 応答（RESPONSE_STREAM）を途中で切ってしまう。
-    let body_bytes = match collect_bounded(body, body_limit).await {
+    let body_bytes = match collect_or_discard(body, body_limit).await {
         Ok(b) => b,
         Err(CollectError::TooLarge) => {
             return plain(StatusCode::PAYLOAD_TOO_LARGE, "zankyo: body too large");
