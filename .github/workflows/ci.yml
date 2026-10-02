@@ -124,6 +124,10 @@ jobs:
         run: |
           cargo install cross --locked --version 0.2.5
           cross build --locked --release --target x86_64-unknown-linux-musl -p zankyo
+          # 2 つのコンテナは glibc が違う（x86_64 は 2.31、aarch64 は 2.27）。1 つ目が
+          # target/release に作ったホスト用のビルドスクリプトは、2 つ目では実行できない
+          # （GLIBC_2.28 not found）。ターゲット別の成果物（target/<triple>/release）は残す
+          rm -rf target/release
           cross build --locked --release --target aarch64-unknown-linux-musl -p zankyo
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
