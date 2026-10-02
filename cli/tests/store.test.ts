@@ -1,11 +1,20 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import { CliError } from '../src/errors.ts';
-import { fetchRecord, listRecordKeys, resolveRecordKey } from '../src/store.ts';
-import { fakeS3 } from './helpers.ts';
+import { fetchRecord, listRecordKeys, loadRecord, resolveRecordKey } from '../src/store.ts';
+import { fakeS3, rejecting } from './helpers.ts';
 
 function obj(key: string, lastModified?: string) {
   return { Key: key, LastModified: lastModified ? new Date(lastModified) : undefined };
+}
+
+/** 差し替えた env を元の値へ戻す。 */
+function restoreEnv(name: string, saved: string | undefined): void {
+  if (saved === undefined) {
+    delete process.env[name];
+  } else {
+    process.env[name] = saved;
+  }
 }
 
 const VALID_RECORD = JSON.stringify({
@@ -75,6 +84,55 @@ describe('listRecordKeys', () => {
     ]);
     const refs = await listRecordKeys(s3, 'bkt', {});
     assert.equal(refs.length, 2);
+    assert.deepEqual(
+      s3.listInputs.map((i) => [i.Bucket, i.Prefix, i.ContinuationToken]),
+      [
+        ['bkt', 'zankyo/', undefined],
+        ['bkt', 'zankyo/', 't2'],
+      ],
+    );
+  });
+
+  it('narrows the prefix to one function with --function', async () => {
+    const s3 = fakeS3([{ Contents: [obj('zankyo/fn/2026/09/22/a.json')] }]);
+    await listRecordKeys(s3, 'bkt', { functionName: 'fn' });
+    assert.equal(s3.listInputs[0]?.Prefix, 'zankyo/fn/');
+  });
+
+  it('stops at ZANKYO_LIST_MAX_PAGES even when --since filters out every page', async (t) => {
+    const saved = process.env.ZANKYO_LIST_MAX_PAGES;
+    process.env.ZANKYO_LIST_MAX_PAGES = '2';
+    const warnings: string[] = [];
+    t.mock.method(console, 'error', (...args: unknown[]) => warnings.push(args.join(' ')));
+    t.after(() => {
+      if (saved === undefined) {
+        delete process.env.ZANKYO_LIST_MAX_PAGES;
+      } else {
+        process.env.ZANKYO_LIST_MAX_PAGES = saved;
+      }
+    });
+    const oldPage = (token: string) => ({
+      Contents: [obj(`zankyo/fn/2026/01/01/${token}.json`, '2026-01-01T00:00:00Z')],
+      IsTruncated: true,
+      NextContinuationToken: token,
+    });
+    const s3 = fakeS3([oldPage('t2'), oldPage('t3'), oldPage('t4'), oldPage('t5'), {}]);
+    const refs = await listRecordKeys(s3, 'bkt', { since: new Date('2026-09-01T00:00:00Z') });
+    assert.deepEqual(refs, []);
+    assert.equal(s3.listInputs.length, 2);
+    assert.ok(warnings.some((w) => w.includes('listing truncated after 2 pages')));
+  });
+
+  it('uses the default page size when ZANKYO_LIST_PAGE_SIZE is not a positive integer', async (t) => {
+    const saved = process.env.ZANKYO_LIST_PAGE_SIZE;
+    t.after(() => restoreEnv('ZANKYO_LIST_PAGE_SIZE', saved));
+    // 切り捨てると 0.5 は MaxKeys: 0 になり、S3 から 1 件も取れない
+    for (const v of ['0.5', '1.5']) {
+      process.env.ZANKYO_LIST_PAGE_SIZE = v;
+      const s3 = fakeS3([{ Contents: [] }]);
+      await listRecordKeys(s3, 'bkt', {});
+      assert.equal(s3.listInputs[0]?.MaxKeys, 200, v);
+    }
   });
 
   it('filters by since', async () => {
@@ -112,6 +170,29 @@ describe('resolveRecordKey', () => {
     ]);
     const key = await resolveRecordKey(s3, 'bkt', { requestId: 'target-id' });
     assert.equal(key, 'zankyo/fn/2026/09/22/target-id.json');
+    assert.deepEqual(
+      s3.listInputs.map((i) => i.ContinuationToken),
+      [undefined, 't2'],
+    );
+  });
+
+  it('narrows the prefix to one function with --function', async () => {
+    const s3 = fakeS3([{ Contents: [obj('zankyo/fn/2026/09/22/r1.json')] }]);
+    await resolveRecordKey(s3, 'bkt', { requestId: 'r1', functionName: 'fn' });
+    await resolveRecordKey(s3, 'bkt', { last: true, functionName: 'fn' });
+    assert.deepEqual(
+      s3.listInputs.map((i) => i.Prefix),
+      ['zankyo/fn/', 'zankyo/fn/'],
+    );
+  });
+
+  it('maps an S3 list failure to exitCode 3', async () => {
+    const s3 = { ...fakeS3([]), listObjectsV2: rejecting('AccessDenied') };
+    await assert.rejects(
+      () => resolveRecordKey(s3, 'bkt', { requestId: 'r1' }),
+      (e: unknown) =>
+        e instanceof CliError && e.exitCode === 3 && e.message.includes('AccessDenied'),
+    );
   });
 
   it('throws exitCode 4 when not found', async () => {
@@ -126,6 +207,77 @@ describe('resolveRecordKey', () => {
 describe('fetchRecord', () => {
   it('parses the stored record', async () => {
     const s3 = fakeS3([], VALID_RECORD);
+    const rec = await fetchRecord(s3, 'bkt', 'zankyo/fn/2026/09/22/r1.json');
+    assert.equal(rec.requestId, 'r1');
+    assert.deepEqual(s3.getInputs, [{ Bucket: 'bkt', Key: 'zankyo/fn/2026/09/22/r1.json' }]);
+  });
+
+  it('maps an S3 read failure to exitCode 3', async () => {
+    const s3 = { ...fakeS3([], VALID_RECORD), getObject: rejecting('NoSuchKey') };
+    await assert.rejects(
+      () => fetchRecord(s3, 'bkt', 'k'),
+      (e: unknown) => e instanceof CliError && e.exitCode === 3 && e.message.includes('NoSuchKey'),
+    );
+  });
+
+  it('maps a failure while reading the S3 body to exitCode 3', async () => {
+    // getObject が応答した後でも、本文のストリームは通信断で失敗しうる
+    const s3 = {
+      ...fakeS3([]),
+      async getObject() {
+        return {
+          Body: {
+            transformToString: async (): Promise<string> => {
+              throw new Error('socket hang up');
+            },
+          },
+        };
+      },
+    };
+    await assert.rejects(
+      () => fetchRecord(s3, 'bkt', 'k'),
+      (e: unknown) =>
+        e instanceof CliError && e.exitCode === 3 && e.message.includes('socket hang up'),
+    );
+  });
+
+  it('refuses an object over ZANKYO_RECORD_MAX_MB with exitCode 4 without reading it', async () => {
+    let read = false;
+    const s3 = {
+      ...fakeS3([]),
+      async getObject() {
+        return {
+          ContentLength: 32 * 1024 * 1024 + 1,
+          Body: {
+            transformToString: async () => {
+              read = true;
+              return VALID_RECORD;
+            },
+          },
+        };
+      },
+    };
+    await assert.rejects(
+      () => fetchRecord(s3, 'bkt', 'k'),
+      (e: unknown) => e instanceof CliError && e.exitCode === 4,
+    );
+    assert.equal(read, false);
+  });
+
+  it('uses the default size limit when ZANKYO_RECORD_MAX_MB is not a positive integer', async (t) => {
+    const saved = process.env.ZANKYO_RECORD_MAX_MB;
+    t.after(() => restoreEnv('ZANKYO_RECORD_MAX_MB', saved));
+    // 切り捨てると 0.5 は上限 0 バイトになり、どのレコードも読めない
+    process.env.ZANKYO_RECORD_MAX_MB = '0.5';
+    const s3 = {
+      ...fakeS3([]),
+      async getObject() {
+        return {
+          ContentLength: VALID_RECORD.length,
+          Body: { transformToString: async () => VALID_RECORD },
+        };
+      },
+    };
     const rec = await fetchRecord(s3, 'bkt', 'zankyo/fn/2026/09/22/r1.json');
     assert.equal(rec.requestId, 'r1');
   });
@@ -151,5 +303,25 @@ describe('fetchRecord', () => {
       console.error = original;
     }
     assert.ok(warnings.some((w) => w.includes('unknown failureType')));
+  });
+});
+
+describe('loadRecord', () => {
+  const page = { Contents: [obj('zankyo/fn/2026/09/22/r1.json')] };
+
+  it('returns the record when its functionName matches the key', async () => {
+    const rec = await loadRecord(fakeS3([page], VALID_RECORD), 'bkt', { requestId: 'r1' });
+    assert.equal(rec.functionName, 'fn');
+  });
+
+  it('rejects with exitCode 4 when the body names a function other than its key', async () => {
+    const forged = JSON.stringify({
+      ...(JSON.parse(VALID_RECORD) as Record<string, unknown>),
+      functionName: 'other-fn',
+    });
+    await assert.rejects(
+      () => loadRecord(fakeS3([page], forged), 'bkt', { requestId: 'r1' }),
+      (e: unknown) => e instanceof CliError && e.exitCode === 4,
+    );
   });
 });

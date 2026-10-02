@@ -3,7 +3,7 @@
 `zankyo` — S3 に保存された「同期呼び出しの失敗レコード」を読み、
 fixture 生成・差分リプレイ・本番再実行を行う CLI。
 失敗レコードを作る Layer (proxy) 側と組み合わせて使う。詳細は
-リポジトリ直下の README を参照。
+[リポジトリ直下の README](https://github.com/seike460/lambda-zankyo#readme) を参照。
 
 ## install
 
@@ -32,9 +32,12 @@ AWS API 呼び出しのタイムアウトは env で調整できます
 |---|---|---|
 | `ZANKYO_CONNECT_TIMEOUT_MS` | `5000` | AWS API 接続の打ち切り |
 | `ZANKYO_REQUEST_TIMEOUT_MS` | `30000` | AWS API 応答の打ち切り |
-| `ZANKYO_LIST_PAGE_SIZE` | `200` | ListObjectsV2 の 1 ページ件数 |
+| `ZANKYO_LIST_PAGE_SIZE` | `200` | ListObjectsV2 の 1 ページ件数（S3 は 1000 件までしか返さない） |
 | `ZANKYO_LIST_MAX_PAGES` | `50` | レコード探索のページ走査上限 |
 | `ZANKYO_RECORD_MAX_MB` | `32` | レコード1件の読み取り上限（MiB） |
+
+値は正の整数で指定します。小数・0・負数など、正の整数でない値は既定値を使います。
+タイムアウトの値が Node.js のタイマーの上限（2147483647 ms）を超える場合も、既定値を使います。
 
 ## exit codes
 
@@ -44,4 +47,4 @@ AWS API 呼び出しのタイムアウトは env で調整できます
 | 1 | diff: 応答に差異 / replay・redrive: 関数がエラーを返した |
 | 2 | 引数・設定ミス |
 | 3 | AWS API 呼び出しの失敗 |
-| 4 | レコードが見つからない / 形式不正 / 再現不能（truncated・event 欠落） |
+| 4 | レコードが見つからない / 形式不正（空・JSON でない・スキーマ不一致・キーと本文の関数名の食い違い） / サイズ超過（`ZANKYO_RECORD_MAX_MB`、既定 32 MiB を超える） / 再現不能（truncated・event 欠落・replay/diff/redrive での非 JSON イベント） |

@@ -8,26 +8,61 @@ on:
 permissions:
   contents: read
 
+# PR は新しい push で古い run を取り消す。main の push は run ごとの group にして、
+# 取り消しも待機中の run の置き換えも起こさず、どのコミットにも結果を残す
 concurrency:
-  group: ci-${{ github.ref }}
+  group: ci-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
   cancel-in-progress: true
 
 jobs:
   ts-quality:
-    name: ts (biome + tsc + test)
+    name: ts (biome + tsc + test, node ${{ matrix.node }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      # 24 = engines の下限（.nvmrc と同じ）、26 = 次の LTS
+      matrix:
+        node: [24, 26]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: ${{ matrix.node }}
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm lint          # biome check .
+      # npm の 2 パッケージ・proxy の crate・SAR の版と、SourceCodeUrl のタグ・CHANGELOG の見出し
+      - run: pnpm check:versions
+      - run: pnpm build         # tsc emit — zankyo-cdk/dist を生成（examples の typecheck/test が依存）
+      # CLI のテストは src を型除去で実行する。公開する bin（package.json の bin が指す dist）の
+      # import 書き換えやパスの誤りは、ここで実際に起動して確かめる（bin.js は全コマンドを静的 import する）
+      - name: smoke-test the cli bin (dist)
+        working-directory: cli
+        run: node "$(node -p 'require("./package.json").bin.zankyo')" --version
+      - run: pnpm typecheck     # tsc --noEmit in each package
+      - run: pnpm test          # node --test in each package
+
+  construct-peer-min:
+    name: construct (aws-cdk-lib peer minimum)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version-file: .nvmrc
           cache: pnpm
       - run: pnpm install --frozen-lockfile
-      - run: pnpm lint          # biome check .
-      - run: pnpm build         # tsc emit — zankyo-cdk/dist を生成（examples の typecheck/test が依存）
-      - run: pnpm typecheck     # tsc --noEmit in each package
-      - run: pnpm test          # node --test in each package
+      # construct/package.json の peerDependencies の下限を正とし、devDependencies より
+      # 古い宣言値でも型検査とテストが通ることを確かめる（lockfile の書き換えはこのジョブ内だけ）
+      - name: install the declared aws-cdk-lib minimum
+        working-directory: construct
+        run: |
+          min=$(node -p 'require("./package.json").peerDependencies["aws-cdk-lib"].replace(/^[\^~]/, "")')
+          pnpm add --save-dev "aws-cdk-lib@$min"
+      - working-directory: construct
+        run: pnpm typecheck && pnpm test
 
   rust-quality:
     name: rust (fmt + clippy + test)
@@ -38,22 +73,39 @@ jobs:
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
       - run: cargo fmt --all -- --check
-      - run: cargo clippy --workspace --all-targets -- -D warnings
-      - run: cargo test --workspace
+      - run: cargo clippy --locked --workspace --all-targets -- -D warnings
+      - run: cargo test --locked --workspace
+
+  rust-msrv:
+    name: rust (MSRV)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # proxy/Cargo.toml の rust-version を正とし、rust-toolchain.toml より
+      # 古い宣言値でもビルドできることを確かめる（RUSTUP_TOOLCHAIN が toml に優先する）
+      - name: install the declared rust-version
+        run: |
+          msrv=$(sed -n 's/^rust-version = "\(.*\)"/\1/p' proxy/Cargo.toml)
+          rustup toolchain install "$msrv" --profile minimal
+          echo "RUSTUP_TOOLCHAIN=$msrv" >> "$GITHUB_ENV"
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - run: cargo check --locked --workspace --all-targets
 
   audit:
     name: dependency audit
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version-file: .nvmrc
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: pnpm audit --prod
-      - uses: rustsec/audit-check@69366f33c96575abad1ee0dba8212993eecbe998 # v2
+      # 最新のリリース v2.0.0 は node20 で動く。action.yml の runs.using を node24 に
+      # 変えただけの main のコミット（#48、未リリース）に固定する
+      - uses: rustsec/audit-check@858dc40f52ca2b8570b7a997c1c4e35c6fc9a432 # main (v2.0.0 + node24)
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
 
@@ -64,19 +116,85 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
-      - name: install musl tools + cmake (aws-lc-sys build)
-        run: sudo apt-get update && sudo apt-get install -y musl-tools cmake zip
-      - name: build x86_64
-        run: cargo build --release --target x86_64-unknown-linux-musl -p zankyo
-      - name: build aarch64 via cross (docker)
+      - name: install zip (layer packaging)
+        run: sudo apt-get update && sudo apt-get install -y zip
+      # 両 arch とも、Cross.toml で digest に固定したコンテナでビルドする。
+      # リリースの zip は、タグの commit でこの job が作った artifact を使う（RELEASING.md）
+      - name: build x86_64 and aarch64 via cross (docker)
         run: |
           cargo install cross --locked --version 0.2.5
-          cross build --release --target aarch64-unknown-linux-musl -p zankyo
+          cross build --locked --release --target x86_64-unknown-linux-musl -p zankyo
+          # 2 つのコンテナは glibc が違う（x86_64 は 2.31、aarch64 は 2.27）。1 つ目が
+          # target/release に作ったホスト用のビルドスクリプトは、2 つ目では実行できない
+          # （GLIBC_2.28 not found）。ターゲット別の成果物（target/<triple>/release）は残す
+          rm -rf target/release
+          cross build --locked --release --target aarch64-unknown-linux-musl -p zankyo
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .nvmrc
       - name: package layer zips
         # 直前ステップで両 arch をビルド済みなので梱包だけ行う
         env:
           SKIP_BUILD: '1'
         run: node scripts/build-layer.mts
+      # エントリの並びと mode（実行ファイルは 755、ライセンス表示は 644）と CRC を確かめる。
+      # THIRD_PARTY_LICENSES は、crate でない静的リンクの部品（Rust 標準ライブラリ・musl libc・
+      # LLVM の libunwind と crtbegin/crtend）の表示も、scripts/licenses/ の原文のまま含むこと。
+      # COPYRIGHT-library.html（Rust 標準ライブラリのファイルごとの表示）は、原文と同じバイト列であること。
+      # bin/zankyo は arch どおりの ELF で、動的リンカ（PT_INTERP）を要求しない静的リンクであること
+      - name: check the layer zips
+        run: |
+          shopt -s failglob
+          expected=$(printf '%s\n' \
+            '-rwxr-xr-x bin/zankyo' \
+            '-rwxr-xr-x extensions/zankyo' \
+            '-rwxr-xr-x zankyo-wrapper' \
+            '-rw-r--r-- share/licenses/zankyo/LICENSE' \
+            '-rw-r--r-- share/licenses/zankyo/THIRD_PARTY_LICENSES' \
+            '-rw-r--r-- share/licenses/zankyo/COPYRIGHT-library.html')
+          notices=(
+            scripts/licenses/rust-*/COPYRIGHT
+            scripts/licenses/rust-*/LICENSE-APACHE
+            scripts/licenses/rust-*/LICENSE-MIT
+            scripts/licenses/rust-*/LICENSES/Unicode-3.0.txt
+            scripts/licenses/rust-*/library/compiler-builtins/LICENSE.txt
+            scripts/licenses/musl-*/COPYRIGHT
+            scripts/licenses/llvm-*/libunwind/LICENSE.TXT
+            scripts/licenses/llvm-*/compiler-rt/LICENSE.TXT)
+          for pair in x86_64:X86-64 aarch64:AArch64; do
+            arch=${pair%%:*} machine=${pair#*:}
+            z=dist/layer/zankyo-$arch.zip
+            unzip -tq "$z"
+            diff <(echo "$expected") <(unzip -Z "$z" | awk '$3 == "unx" { print $1, $NF }')
+            unzip -q "$z" -d "$RUNNER_TEMP/layer-$arch"
+            node -e '
+              const { readFileSync } = require("node:fs");
+              const [file, ...notices] = process.argv.slice(1);
+              const text = readFileSync(file, "utf8");
+              const missing = notices.filter((n) => !text.includes(readFileSync(n, "utf8").trimEnd()));
+              if (missing.length > 0) {
+                console.error(file + " lacks:\n  " + missing.join("\n  "));
+                process.exit(1);
+              }
+            ' "$RUNNER_TEMP/layer-$arch/share/licenses/zankyo/THIRD_PARTY_LICENSES" "${notices[@]}"
+            cmp scripts/licenses/rust-*/COPYRIGHT-library.html \
+              "$RUNNER_TEMP/layer-$arch/share/licenses/zankyo/COPYRIGHT-library.html"
+            bin=$RUNNER_TEMP/layer-$arch/bin/zankyo
+            if ! readelf -h "$bin" | grep -q "Machine: .*$machine\$"; then
+              echo "$z: bin/zankyo is not $machine" >&2
+              exit 1
+            fi
+            if readelf -l "$bin" | grep -q INTERP; then
+              echo "$z: bin/zankyo is dynamically linked" >&2
+              exit 1
+            fi
+          done
+      # 引数なし・Lambda の外（AWS_LAMBDA_RUNTIME_API なし）では、usage を出して EX_USAGE（64）で終わる
+      - name: smoke-test the x86_64 binary in the zip
+        run: |
+          rc=0
+          "$RUNNER_TEMP/layer-x86_64/bin/zankyo" || rc=$?
+          test "$rc" -eq 64
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: zankyo-layer

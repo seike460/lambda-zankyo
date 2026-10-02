@@ -1,9 +1,14 @@
 //! 設定の解決。
 //!
-//! 環境変数が既定の供給元。`ZANKYO_SSM_PARAM` が指定されている場合は
-//! SSM Parameter Store の JSON を読み、同じキーがあれば env を上書きする
-//! （複数関数で設定を一元管理したい利用者のため）。SSM 側のスキーマは
-//! env 名と同じキーを持つフラットな JSON オブジェクト。
+//! 既定値 → 環境変数 → SSM の順に重ね、後から重ねた値が優先する。
+//! `ZANKYO_SSM_PARAM` が指定されている場合は SSM Parameter Store の JSON を
+//! 読み、同じキーがあれば env を上書きする（複数関数で設定を一元管理したい
+//! 利用者のため）。SSM 側のスキーマは env 名と同じキーを持つフラットな
+//! JSON オブジェクト。ただし次は SSM を読む前に決まる（`setup.rs`）。
+//! - `ZANKYO_SSM_PARAM`・`ZANKYO_SSM_TIMEOUT_MS` は env だけで決める
+//!   （`ssm_overlay.rs` の `ENV_ONLY_KEYS`）。
+//! - env の `ZANKYO_DISABLED` が真なら、SSM を読まずに passthrough にする。
+//! - env の値が不正なら設定エラーとし、SSM を読まずに passthrough にする。
 
 use crate::error::{Result, ZankyoError};
 use std::collections::{BTreeSet, HashMap};
@@ -23,17 +28,22 @@ pub const DEFAULT_MAX_BODY_KB: usize = 8192;
 /// Extensions API のイベントボディ上限（KiB）。通知はメタデータだけ
 /// なので 1MiB で十分。
 pub const DEFAULT_EXT_BODY_KB: usize = 1024;
-/// extension 登録の上限時間（ms）。
+/// extension 登録の上限時間（ms）。一時的な失敗の再試行もこの時間内に収める。
 pub const DEFAULT_REGISTER_TIMEOUT_MS: u64 = 10_000;
-/// event/next ポーリング失敗時の再試行間隔（ms）。
+/// Extensions API（register・event/next）が失敗したときの再試行間隔（ms）。
 pub const DEFAULT_EXT_RETRY_MS: u64 = 500;
-/// ポーリング連続失敗の上限。既定では 500ms × 120 ≒ 60 秒失敗が
-/// 続いたら Extensions API の障害とみなしてループを抜ける。
+/// Extensions API に接続できない状態が続いたときの再試行回数の上限。
+/// 既定では 500ms × 120 ≒ 60 秒接続できなければ、Runtime API が無くなった
+/// とみなしてループを抜ける。応答が返る失敗（500 以外）はこの回数に数えず、
+/// SHUTDOWN まで再試行を続ける。
 pub const DEFAULT_EXT_MAX_POLL_FAILURES: u32 = 120;
-/// SSM get_parameter の上限時間（ms）。
-pub const DEFAULT_SSM_TIMEOUT_MS: u64 = 10_000;
-/// `/next` 以外の上流転送の上限時間（ms）。localhost 上の Runtime API が
-/// 60 秒応えない状況は実行環境の異常とみなす。
+/// SSM get_parameter の上限時間（ms）。取得は子の起動と extension 登録の
+/// 前に待つため、Lambda の Init 上限（10 秒）を使い切らない短めの既定にする。
+/// 取得の前に使う値なので、env でだけ指定できる（SSM の JSON では変えられない）。
+pub const DEFAULT_SSM_TIMEOUT_MS: u64 = 2_000;
+/// 上流転送の上限時間（ms）。localhost 上の Runtime API が
+/// 60 秒応えない状況は実行環境の異常とみなす。`/next` はロングポーリングなので
+/// 応答ヘッダーまでは無制限に待ち、その後のボディの読み取りにだけ使う。
 pub const DEFAULT_FORWARD_TIMEOUT_MS: u64 = 60_000;
 /// spill 再送の間隔（ms）。起動時だけでなく生存中も定期的に
 /// /tmp を空に戻し、S3 の一時障害からの回復を早める。
@@ -64,11 +74,12 @@ pub struct Config {
     pub scrub_fields: BTreeSet<String>,
     pub scrub_mode: ScrubMode,
     pub max_event_kb: usize,
-    /// SHUTDOWN 検知後に S3 フラッシュへ使える時間の上限。
+    /// 失敗レコードの PutObject に使える時間の上限。呼び出し中の記録
+    /// （応答の転送をこの時間まで待たせる）と SHUTDOWN 後のフラッシュに効く。
     pub flush_budget_ms: u64,
-    /// 通常経路の PutObject 上限時間。呼び出し経路を遅らせないため短め。
+    /// spill 再送（起動時・定期回収）の PutObject 上限時間。
     pub put_timeout_ms: u64,
-    /// S3 失敗時・SHUTDOWN 時のローカル退避先。
+    /// `.inflight` ステージと、PUT 前に先書きする失敗レコード（write-ahead spill）の置き場。
     pub spill_dir: String,
     /// spill dir に保持するファイル数の上限。超過分は古いものから破棄。
     pub spill_max_files: usize,
@@ -80,15 +91,16 @@ pub struct Config {
     pub max_body_kb: usize,
     /// Extensions API イベントボディの上限（KiB）。
     pub ext_body_kb: usize,
-    /// extension 登録リクエストの上限時間（ms）。
+    /// extension 登録の上限時間（ms）。再試行を含む。
     pub register_timeout_ms: u64,
-    /// event/next ポーリング失敗時の再試行間隔（ms）。
+    /// Extensions API（register・event/next）が失敗したときの再試行間隔（ms）。
     pub ext_retry_ms: u64,
-    /// ポーリング連続失敗の上限。超えると extension ループを抜ける。
+    /// Extensions API に接続できない状態が続いたときの再試行回数の上限。
+    /// 超えると extension ループを抜ける。
     pub ext_max_poll_failures: u32,
-    /// SSM get_parameter の上限時間（ms）。
+    /// SSM get_parameter の上限時間（ms）。env でだけ指定できる。
     pub ssm_timeout_ms: u64,
-    /// `/next` 以外の上流転送の上限時間（ms）。
+    /// 上流転送の上限時間（ms）。`/next` では応答ボディの読み取りにだけ使う。
     pub forward_timeout_ms: u64,
     pub disabled: bool,
 }
@@ -147,12 +159,15 @@ impl Config {
         let mut cfg = Config {
             // 空文字は「未設定」と同じ扱いにする。
             // Some("") の kms_key は全 PutObject を失敗させ、
+            // Some("") の ssm_param は init のたびに空名で SSM を呼び、
             // "" の bucket は SSM 側の値を後から潰すだけになる。
             bucket: get("ZANKYO_BUCKET").unwrap_or_default().to_string(),
             kms_key: get("ZANKYO_KMS_KEY")
                 .filter(|s| !s.is_empty())
                 .map(String::from),
-            ssm_param: get("ZANKYO_SSM_PARAM").map(String::from),
+            ssm_param: get("ZANKYO_SSM_PARAM")
+                .filter(|s| !s.is_empty())
+                .map(String::from),
             scrub_fields: BTreeSet::new(),
             scrub_mode: ScrubMode::Mask,
             max_event_kb: DEFAULT_MAX_EVENT_KB,
@@ -283,6 +298,8 @@ mod tests {
         assert_eq!(cfg.bucket, "b");
         assert_eq!(cfg.scrub_mode, ScrubMode::Mask);
         assert_eq!(cfg.max_event_kb, 256);
+        // SSM 取得は Init の 10 秒上限の内側で諦める
+        assert_eq!(cfg.ssm_timeout_ms, 2_000);
         assert!(!cfg.disabled);
     }
 
@@ -300,6 +317,7 @@ mod tests {
             ("ZANKYO_DISABLED", "true"),
         ]))
         .unwrap();
+        assert_eq!(cfg.kms_key.as_deref(), Some("arn:aws:kms:..."));
         assert_eq!(cfg.max_body_kb, 4096);
         assert_eq!(cfg.ext_max_poll_failures, 10);
         assert_eq!(cfg.ssm_timeout_ms, 3000);
@@ -313,6 +331,45 @@ mod tests {
     #[test]
     fn rejects_bad_mode() {
         assert!(Config::from_env_map(&env(&[("ZANKYO_SCRUB_MODE", "yes")])).is_err());
+    }
+
+    #[test]
+    fn empty_strings_are_treated_as_unset() {
+        let cfg = Config::from_env_map(&env(&[
+            ("ZANKYO_BUCKET", ""),
+            ("ZANKYO_KMS_KEY", ""),
+            ("ZANKYO_SSM_PARAM", ""),
+        ]))
+        .unwrap();
+        assert!(cfg.bucket.is_empty());
+        assert_eq!(cfg.kms_key, None);
+        assert_eq!(cfg.ssm_param, None);
+    }
+
+    #[test]
+    fn rejects_zero_limits() {
+        for key in [
+            "ZANKYO_MAX_BODY_KB",
+            "ZANKYO_FLUSH_BUDGET_MS",
+            "ZANKYO_EXT_MAX_POLL_FAILURES",
+        ] {
+            assert!(
+                Config::from_env_map(&env(&[(key, "0")])).is_err(),
+                "{key}=0 must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn non_absolute_spill_dir_is_ignored() {
+        for v in ["rel", ""] {
+            let cfg = Config::from_env_map(&env(&[
+                ("AWS_LAMBDA_FUNCTION_NAME", "my-fn"),
+                ("ZANKYO_SPILL_DIR", v),
+            ]))
+            .unwrap();
+            assert_eq!(cfg.spill_dir, "/tmp/zankyo/my-fn", "{v:?} must be ignored");
+        }
     }
 
     #[test]

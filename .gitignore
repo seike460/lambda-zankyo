@@ -20,4 +20,3 @@ apikey
 
 # Test artifacts
 coverage/
-*.xlsx

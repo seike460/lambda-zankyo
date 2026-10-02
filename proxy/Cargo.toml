@@ -1,11 +1,14 @@
 [package]
 name = "zankyo"
-version = "0.1.0"
+version = "0.1.1"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Lambda Runtime API proxy + external extension that persists failed synchronous invocations"
-rust-version = "1.85"
+# ロック済み依存（aws-sdk-* / aws-smithy-*）の要求に合わせる
+rust-version = "1.94.1"
+# 配布物は Layer zip / SAR / npm。crates.io には公開しない
+publish = false
 
 [dependencies]
 # Async runtime: proxy は常駐プロセスとして Runtime API を中継する
@@ -13,10 +16,8 @@ tokio = { version = "1", features = [
     "rt-multi-thread",
     "macros",
     "net",
-    "io-util",
     "process",
     "time",
-    "signal",
     "sync",
 ] }
 # HTTP: Runtime API / Extensions API は共にローカル HTTP/1.1
@@ -24,7 +25,6 @@ hyper = { version = "1", features = ["client", "server", "http1"] }
 hyper-util = { version = "0.1", features = [
     "client",
     "client-legacy",
-    "server",
     "tokio",
 ] }
 http-body-util = "0.1"

@@ -1,0 +1,3 @@
+# scripts/licenses/ は、上流の原文をそのまま写したもの。行末の空白も原文のまま残し、
+# GitHub の言語の集計からも外す（COPYRIGHT-library.html は大きな HTML）
+scripts/licenses/** -whitespace linguist-vendored

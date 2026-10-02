@@ -1,13 +1,18 @@
 //! Runtime API プロキシ。
 //!
 //! 子プロセス（実ランタイム）から見ると zankyo が Runtime API 本体に
-//! 見える。`/next`・`/response`・`/error`・`/init/error` だけを解釈し、
-//! それ以外のパスは一切触らず中継する（成功呼び出しの観測コストを
-//! ゼロに近づけるため、ボディを読むのは失敗判定が必要な経路だけ）。
+//! 見える。リクエストボディは経路を問わず `ZANKYO_MAX_BODY_KB` まで読んで
+//! から転送し、超えたら上流へ中継せず 413 を返す。超えた分は読み捨ててから返す
+//! （未読のまま閉じると、ランタイムには 413 ではなく接続のリセットが届くため）。
+//! ボディを解釈して記録に使うのは `/next`・`/response`・`/error`・`/init/error`
+//! だけで、それ以外のパス（`/restore/*` や、子プロセスから届く Extensions API・
+//! Telemetry API など）は記録せず中継する。
+//! `/next` のイベントは timeout 捕捉のため `/tmp` にステージし、完了時に消す。
+//! 成功呼び出しでは spill も S3 への PUT もしない。
 //! 各ルートの処理は `handlers.rs`、上流転送は `upstream.rs`。
 
 use crate::store::Recorder;
-use crate::upstream::{collect_bounded, forward, plain, strip_hop_by_hop, CollectError};
+use crate::upstream::{collect_or_discard, forward, plain, strip_hop_by_hop, CollectError};
 use bytes::Bytes;
 use http::{HeaderMap, Method, Request, Response, StatusCode};
 use http_body_util::{BodyExt, Full};
@@ -71,7 +76,8 @@ pub struct ProxyState {
     pub recorder: Arc<Recorder>,
     /// ボディ上限などの動作ノブ。env / SSM 由来の値をそのまま使う。
     pub cfg: crate::config::Config,
-    /// 進行中の save タスク。子終了時に残っていれば drain される。
+    /// 起動時の回収タスク（inflight 変換・spill 再送）。
+    /// 子終了時に残っていれば drain される。
     pub pending: PendingSaves,
     /// 処理中のハンドラ数。drain が「これ以上 save が増えない」
     /// 地点を判断するのに使う。
@@ -116,7 +122,11 @@ async fn handle(req: Request<Incoming>, st: &ProxyState) -> Response<BoxedBody> 
         .to_string();
     let path = parts.uri.path().to_string();
     let body_limit = st.cfg.max_body_kb.saturating_mul(1024);
-    let body_bytes = match collect_bounded(body, body_limit).await {
+    // ランタイムから届くボディの読み取りには、時間の上限を付けない。送り手は
+    // この関数自身のランタイムで、止まって待たされるのはその要求だけになる
+    // （関数のタイムアウトが上限になる）。時間で切ると、時間をかけて書き出す
+    // 応答（RESPONSE_STREAM）を途中で切ってしまう。
+    let body_bytes = match collect_or_discard(body, body_limit).await {
         Ok(b) => b,
         Err(CollectError::TooLarge) => {
             return plain(StatusCode::PAYLOAD_TOO_LARGE, "zankyo: body too large");
@@ -131,7 +141,7 @@ async fn handle(req: Request<Incoming>, st: &ProxyState) -> Response<BoxedBody> 
     };
 
     let segs: Vec<&str> = path.split('/').collect();
-    tracing::info!(method = %parts.method, path = %path, "runtime api request");
+    debug!(method = %parts.method, path = %path, "runtime api request");
     match (parts.method.as_str(), segs.as_slice()) {
         ("GET", ["", "2018-06-01", "runtime", "invocation", "next"]) => {
             crate::handlers::handle_next(
@@ -169,7 +179,8 @@ async fn handle(req: Request<Incoming>, st: &ProxyState) -> Response<BoxedBody> 
             .await
         }
         _ => {
-            // 対象外パス（/restore/next 等）は中継のみ
+            // 対象外パス（/restore/next 等）は記録せず中継だけする。
+            // ボディは上で上限付きで読み済み（超過は 413 で返している）
             forward_or_502(
                 st,
                 &parts.method,
@@ -242,7 +253,7 @@ pub(crate) async fn drain_pending(state: &ProxyState, budget: std::time::Duratio
             while let Some(res) = p.set.join_next().await {
                 // panic した回収タスクはレコードを失う — 数えて警告に残す
                 if let Err(e) = res {
-                    warn!(error = %e, "pending record save panicked");
+                    warn!(error = %e, "record recovery task panicked");
                 }
             }
         }
@@ -254,24 +265,5 @@ pub(crate) async fn drain_pending(state: &ProxyState, budget: std::time::Duratio
     };
     if tokio::time::timeout(budget, drain).await.is_err() {
         warn!("pending record saves did not finish before exit");
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn route_matching_shapes() {
-        let segs: Vec<&str> = "/2018-06-01/runtime/invocation/next".split('/').collect();
-        assert!(matches!(
-            segs.as_slice(),
-            ["", "2018-06-01", "runtime", "invocation", "next"]
-        ));
-        let segs: Vec<&str> = "/2018-06-01/runtime/invocation/abc/error"
-            .split('/')
-            .collect();
-        assert!(matches!(
-            segs.as_slice(),
-            ["", "2018-06-01", "runtime", "invocation", "abc", "error"]
-        ));
     }
 }

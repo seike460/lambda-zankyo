@@ -10,7 +10,7 @@ use time::OffsetDateTime;
 
 pub const RECORD_VERSION: &str = "1";
 /// S3 キーの先頭セグメント。CLI (cli/src/record.ts)・CDK construct の
-/// IAM スコープ (`zankyo/*`) と揃える規約。
+/// IAM スコープ (`zankyo/{function-name}/*`) と揃える規約。
 pub const KEY_PREFIX: &str = "zankyo";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -19,7 +19,8 @@ pub enum FailureType {
     HandlerError,
     /// `/init/error`。イベントは存在しない。
     InitError,
-    /// SHUTDOWN reason=timeout で応答が返らなかった in-flight 呼び出し。
+    /// 応答が返らないまま実行環境が畳まれた in-flight 呼び出し。
+    /// 関数のタイムアウトに限らない（理由は errorContext.errorType）。
     Timeout,
 }
 
@@ -71,17 +72,18 @@ pub struct FailureRecord {
     #[serde(rename = "errorContext")]
     pub error_context: ErrorContext,
     /// イベントが非 JSON ボディの生テキストで保存されている場合 true。
-    /// CLI は replay/redrive 時に JSON 再エンコードせず原文を送る。
-    #[serde(rename = "eventIsRawText", default, skip_serializing_if = "is_false")]
+    /// CLI の fixture は原文のまま書き出す。replay/diff/redrive は
+    /// Invoke API が JSON しか受け付けないため、invoke せず exit 4 で止める。
+    #[serde(rename = "eventIsRawText", skip_serializing_if = "is_false")]
     pub event_is_raw_text: bool,
     /// イベントが UTF-8 でないバイナリの場合 true。
-    /// `event` は base64 文字列として保持され、CLI は replay 時に
-    /// デコードして元のバイト列を再送する。
-    #[serde(rename = "eventIsBase64", default, skip_serializing_if = "is_false")]
+    /// `event` は base64 文字列として保持され、CLI の fixture はその文字列を
+    /// そのまま書き出す。replay/diff/redrive は生テキストと同じく exit 4 で止める。
+    #[serde(rename = "eventIsBase64", skip_serializing_if = "is_false")]
     pub event_is_base64: bool,
     #[serde(rename = "scrubReport")]
     pub scrub_report: ScrubReportJson,
-    #[serde(default, skip_serializing_if = "is_false")]
+    #[serde(skip_serializing_if = "is_false")]
     pub truncated: bool,
 }
 
@@ -154,7 +156,8 @@ pub fn error_context_from_body(body: &[u8], header_error_type: Option<String>) -
         if let Some(m) = v.get("errorMessage").and_then(|x| x.as_str()) {
             ctx.error_message = Some(m.to_string());
         }
-        match v.get("stackTrace") {
+        // Node.js ランタイムはスタックを `trace` キーで送る
+        match v.get("stackTrace").or_else(|| v.get("trace")) {
             Some(Value::String(s)) => ctx.stack_trace = Some(s.clone()),
             Some(Value::Array(frames)) => {
                 ctx.stack_trace = Some(
@@ -241,6 +244,17 @@ mod tests {
         assert_eq!(ctx.error_type.as_deref(), Some("Error"));
         assert_eq!(ctx.error_message.as_deref(), Some("boom"));
         assert_eq!(ctx.stack_trace.as_deref(), Some("a\nb"));
+    }
+
+    #[test]
+    fn error_context_reads_nodejs_trace() {
+        let body = br#"{"errorType":"TypeError","errorMessage":"boom","trace":["TypeError: boom","    at handler (/var/task/index.js:3:9)"]}"#;
+        let ctx = error_context_from_body(body, None);
+        assert_eq!(ctx.error_type.as_deref(), Some("TypeError"));
+        assert_eq!(
+            ctx.stack_trace.as_deref(),
+            Some("TypeError: boom\n    at handler (/var/task/index.js:3:9)")
+        );
     }
 
     #[test]

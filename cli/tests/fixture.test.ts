@@ -41,6 +41,11 @@ describe('fixtureJson', () => {
     const raw: ZankyoRecord = { ...base, event: '<xml>not json</xml>', eventIsRawText: true };
     assert.equal(fixtureJson(raw), '<xml>not json</xml>\n');
   });
+
+  it('writes base64 events verbatim (no JSON quoting)', () => {
+    const b64: ZankyoRecord = { ...base, event: 'iVBORw==', eventIsBase64: true };
+    assert.equal(fixtureJson(b64), 'iVBORw==\n');
+  });
 });
 
 describe('eventPayload', () => {
@@ -48,21 +53,20 @@ describe('eventPayload', () => {
     assert.equal(eventPayload(base), '{"input":"data"}');
   });
 
-  it('passes raw text through unchanged', () => {
+  it('rejects raw text events with exitCode 4 (Invoke accepts only JSON)', () => {
     const raw: ZankyoRecord = { ...base, event: 'hello, world', eventIsRawText: true };
-    assert.equal(eventPayload(raw), 'hello, world');
+    assert.throws(
+      () => eventPayload(raw),
+      (e: unknown) => e instanceof CliError && e.exitCode === 4,
+    );
   });
 
-  it('decodes base64 events back to the original bytes', () => {
-    const original = new Uint8Array([0x89, 0x50, 0x4e, 0x47]);
-    const rec: ZankyoRecord = {
-      ...base,
-      event: Buffer.from(original).toString('base64'),
-      eventIsBase64: true,
-    };
-    const payload = eventPayload(rec);
-    assert.ok(payload instanceof Uint8Array);
-    assert.deepEqual([...payload], [...original]);
+  it('rejects base64 events with exitCode 4 (Invoke accepts only JSON)', () => {
+    const b64: ZankyoRecord = { ...base, event: 'iVBORw==', eventIsBase64: true };
+    assert.throws(
+      () => eventPayload(b64),
+      (e: unknown) => e instanceof CliError && e.exitCode === 4,
+    );
   });
 
   it('still rejects truncated records', () => {

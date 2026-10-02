@@ -9,6 +9,7 @@ import {
   isKnownFailureType,
   keyMatchesRequestId,
   parseRecord,
+  parseRecordKey,
   RECORD_PREFIX,
   type ZankyoRecord,
 } from './record.ts';
@@ -44,6 +45,7 @@ export async function listRecordKeys(
     : RECORD_PREFIX_SLASH;
   const refs: RecordRef[] = [];
   let token: string | undefined;
+  let pages = 0;
   do {
     const out = await listPage(s3, bucket, prefix, token);
     for (const o of out.Contents ?? []) {
@@ -52,16 +54,18 @@ export async function listRecordKeys(
       refs.push({ key: o.Key, lastModified: o.LastModified });
     }
     token = out.IsTruncated ? out.NextContinuationToken : undefined;
+    pages += 1;
     // S3 の list はキー辞書順（= 日付パーティション昇順）なので、
     // 途中で打ち切ると「最新」の判定が最古側のページだけで決まる。
     // --limit 指定時も新しい順に並べてから切るため、
-    // 上限ページまでは必ず走査する。
-  } while (token && refs.length < pageSize() * maxPages());
+    // 上限ページまでは必ず走査する。上限は --since で除外した分も含めた
+    // ページ数で数える（件数で数えると、古いページが続く限り止まらない）。
+  } while (token && pages < maxPages());
   if (token) {
     // 打ち切りを黙らせると --last が実際より古いレコードを
     // 「最新」と答える。絞り込み手段を添えて stderr へ警告する。
     console.error(
-      `zankyo: listing truncated at ${refs.length} objects; results may miss newer records — narrow with --function or increase ZANKYO_LIST_MAX_PAGES`,
+      `zankyo: listing truncated after ${pages} pages; results may miss newer records — narrow with --function or increase ZANKYO_LIST_MAX_PAGES`,
     );
   }
   refs.sort((a, b) => (b.lastModified?.getTime() ?? 0) - (a.lastModified?.getTime() ?? 0));
@@ -103,7 +107,11 @@ export async function fetchRecord(
       'zankyo records are expected to be small; refusing to buffer a huge object',
     );
   }
-  const text = await out.Body?.transformToString('utf-8');
+  // 本文は getObject の応答後にストリームで読む。読み取り途中の通信断も
+  // AWS 側の失敗なので、getObject の失敗と同じ exit 3 にする。
+  const text = await out.Body?.transformToString('utf-8').catch((e) => {
+    throw new CliError(`failed to read s3://${bucket}/${key}: ${errMessage(e)}`, 3);
+  });
   if (text === undefined) {
     throw new CliError(`empty object: s3://${bucket}/${key}`, 4);
   }
@@ -178,5 +186,16 @@ export async function loadRecord(
   q: KeyQuery,
 ): Promise<ZankyoRecord> {
   const key = await resolveRecordKey(s3, bucket, q);
-  return fetchRecord(s3, bucket, key);
+  const rec = await fetchRecord(s3, bucket, key);
+  // replay/diff/redrive の invoke 先は本文の functionName で決まる。
+  // キーの関数セグメント（--function の絞り込みもここに効く）と食い違う
+  // レコードは、別の関数への投入に使わせない。
+  if (parseRecordKey(key)?.functionName !== rec.functionName) {
+    throw new CliError(
+      `record at s3://${bucket}/${key} names function ${JSON.stringify(rec.functionName)}, which does not match its key`,
+      4,
+      'the record may have been written by another function; inspect it before replaying',
+    );
+  }
+  return rec;
 }

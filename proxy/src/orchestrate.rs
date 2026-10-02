@@ -35,21 +35,42 @@ const EXTERNAL_EXT_PATH: &str = "/opt/extensions/zankyo";
 /// （main.rs が空 argv をここへ振り分ける）。proxy と別プロセスの
 /// ため Runtime API へ自前で register し、SHUTDOWN で inflight
 /// ステージを timeout 記録へ変換する。
-/// 失敗しても exit 0: extension の非 0 終了は platform にエラーと
-/// 解釈されうるため、記録不能でも静かに畳む（fail-open）。
+/// passthrough でもすぐには終了しない: SHUTDOWN 前に extension が
+/// 終わると、終了コードに関係なく platform は Init を失敗させる。
+/// 記録しない場合も登録して SHUTDOWN まで待つ（fail-open）。
+/// SHUTDOWN の前に戻るのは、登録を拒否されたときと、Extensions API が
+/// 回復不能になったときだけ。その場合は 1 を返し、正常終了と区別する。
 pub async fn run_agent() -> u8 {
     let env_map: HashMap<String, String> = std::env::vars().collect();
-    let StartupPlan::Record(plan) = setup::resolve_plan(&env_map).await else {
-        return 0;
+    run_agent_with_env(&env_map).await
+}
+
+/// `run_agent` の本体。env を引数で受け、起動判定からの配線を
+/// プロセスの環境変数に触れずに検証できるようにする。
+pub async fn run_agent_with_env(env_map: &HashMap<String, String>) -> u8 {
+    let completed = match setup::resolve_plan(env_map).await {
+        StartupPlan::Record(plan) => {
+            let RecordPlan {
+                cfg,
+                shared,
+                upstream,
+            } = *plan;
+            let recorder = Arc::new(setup::build_recorder(&shared, cfg, env_map));
+            extension::run_agent(new_client(), upstream, recorder).await
+        }
+        StartupPlan::Passthrough => match env_map.get("AWS_LAMBDA_RUNTIME_API") {
+            Some(upstream) => {
+                extension::run_passthrough_agent(new_client(), upstream.clone()).await
+            }
+            // main.rs はこの変数があるときだけ agent を起動する。無ければ待つ相手もいない
+            None => true,
+        },
     };
-    let RecordPlan {
-        cfg,
-        shared,
-        upstream,
-    } = *plan;
-    let recorder = Arc::new(setup::build_recorder(&shared, cfg, &env_map));
-    extension::run_agent(new_client(), upstream, recorder).await;
-    0
+    if completed {
+        0
+    } else {
+        1
+    }
 }
 
 /// 実行本体。子プロセスの終了コードをそのまま返す。
@@ -81,17 +102,11 @@ pub async fn run(argv: &[OsString]) -> u8 {
     // 前回の実行で残った spill があれば再送する。非同期・ベストエフォートで、
     // 起動経路を遅らせない。初回再送は pending へ積み、終了時の drain に
     // 含める（早期終了時に PUT が途中で切られないようにする）。
-    // 先に inflight 残滓を変換する — 「応答なく環境が畳まれた呼び出し」
-    // を timeout レコード化してから、溜まった spill 全件を再送する順。
-    // 順序不変条件: このタスクは serve 開始前に積む。稼働後に
-    // recover_inflights を呼ぶと進行中の呼び出しを未完と誤認する。
+    // 順序不変条件: 回収する inflight 残滓の一覧は serve 開始前に確定する
+    // （startup_recovery）。稼働後に列挙すると進行中の呼び出しを未完と誤認する。
     {
-        let rec = recorder.clone();
-        pending.lock().await.set.spawn(async move {
-            // 前環境の残滓は shutdown reason が分からない（None=unknown）
-            rec.recover_inflights(None).await;
-            rec.recover_spills().await;
-        });
+        let recovery = startup_recovery(recorder.clone());
+        pending.lock().await.set.spawn(recovery);
     }
     // 生存中も定期再送する。S3 の一時障害が回復した時点で
     // /tmp を空に戻し、溜まったままの状態を放置しない。
@@ -127,27 +142,27 @@ pub async fn run(argv: &[OsString]) -> u8 {
     // layer に /opt/extensions/zankyo が含まれる環境では、platform が
     // external extension として別プロセスで agent を起動する。
     // internal register は SHUTDOWN を拒否されるため、その場合は省く。
+    // SHUTDOWN フラッシュは agent が担い、その完了はこのプロセスから
+    // 観測できないので、待つハンドルも持たない（None）。
     let has_external_ext = std::path::Path::new(EXTERNAL_EXT_PATH).exists();
     let shutdown = if has_external_ext {
         info!("external extension detected; internal register skipped");
-        // 決して解決しないハンドル — false を返すと wait_for_exit が
-        // 「extension 死亡」の warn を毎回 init で出してしまう。
-        // SHUTDOWN フラッシュは別プロセスの agent が担う。
-        tokio::spawn(std::future::pending::<bool>())
+        None
     } else {
-        tokio::spawn(start_extension(
+        Some(tokio::spawn(start_extension(
             client,
             upstream,
             register_timeout,
             state.inflight.clone(),
             state.recorder.clone(),
-        ))
+        )))
     };
 
     let (code, pending_shutdown) = wait_for_exit(&mut child, shutdown).await;
     // 子が先に落ちた場合、Lambda がランタイム死亡を検知して SHUTDOWN を
-    // 配信するまで数十〜数百 ms ある。in-flight が残っているなら
-    // bounded に待って、extension 側の正式なフラッシュ（spill+PUT）に任せる。
+    // 配信するまで数十〜数百 ms ある。同じプロセスの extension が
+    // in-flight を持ったまま生きているなら、bounded に待って
+    // extension 側の正式なフラッシュ（spill+PUT）に任せる。
     if let Some(h) = pending_shutdown {
         if !state.inflight.is_empty() {
             let grace = state.cfg.flush_budget_ms.min(SHUTDOWN_GRACE_CAP_MS);
@@ -181,6 +196,22 @@ pub async fn run(argv: &[OsString]) -> u8 {
     code
 }
 
+/// 起動時の回収処理を作る。先に inflight 残滓を変換する —
+/// 「応答なく環境が畳まれた呼び出し」を timeout レコード化してから、
+/// 溜まった spill 全件を再送する順。
+/// 回収する `.inflight` の一覧は、この関数を呼んだ時点で確定させる。
+/// 返す Future の中で列挙すると、serve 開始後に届いた初回 `/next` の
+/// ステージまで拾い、実行中の呼び出しを timeout と誤記録しうる。
+/// そのため serve を始める前に呼ぶ。
+pub fn startup_recovery(recorder: Arc<Recorder>) -> impl std::future::Future<Output = ()> + Send {
+    let leftovers = recorder.pending_inflights();
+    async move {
+        // 前環境の残滓は shutdown reason が分からない（None=unknown）
+        recorder.recover_inflight_paths(leftovers, None).await;
+        recorder.recover_spills().await;
+    }
+}
+
 /// 自分自身を Runtime API として listen する。
 async fn bind_proxy_listener() -> Option<TcpListener> {
     match TcpListener::bind("127.0.0.1:0").await {
@@ -210,6 +241,10 @@ fn spawn_child(argv: &[OsString], listener: &TcpListener) -> Option<Child> {
     }
 }
 
+/// exec wrapper プロセス内からの internal register。
+/// `/opt/extensions/zankyo` を含まない独自 Layer 向けのフォールバック。
+/// AWS は internal extension の SHUTDOWN 購読を認めないため、
+/// 実環境では register が拒否されうる。
 /// extension 登録はベストエフォート: 失敗しても proxy 経由の
 /// /error・/response 捕捉は残る（timeout 捕捉だけが失われる）。
 /// SHUTDOWN 受信時に `true`、それ以外で終われば `false` を返す。
@@ -220,9 +255,10 @@ async fn start_extension(
     inflight: Arc<InFlight>,
     recorder: Arc<Recorder>,
 ) -> bool {
-    match extension::register(&client, &upstream, register_timeout).await {
+    let retry = std::time::Duration::from_millis(recorder.config().ext_retry_ms);
+    match extension::register(&client, &upstream, register_timeout, retry).await {
         Ok(ext_id) => {
-            info!("registered as external extension");
+            info!("registered as internal extension");
             extension::run_event_loop(client, upstream, ext_id, inflight, recorder).await
         }
         Err(e) => {
@@ -234,14 +270,19 @@ async fn start_extension(
 
 /// 子の終了コードをそのまま返す。SHUTDOWN フラッシュ後に extension 側が
 /// 先に終わる場合は正常終了（0）として抜ける。ただし extension が
-/// SHUTDOWN 以外の理由（ポーリング断等）で終わった場合は、子プロセスの
-/// 完了を待ち続ける — ここで抜けると関数実行中に子を殺してしまう。
+/// SHUTDOWN 以外の理由（登録の拒否・Extensions API の回復不能なエラー等）で
+/// 終わった場合は、子プロセスの完了を待ち続ける — ここで抜けると
+/// 関数実行中に子を殺してしまう。
+/// `shutdown` が None（プロセス内に extension が無い）なら子だけを待つ。
 /// 戻り値の Some(handle) は「子が先に終わり extension が生存中」の場合で、
 /// 呼び出し側が SHUTDOWN 到着を短く待つ判断に使う。
 async fn wait_for_exit(
     child: &mut Child,
-    mut shutdown: JoinHandle<bool>,
+    shutdown: Option<JoinHandle<bool>>,
 ) -> (u8, Option<JoinHandle<bool>>) {
+    let Some(mut shutdown) = shutdown else {
+        return (exit_code(child.wait().await), None);
+    };
     tokio::select! {
         status = child.wait() => (exit_code(status), Some(shutdown)),
         res = &mut shutdown => match res {
@@ -251,5 +292,36 @@ async fn wait_for_exit(
                 (exit_code(child.wait().await), None)
             }
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn exiting_child(code: u8) -> Child {
+        tokio::process::Command::new("sh")
+            .args(["-c", &format!("exit {code}")])
+            .spawn()
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn wait_for_exit_without_extension_returns_no_handle() {
+        // external extension 構成: 待つハンドルが無いので grace 待ちも起きない
+        let mut child = exiting_child(3);
+        let (code, pending) = wait_for_exit(&mut child, None).await;
+        assert_eq!(code, 3);
+        assert!(pending.is_none());
+    }
+
+    #[tokio::test]
+    async fn wait_for_exit_keeps_live_extension_handle() {
+        let mut child = exiting_child(3);
+        let ext = tokio::spawn(std::future::pending::<bool>());
+        let (code, pending) = wait_for_exit(&mut child, Some(ext)).await;
+        assert_eq!(code, 3);
+        let h = pending.expect("live in-process extension handle");
+        h.abort();
     }
 }

@@ -3,7 +3,8 @@
 //! 設定全体の解決順序と既定値は `config.rs` 参照。ここでは
 //! SSM 値の型別変換とキー → フィールドの写像だけを扱う。
 //! 数値キーは `SSM_NUM_FIELDS` テーブル駆動なので、新しい数値設定は
-//! 1 行足すだけで overlay 対応になる。
+//! 1 行足すだけで overlay 対応になる。ただし SSM を読む前に使う値は
+//! 載せない（`ENV_ONLY_KEYS`）。
 
 use crate::config::{parse_bool, parse_fields, parse_mode, valid_spill_dir, Config};
 use crate::error::{Result, ZankyoError};
@@ -29,9 +30,13 @@ const SSM_NUM_FIELDS: &[(&str, NumSetter)] = &[
         c.register_timeout_ms = n
     }),
     ("ZANKYO_EXT_RETRY_MS", |c, n| c.ext_retry_ms = n),
-    ("ZANKYO_SSM_TIMEOUT_MS", |c, n| c.ssm_timeout_ms = n),
     ("ZANKYO_FORWARD_TIMEOUT_MS", |c, n| c.forward_timeout_ms = n),
 ];
+
+/// env でだけ指定できるキー。どちらも SSM を読む前に使う（取得先の
+/// パラメータ名と取得の上限時間）ため、JSON で上書きしても効かない。
+/// 書かれていたら、未知のキーとは別の警告を出して無視する。
+const ENV_ONLY_KEYS: &[&str] = &["ZANKYO_SSM_PARAM", "ZANKYO_SSM_TIMEOUT_MS"];
 
 fn num_setter(key: &str) -> Option<NumSetter> {
     SSM_NUM_FIELDS
@@ -116,6 +121,10 @@ impl Config {
                         }
                     }
                 }
+                k if ENV_ONLY_KEYS.contains(&k) => tracing::warn!(
+                    key = k,
+                    "this key is used before the SSM fetch and can only be set in the environment; ignored"
+                ),
                 other => tracing::warn!(key = other, "unknown ZANKYO_SSM_PARAM key; ignored"),
             }
         }
@@ -208,7 +217,7 @@ mod tests {
     }
 
     #[test]
-    fn ssk_bad_field_does_not_drop_whole_overlay() {
+    fn ssm_bad_field_does_not_drop_whole_overlay() {
         // 1 フィールドの型違いで overlay 全体が捨てられると、
         // SSM 側にしか無い bucket まで失って記録が止まる。
         let mut cfg = Config::from_env_map(&env(&[])).unwrap();
@@ -221,6 +230,30 @@ mod tests {
         assert_eq!(cfg.max_event_kb, 64); // 文字列数値も受理
         assert_eq!(cfg.put_timeout_ms, DEFAULT_PUT_TIMEOUT_MS); // 型違いは既定値のまま
         assert_eq!(cfg.flush_budget_ms, DEFAULT_FLUSH_BUDGET_MS); // 0 は拒否
+    }
+
+    #[test]
+    fn ssm_does_not_overlay_keys_used_before_the_fetch() {
+        // SSM の取得先と取得の上限時間は、取得の前に env から決まる。
+        // JSON の値で Config を書き換えると、効かない値が設定に見えてしまう。
+        let mut cfg = Config::from_env_map(&env(&[
+            ("ZANKYO_SSM_PARAM", "/zankyo/config"),
+            ("ZANKYO_SSM_TIMEOUT_MS", "3000"),
+        ]))
+        .unwrap();
+        cfg.overlay_ssm_json(
+            r#"{"ZANKYO_SSM_PARAM":"/other","ZANKYO_SSM_TIMEOUT_MS":9000,"ZANKYO_BUCKET":"b"}"#,
+        )
+        .unwrap();
+        assert_eq!(cfg.ssm_timeout_ms, 3000);
+        assert_eq!(cfg.ssm_param.as_deref(), Some("/zankyo/config"));
+        assert_eq!(cfg.bucket, "b"); // ほかのキーは従来どおり上書きする
+        for key in ENV_ONLY_KEYS {
+            assert!(
+                num_setter(key).is_none(),
+                "{key} must not be in SSM_NUM_FIELDS"
+            );
+        }
     }
 
     #[test]

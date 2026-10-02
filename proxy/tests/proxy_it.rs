@@ -98,15 +98,39 @@ async fn wait_for(ms: u64, mut f: impl FnMut() -> bool) -> bool {
 
 static NEXT_SPILL: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 
-/// `endpoint` (mock S3) に向けた Recorder。spill はテストごとに
-/// 一意の一時 dir を使い、テスト間・リラン間で残滓を共有しない。
-fn recorder_to(endpoint: &str) -> Arc<Recorder> {
-    let n = NEXT_SPILL.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let dir = std::env::temp_dir().join(format!("zankyo-it-{}-{}", std::process::id(), n));
-    recorder_to_with_spill(endpoint, &dir)
+/// テストごとに一意な spill dir。Drop で消すので、アサーションの
+/// 失敗で抜けた場合も一時ディレクトリが残らない。
+struct SpillDir(std::path::PathBuf);
+
+impl SpillDir {
+    fn new() -> Self {
+        let n = NEXT_SPILL.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Self(std::env::temp_dir().join(format!("zankyo-it-{}-{}", std::process::id(), n)))
+    }
 }
 
-fn recorder_to_with_spill(endpoint: &str, spill: &std::path::Path) -> Arc<Recorder> {
+impl std::ops::Deref for SpillDir {
+    type Target = std::path::Path;
+    fn deref(&self) -> &std::path::Path {
+        &self.0
+    }
+}
+
+impl Drop for SpillDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// `endpoint` (mock S3) に向けた Recorder と、その spill dir。
+/// spill dir は戻り値を保持している間だけ残る。
+fn recorder_to(endpoint: &str) -> (Arc<Recorder>, SpillDir) {
+    recorder_with_env(endpoint, &[])
+}
+
+/// `recorder_to` に env 設定を足したもの。
+fn recorder_with_env(endpoint: &str, extra: &[(&str, &str)]) -> (Arc<Recorder>, SpillDir) {
+    let spill = SpillDir::new();
     let conf = aws_sdk_s3::Config::builder()
         .region(aws_sdk_s3::config::Region::new("us-east-1"))
         .credentials_provider(aws_sdk_s3::config::SharedCredentialsProvider::new(
@@ -116,20 +140,22 @@ fn recorder_to_with_spill(endpoint: &str, spill: &std::path::Path) -> Arc<Record
         .force_path_style(true)
         .behavior_version(aws_sdk_s3::config::BehaviorVersion::latest())
         .build();
-    let cfg = Config::from_env_map(&HashMap::from([
+    let mut env = HashMap::from([
         ("ZANKYO_BUCKET".to_string(), "test-bucket".to_string()),
         (
             "ZANKYO_SPILL_DIR".to_string(),
             spill.to_string_lossy().into_owned(),
         ),
-    ]))
-    .unwrap();
-    Arc::new(Recorder::new(
+    ]);
+    env.extend(extra.iter().map(|(k, v)| (k.to_string(), v.to_string())));
+    let cfg = Config::from_env_map(&env).unwrap();
+    let recorder = Arc::new(Recorder::new(
         aws_sdk_s3::Client::from_conf(conf),
         cfg,
         "test-fn".to_string(),
         "42".to_string(),
-    ))
+    ));
+    (recorder, spill)
 }
 
 /// zankyo proxy を addr から listen させる。
@@ -222,7 +248,8 @@ async fn handler_error_is_forwarded_scrubbed_and_recorded() {
     })
     .await;
     let inflight = Arc::new(InFlight::new());
-    let proxy = spawn_proxy(&api_addr, inflight.clone(), recorder_to(&s3_addr)).await;
+    let (recorder, _spill) = recorder_to(&s3_addr);
+    let proxy = spawn_proxy(&api_addr, inflight.clone(), recorder).await;
 
     // 1. ランタイムが /next をポーリング → イベントは素通り（中身を変えない）
     let (status, body) = call(
@@ -279,7 +306,8 @@ async fn successful_response_is_not_recorded() {
     let (api_addr, _api) = spawn_mock(runtime_api_handler()).await;
     let (s3_addr, s3_hits) = spawn_mock(|_m, _p, _h, _b| ok_empty()).await;
     let inflight = Arc::new(InFlight::new());
-    let proxy = spawn_proxy(&api_addr, inflight.clone(), recorder_to(&s3_addr)).await;
+    let (recorder, _spill) = recorder_to(&s3_addr);
+    let proxy = spawn_proxy(&api_addr, inflight.clone(), recorder).await;
 
     call(
         &proxy,
@@ -307,7 +335,8 @@ async fn response_with_error_type_is_recorded() {
     let (api_addr, _api) = spawn_mock(runtime_api_handler()).await;
     let (s3_addr, s3_hits) = spawn_mock(|_m, _p, _h, _b| ok_empty()).await;
     let inflight = Arc::new(InFlight::new());
-    let proxy = spawn_proxy(&api_addr, inflight.clone(), recorder_to(&s3_addr)).await;
+    let (recorder, _spill) = recorder_to(&s3_addr);
+    let proxy = spawn_proxy(&api_addr, inflight.clone(), recorder).await;
 
     call(
         &proxy,
@@ -337,7 +366,8 @@ async fn init_error_records_without_event() {
     let (api_addr, _api) = spawn_mock(|_m, _p, _h, _b| ok_empty()).await;
     let (s3_addr, s3_hits) = spawn_mock(|_m, _p, _h, _b| ok_empty()).await;
     let inflight = Arc::new(InFlight::new());
-    let proxy = spawn_proxy(&api_addr, inflight, recorder_to(&s3_addr)).await;
+    let (recorder, _spill) = recorder_to(&s3_addr);
+    let proxy = spawn_proxy(&api_addr, inflight, recorder).await;
 
     let (status, _) = call(
         &proxy,
@@ -379,8 +409,7 @@ async fn shutdown_flushes_inflight_as_timeout() {
         encoding: EventEncoding::Json,
         invoked_at: OffsetDateTime::now_utc(),
     });
-    let spill_dir = std::env::temp_dir().join(format!("zankyo-it-shutdown-{}", std::process::id()));
-    let recorder = recorder_to_with_spill(&s3_addr, &spill_dir);
+    let (recorder, spill_dir) = recorder_to(&s3_addr);
 
     zankyo::extension::run_event_loop(
         new_client(),
@@ -403,7 +432,6 @@ async fn shutdown_flushes_inflight_as_timeout() {
     // S3 へ届いた spill は成功時に掃除される（残すと次回 init で冗長 PUT）
     let spill = spill_dir.join("zankyo-req-timeout.json");
     assert!(!spill.exists());
-    let _ = std::fs::remove_dir_all(&spill_dir);
 }
 
 #[tokio::test]
@@ -412,7 +440,8 @@ async fn non_runtime_paths_are_forwarded_without_recording() {
     let (api_addr, api_hits) = spawn_mock(|_m, _p, _h, _b| ok_body(json!({"proxied": true}))).await;
     let (s3_addr, s3_hits) = spawn_mock(|_m, _p, _h, _b| ok_empty()).await;
     let inflight = Arc::new(InFlight::new());
-    let proxy = spawn_proxy(&api_addr, inflight, recorder_to(&s3_addr)).await;
+    let (recorder, _spill) = recorder_to(&s3_addr);
+    let proxy = spawn_proxy(&api_addr, inflight, recorder).await;
 
     let (status, body) = call(
         &proxy,
@@ -451,7 +480,8 @@ async fn raw_text_event_is_recorded_verbatim() {
     .await;
     let (s3_addr, s3_hits) = spawn_mock(|_m, _p, _h, _b| ok_empty()).await;
     let inflight = Arc::new(InFlight::new());
-    let proxy = spawn_proxy(&api_addr, inflight, recorder_to(&s3_addr)).await;
+    let (recorder, _spill) = recorder_to(&s3_addr);
+    let proxy = spawn_proxy(&api_addr, inflight, recorder).await;
 
     call(
         &proxy,
@@ -491,7 +521,8 @@ async fn binary_event_is_stored_as_base64() {
     .await;
     let (s3_addr, s3_hits) = spawn_mock(|_m, _p, _h, _b| ok_empty()).await;
     let inflight = Arc::new(InFlight::new());
-    let proxy = spawn_proxy(&api_addr, inflight, recorder_to(&s3_addr)).await;
+    let (recorder, _spill) = recorder_to(&s3_addr);
+    let proxy = spawn_proxy(&api_addr, inflight, recorder).await;
 
     call(
         &proxy,
@@ -525,7 +556,8 @@ async fn error_context_pii_is_scrubbed() {
     let (api_addr, _api) = spawn_mock(runtime_api_handler()).await;
     let (s3_addr, s3_hits) = spawn_mock(|_m, _p, _h, _b| ok_empty()).await;
     let inflight = Arc::new(InFlight::new());
-    let proxy = spawn_proxy(&api_addr, inflight, recorder_to(&s3_addr)).await;
+    let (recorder, _spill) = recorder_to(&s3_addr);
+    let proxy = spawn_proxy(&api_addr, inflight, recorder).await;
 
     call(
         &proxy,
@@ -556,12 +588,50 @@ async fn error_context_pii_is_scrubbed() {
 }
 
 #[tokio::test]
+async fn scrub_off_keeps_error_context_verbatim() {
+    // ZANKYO_SCRUB_MODE=off は errorMessage・stackTrace の自由テキストも書き換えない
+    let (api_addr, _api) = spawn_mock(runtime_api_handler()).await;
+    let (s3_addr, s3_hits) = spawn_mock(|_m, _p, _h, _b| ok_empty()).await;
+    let inflight = Arc::new(InFlight::new());
+    let (recorder, _spill) = recorder_with_env(&s3_addr, &[("ZANKYO_SCRUB_MODE", "off")]);
+    let proxy = spawn_proxy(&api_addr, inflight, recorder).await;
+
+    call(
+        &proxy,
+        Method::GET,
+        "/2018-06-01/runtime/invocation/next",
+        None,
+    )
+    .await;
+    let message = "duplicate email alice@example.com key AKIAIOSFODNN7EXAMPLE";
+    let trace = [
+        "Error: Bearer abcdefghijk123",
+        "    at handler (index.js:3:9)",
+    ];
+    call(
+        &proxy,
+        Method::POST,
+        "/2018-06-01/runtime/invocation/req-123/error",
+        Some(json!({"errorType": "E", "errorMessage": message, "stackTrace": trace})),
+    )
+    .await;
+    assert!(wait_for(2_000, || !captured(&s3_hits).is_empty()).await);
+    let (_, _, body) = captured(&s3_hits).remove(0);
+    let rec: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(rec["event"]["password"], "hunter2");
+    assert_eq!(rec["errorContext"]["errorMessage"], message);
+    assert_eq!(rec["errorContext"]["stackTrace"], trace.join("\n"));
+    assert_eq!(rec["scrubReport"]["patternsApplied"], json!([]));
+}
+
+#[tokio::test]
 async fn second_error_call_does_not_overwrite_record() {
     // 同一 requestId の /error 再試行は記録済みフラグで抑止される
     let (api_addr, _api) = spawn_mock(runtime_api_handler()).await;
     let (s3_addr, s3_hits) = spawn_mock(|_m, _p, _h, _b| ok_empty()).await;
     let inflight = Arc::new(InFlight::new());
-    let proxy = spawn_proxy(&api_addr, inflight, recorder_to(&s3_addr)).await;
+    let (recorder, _spill) = recorder_to(&s3_addr);
+    let proxy = spawn_proxy(&api_addr, inflight, recorder).await;
 
     call(
         &proxy,
@@ -595,8 +665,7 @@ async fn inflight_stage_is_cleared_on_completion() {
     // 正常完了分が残ると次回 init で誤って timeout 記録される。
     let (api_addr, _api) = spawn_mock(runtime_api_handler()).await;
     let (s3_addr, _s3) = spawn_mock(|_m, _p, _h, _b| ok_empty()).await;
-    let spill_dir = std::env::temp_dir().join(format!("zankyo-it-infl-{}", std::process::id()));
-    let recorder = recorder_to_with_spill(&s3_addr, &spill_dir);
+    let (recorder, spill_dir) = recorder_to(&s3_addr);
     let inflight = Arc::new(InFlight::new());
     let proxy = spawn_proxy(&api_addr, inflight, recorder).await;
     let stage = spill_dir.join("zankyo-req-123.inflight");
@@ -618,7 +687,6 @@ async fn inflight_stage_is_cleared_on_completion() {
     .await;
     assert_eq!(status, StatusCode::OK);
     assert!(!stage.exists());
-    let _ = std::fs::remove_dir_all(&spill_dir);
 }
 
 #[tokio::test]
@@ -626,8 +694,7 @@ async fn leftover_inflight_stage_becomes_timeout_record() {
     // external extension / init 時回収: 残った .inflight ステージを
     // timeout レコードへ変換し、ステージ本体は消える。
     let (s3_addr, s3_hits) = spawn_mock(|_m, _p, _h, _b| ok_empty()).await;
-    let spill_dir = std::env::temp_dir().join(format!("zankyo-it-infl2-{}", std::process::id()));
-    let recorder = recorder_to_with_spill(&s3_addr, &spill_dir);
+    let (recorder, spill_dir) = recorder_to(&s3_addr);
     let inv = Invocation {
         request_id: "req-stuck".to_string(),
         event: json!({"token": "secret-token-value"}),
@@ -651,7 +718,853 @@ async fn leftover_inflight_stage_becomes_timeout_record() {
     // 変換後はステージも spill も残らない（PUT 成功時）
     assert!(!stage.exists());
     assert!(!spill_dir.join("zankyo-req-stuck.json").exists());
-    let _ = std::fs::remove_dir_all(&spill_dir);
+}
+
+#[tokio::test]
+async fn startup_recovery_leaves_the_first_invocation_alone() {
+    // 起動時回収の対象は serve 開始前に確定する。回収が動き出す前に
+    // 初回 /next が届いても、実行中の呼び出しを timeout と誤記録しない。
+    let (api_addr, _api) = spawn_mock(runtime_api_handler()).await;
+    let (s3_addr, s3_hits) = spawn_mock(|_m, _p, _h, _b| ok_empty()).await;
+    let (recorder, spill_dir) = recorder_to(&s3_addr);
+    // 前の実行環境が残したステージ
+    recorder.stage_inflight(&Invocation {
+        request_id: "req-leftover".to_string(),
+        event: json!({"input": 1}),
+        encoding: EventEncoding::Json,
+        invoked_at: OffsetDateTime::now_utc(),
+    });
+    let recovery = zankyo::orchestrate::startup_recovery(recorder.clone());
+    let proxy = spawn_proxy(&api_addr, Arc::new(InFlight::new()), recorder).await;
+
+    // 回収を後回しにし、その前に初回 /next を通す
+    call(
+        &proxy,
+        Method::GET,
+        "/2018-06-01/runtime/invocation/next",
+        None,
+    )
+    .await;
+    let running = spill_dir.join("zankyo-req-123.inflight");
+    assert!(running.exists());
+    recovery.await;
+
+    let puts: Vec<String> = captured(&s3_hits)
+        .into_iter()
+        .filter(|(m, _, _)| m == "PUT")
+        .map(|(_, p, _)| p)
+        .collect();
+    assert_eq!(puts.len(), 1, "{puts:?}");
+    assert!(puts[0].contains("req-leftover.json"));
+    assert!(!spill_dir.join("zankyo-req-leftover.inflight").exists());
+    assert!(
+        running.exists(),
+        "the running invocation must not be recorded as a timeout"
+    );
+}
+
+/// `up` が false の間は PutObject を 403 で拒否する S3 モック。
+/// 403 は SDK が再試行しないため、失敗が 1 回の PUT で確定する。
+async fn spawn_switchable_s3() -> (String, Captured, Arc<std::sync::atomic::AtomicBool>) {
+    let up = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let (addr, hits) = spawn_mock({
+        let up = up.clone();
+        move |_m, _p, _h, _b| {
+            if up.load(std::sync::atomic::Ordering::SeqCst) {
+                return ok_empty();
+            }
+            Response::builder()
+                .status(StatusCode::FORBIDDEN)
+                .body(boxed_full(Bytes::from_static(
+                    b"<Error><Code>AccessDenied</Code><Message>Access Denied</Message></Error>",
+                )))
+                .unwrap()
+        }
+    })
+    .await;
+    (addr, hits, up)
+}
+
+#[tokio::test]
+async fn inflight_stage_survives_when_spill_and_put_both_fail() {
+    // spill の書き込みと S3 PUT がともに失敗すると、.inflight ステージが
+    // timeout レコードの最後のコピーになる。消さずに残し、両方が回復した後の
+    // 回収で記録できること。
+    let (s3_addr, s3_hits, s3_up) = spawn_switchable_s3().await;
+    let (recorder, spill_dir) = recorder_to(&s3_addr);
+    recorder.stage_inflight(&Invocation {
+        request_id: "req-last".to_string(),
+        event: json!({"input": 1}),
+        encoding: EventEncoding::Json,
+        invoked_at: OffsetDateTime::now_utc(),
+    });
+    let stage = spill_dir.join("zankyo-req-last.inflight");
+    // spill の書き込み先をディレクトリで塞ぎ、rename を失敗させる
+    let spill_blocker = spill_dir.join("zankyo-req-last.json");
+    std::fs::create_dir(&spill_blocker).unwrap();
+    let record_puts = || {
+        captured(&s3_hits)
+            .into_iter()
+            .filter(|(m, p, _)| m == "PUT" && p.contains("req-last.json"))
+            .count()
+    };
+
+    recorder.recover_inflights(None).await;
+
+    assert_eq!(record_puts(), 1, "the PUT must have been attempted");
+    assert!(stage.exists(), "the last copy of the record must survive");
+
+    std::fs::remove_dir(&spill_blocker).unwrap();
+    s3_up.store(true, std::sync::atomic::Ordering::SeqCst);
+    recorder.recover_inflights(None).await;
+
+    assert_eq!(record_puts(), 2);
+    assert!(!stage.exists());
+    assert!(!spill_blocker.exists());
+}
+
+#[tokio::test]
+async fn unreadable_inflight_stage_is_kept_for_retry() {
+    // 読み取りの失敗は一時的でありうる。パースできないステージとは違い、
+    // 最後の証跡なので消さない。読めるようになった後の回収で記録する。
+    use std::os::unix::fs::PermissionsExt;
+    let (s3_addr, s3_hits) = spawn_mock(|_m, _p, _h, _b| ok_empty()).await;
+    let (recorder, spill_dir) = recorder_to(&s3_addr);
+    recorder.stage_inflight(&Invocation {
+        request_id: "req-locked".to_string(),
+        event: json!({"input": 1}),
+        encoding: EventEncoding::Json,
+        invoked_at: OffsetDateTime::now_utc(),
+    });
+    let stage = spill_dir.join("zankyo-req-locked.inflight");
+    std::fs::set_permissions(&stage, std::fs::Permissions::from_mode(0o000)).unwrap();
+    if std::fs::read(&stage).is_ok() {
+        // root はモードに関係なく読めるため、この条件を作れない
+        return;
+    }
+
+    recorder.recover_inflights(None).await;
+
+    assert!(stage.exists(), "an unreadable stage must not be deleted");
+    assert!(captured(&s3_hits).is_empty());
+
+    std::fs::set_permissions(&stage, std::fs::Permissions::from_mode(0o600)).unwrap();
+    recorder.recover_inflights(None).await;
+
+    assert_eq!(captured(&s3_hits).len(), 1);
+    assert!(!stage.exists());
+}
+
+#[tokio::test]
+async fn failed_put_keeps_spill_until_recovery_resends_it() {
+    // S3 が PutObject を拒否する間は spill が残り、回復後の recover_spills が
+    // 同じキーへ同じレコードを再送して spill を消す（write-ahead の本線）。
+    let (api_addr, _api) = spawn_mock(runtime_api_handler()).await;
+    let s3_up = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let (s3_addr, s3_hits) = spawn_mock({
+        let s3_up = s3_up.clone();
+        move |_m, _p, _h, _b| {
+            if s3_up.load(std::sync::atomic::Ordering::SeqCst) {
+                return ok_empty();
+            }
+            Response::builder()
+                .status(StatusCode::FORBIDDEN)
+                .body(boxed_full(Bytes::from_static(
+                    b"<Error><Code>AccessDenied</Code><Message>Access Denied</Message></Error>",
+                )))
+                .unwrap()
+        }
+    })
+    .await;
+    let (recorder, spill_dir) = recorder_to(&s3_addr);
+    let proxy = spawn_proxy(&api_addr, Arc::new(InFlight::new()), recorder.clone()).await;
+    let spilled = spill_dir.join("zankyo-req-123.json");
+    let record_puts = || {
+        captured(&s3_hits)
+            .into_iter()
+            .filter(|(m, p, _)| m == "PUT" && p.contains("req-123.json"))
+            .collect::<Vec<_>>()
+    };
+
+    call(
+        &proxy,
+        Method::GET,
+        "/2018-06-01/runtime/invocation/next",
+        None,
+    )
+    .await;
+    let (status, _) = call(
+        &proxy,
+        Method::POST,
+        "/2018-06-01/runtime/invocation/req-123/error",
+        Some(json!({"errorType": "E", "errorMessage": "x"})),
+    )
+    .await;
+    // 記録の失敗は関数の応答を止めない
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(record_puts().len(), 1);
+    assert!(spilled.exists(), "rejected PUT must keep the spill");
+    assert!(!spill_dir.join("zankyo-req-123.inflight").exists());
+
+    s3_up.store(true, std::sync::atomic::Ordering::SeqCst);
+    recorder.recover_spills().await;
+
+    let puts = record_puts();
+    assert_eq!(puts.len(), 2);
+    assert_eq!(puts[1].1, puts[0].1, "resend must target the same key");
+    assert_eq!(puts[1].2, puts[0].2, "resend must carry the same record");
+    assert!(!spilled.exists());
+    // 空になった spill dir は消さない。消すと、同時に走るステージや
+    // spill の書き込みが ENOENT で失敗する。
+    assert!(spill_dir.exists());
+}
+
+/// S3 モックが PutObject で受けた (x-amz-server-side-encryption, KMS キー ID)。
+type SseHeaders = Arc<Mutex<Vec<(Option<String>, Option<String>)>>>;
+
+#[tokio::test]
+async fn record_put_requests_server_side_encryption() {
+    // 既定は SSE-S3（AES256）。ZANKYO_KMS_KEY 指定時は SSE-KMS とそのキー
+    let kms = "arn:aws:kms:us-east-1:111122223333:key/test";
+    for (extra, want) in [
+        (vec![], (Some("AES256"), None)),
+        (vec![("ZANKYO_KMS_KEY", kms)], (Some("aws:kms"), Some(kms))),
+    ] {
+        let seen: SseHeaders = Arc::new(Mutex::new(Vec::new()));
+        let (s3_addr, _s3) = spawn_mock({
+            let seen = seen.clone();
+            move |m, _p, h, _b| {
+                if m == "PUT" {
+                    let header = |k: &str| h.get(k).and_then(|v| v.to_str().ok()).map(String::from);
+                    seen.lock().unwrap().push((
+                        header("x-amz-server-side-encryption"),
+                        header("x-amz-server-side-encryption-aws-kms-key-id"),
+                    ));
+                }
+                ok_empty()
+            }
+        })
+        .await;
+        let (recorder, _spill) = recorder_with_env(&s3_addr, &extra);
+        recorder.stage_inflight(&Invocation {
+            request_id: "req-sse".to_string(),
+            event: json!({"input": 1}),
+            encoding: EventEncoding::Json,
+            invoked_at: OffsetDateTime::now_utc(),
+        });
+        recorder.recover_inflights(None).await;
+
+        assert_eq!(
+            seen.lock().unwrap().clone(),
+            vec![(want.0.map(String::from), want.1.map(String::from))],
+            "{extra:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn hop_by_hop_headers_are_dropped_in_both_directions() {
+    // 上流へは Connection 指名ヘッダと固定の hop-by-hop を渡さず、
+    // 上流の応答も同じ規則で落としてからランタイムへ返す
+    let upstream_saw = Arc::new(Mutex::new(HeaderMap::new()));
+    let (api_addr, _api) = spawn_mock({
+        let upstream_saw = upstream_saw.clone();
+        move |_m, _p, h, _b| {
+            *upstream_saw.lock().unwrap() = h.clone();
+            Response::builder()
+                .status(StatusCode::OK)
+                .header("connection", "X-Up-Hop")
+                .header("x-up-hop", "1")
+                .header("x-up-keep", "1")
+                .body(boxed_full(Bytes::new()))
+                .unwrap()
+        }
+    })
+    .await;
+    let (s3_addr, _s3) = spawn_mock(|_m, _p, _h, _b| ok_empty()).await;
+    let (recorder, _spill) = recorder_to(&s3_addr);
+    let proxy = spawn_proxy(&api_addr, Arc::new(InFlight::new()), recorder).await;
+
+    let req = Request::builder()
+        .method(Method::POST)
+        .uri(format!("http://{proxy}/2022-07-01/telemetry"))
+        .header("connection", "X-Custom-Hop")
+        .header("x-custom-hop", "1")
+        .header("proxy-authorization", "Basic abc")
+        .header("x-keep", "1")
+        .body(boxed_full(Bytes::from_static(b"{}")))
+        .unwrap();
+    let resp = new_client().request(req).await.unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    let sent = upstream_saw.lock().unwrap().clone();
+    for dropped in ["connection", "x-custom-hop", "proxy-authorization"] {
+        assert!(
+            sent.get(dropped).is_none(),
+            "{dropped} must not be forwarded"
+        );
+    }
+    assert_eq!(sent["x-keep"], "1");
+    assert!(resp.headers().get("x-up-hop").is_none());
+    assert_eq!(resp.headers()["x-up-keep"], "1");
+}
+
+/// Extensions API モックが受けた (path, 登録名 or 識別子ヘッダ)。
+type ExtHeaders = Arc<Mutex<Vec<(String, Option<String>)>>>;
+
+/// `/register` は識別子 `ext-test` を払い出し、`/event/next` は
+/// 1 回目に INVOKE、2 回目以降に SHUTDOWN を返す Extensions API モック。
+async fn spawn_extensions_api(reason: &'static str) -> (String, Captured, ExtHeaders) {
+    let seen: ExtHeaders = Arc::new(Mutex::new(Vec::new()));
+    let polls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let (addr, hits) = spawn_mock({
+        let seen = seen.clone();
+        move |_m, path, headers, _b| {
+            let header = |k: &str| {
+                headers
+                    .get(k)
+                    .and_then(|v| v.to_str().ok())
+                    .map(String::from)
+            };
+            if path == "/2020-01-01/extension/register" {
+                seen.lock()
+                    .unwrap()
+                    .push((path.to_string(), header("lambda-extension-name")));
+                return Response::builder()
+                    .status(StatusCode::OK)
+                    .header("lambda-extension-identifier", "ext-test")
+                    .body(boxed_full(Bytes::new()))
+                    .unwrap();
+            }
+            if path == "/2020-01-01/extension/event/next" {
+                seen.lock()
+                    .unwrap()
+                    .push((path.to_string(), header("lambda-extension-identifier")));
+                let deadline = OffsetDateTime::now_utc().unix_timestamp() * 1000 + 60_000;
+                if polls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+                    return ok_body(json!({"eventType": "INVOKE", "deadlineMs": deadline}));
+                }
+                return ok_body(json!({
+                    "eventType": "SHUTDOWN",
+                    "shutdownReason": reason,
+                    "deadlineMs": deadline
+                }));
+            }
+            Response::builder()
+                .status(StatusCode::NOT_FOUND)
+                .body(boxed_full(Bytes::new()))
+                .unwrap()
+        }
+    })
+    .await;
+    (addr, hits, seen)
+}
+
+fn register_body(hits: &Captured) -> Value {
+    let (_, _, body) = captured(hits)
+        .into_iter()
+        .find(|(m, p, _)| m == "POST" && p == "/2020-01-01/extension/register")
+        .expect("register request");
+    serde_json::from_slice(&body).unwrap()
+}
+
+/// register 1 回 → INVOKE と SHUTDOWN の 2 回ポーリング、の順で
+/// 登録名と識別子が正しく送られたこと。
+fn assert_registered_then_polled_until_shutdown(seen: &ExtHeaders) {
+    let seen = seen.lock().unwrap().clone();
+    let next = "/2020-01-01/extension/event/next".to_string();
+    let id = Some("ext-test".to_string());
+    assert_eq!(
+        seen,
+        vec![
+            (
+                "/2020-01-01/extension/register".to_string(),
+                Some("zankyo".to_string())
+            ),
+            (next.clone(), id.clone()),
+            (next, id),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn external_agent_converts_staged_inflight_on_shutdown() {
+    // 本番の timeout 捕捉経路: register → SHUTDOWN 受信 → .inflight を timeout 記録へ
+    let (api_addr, api_hits, seen) = spawn_extensions_api("timeout").await;
+    let (s3_addr, s3_hits) = spawn_mock(|_m, _p, _h, _b| ok_empty()).await;
+    let (recorder, spill_dir) = recorder_to(&s3_addr);
+    recorder.stage_inflight(&Invocation {
+        request_id: "req-agent".to_string(),
+        event: json!({"token": "secret-token-value"}),
+        encoding: EventEncoding::Json,
+        invoked_at: OffsetDateTime::now_utc(),
+    });
+
+    assert!(zankyo::extension::run_agent(new_client(), api_addr, recorder).await);
+
+    assert_eq!(
+        register_body(&api_hits),
+        json!({"events": ["INVOKE", "SHUTDOWN"]})
+    );
+    assert_registered_then_polled_until_shutdown(&seen);
+    assert!(wait_for(2_000, || !captured(&s3_hits).is_empty()).await);
+    let (method, path, body) = captured(&s3_hits).remove(0);
+    assert_eq!(method, "PUT");
+    assert!(path.contains("req-agent.json"));
+    let rec: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(rec["failureType"], "timeout");
+    assert_eq!(rec["errorContext"]["errorType"], "Timeout");
+    assert!(!spill_dir.join("zankyo-req-agent.inflight").exists());
+}
+
+#[tokio::test]
+async fn passthrough_agent_stays_registered_until_shutdown() {
+    // 記録しない agent も登録して SHUTDOWN まで待つ。登録前や SHUTDOWN 前に
+    // 終了すると、platform は終了コードに関係なく Init を失敗させるため。
+    for (case, extra) in [
+        (
+            "disabled",
+            vec![("ZANKYO_BUCKET", "b"), ("ZANKYO_DISABLED", "1")],
+        ),
+        ("no bucket", vec![]),
+        (
+            "config error",
+            vec![("ZANKYO_BUCKET", "b"), ("ZANKYO_SCRUB_MODE", "bogus")],
+        ),
+    ] {
+        let (api_addr, api_hits, seen) = spawn_extensions_api("spindown").await;
+        let mut env: HashMap<String, String> = extra
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        env.insert("AWS_LAMBDA_RUNTIME_API".to_string(), api_addr);
+
+        let code = tokio::time::timeout(
+            Duration::from_secs(5),
+            zankyo::orchestrate::run_agent_with_env(&env),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("{case}: agent must return after SHUTDOWN"));
+
+        assert_eq!(code, 0, "{case}");
+        // INVOKE は購読しない（呼び出しごとの往復を増やさない）
+        assert_eq!(
+            register_body(&api_hits),
+            json!({"events": ["SHUTDOWN"]}),
+            "{case}"
+        );
+        assert_registered_then_polled_until_shutdown(&seen);
+    }
+}
+
+/// Extensions API モックが返す失敗の応答（ステータスとボディ）。
+type Fault = (StatusCode, &'static str);
+
+/// 失敗を差し込まない。
+const NO_FAULTS: &[Fault] = &[];
+/// 一時的な登録失敗（Lambda が文書化していない 5xx）。
+const REGISTER_UNAVAILABLE: &[Fault] = &[
+    (StatusCode::SERVICE_UNAVAILABLE, ""),
+    (StatusCode::BAD_GATEWAY, ""),
+];
+/// 登録の拒否。同じ要求を送り直しても通らない。
+const REGISTER_FORBIDDEN: &[Fault] = &[(
+    StatusCode::FORBIDDEN,
+    r#"{"errorType":"Extension.InvalidExtensionState"}"#,
+)];
+/// 再試行で通りうる event/next の失敗。公式 RIE（rapid）の実装では、前の
+/// ロングポーリングの接続が切れた extension は、次のイベントが配られるまで 403 で断られる。
+const POLL_GLITCHES: &[Fault] = &[
+    (
+        StatusCode::FORBIDDEN,
+        r#"{"errorType":"Extension.InvalidExtensionState"}"#,
+    ),
+    (StatusCode::BAD_GATEWAY, ""),
+    (StatusCode::OK, "not json"),
+];
+/// AWS が「回復不能。速やかに終了すべき」と定める 500。
+const POLL_CONTAINER_ERROR: &[Fault] = &[(
+    StatusCode::INTERNAL_SERVER_ERROR,
+    r#"{"errorType":"Extension.InternalServerError"}"#,
+)];
+
+/// 失敗を差し込める Extensions API モックと、その受信回数。
+struct FaultyExtApi {
+    addr: String,
+    registers: Arc<std::sync::atomic::AtomicUsize>,
+    polls: Arc<std::sync::atomic::AtomicUsize>,
+    /// 立てると、以降の `/event/next` に SHUTDOWN を返す。
+    release: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl FaultyExtApi {
+    fn registers(&self) -> usize {
+        self.registers.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    fn polls(&self) -> usize {
+        self.polls.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    fn release(&self) {
+        self.release
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+/// `/register` は最初の `register_faults.len()` 回をその応答で断り、以降は
+/// 識別子 `ext-test` を払い出す。`/event/next` は SHUTDOWN の解放
+/// （`release`）まで `next_faults` を順に繰り返し返す。`next_faults` が
+/// 空なら最初から SHUTDOWN を返す。
+async fn spawn_faulty_extensions_api(
+    register_faults: &'static [Fault],
+    next_faults: &'static [Fault],
+) -> FaultyExtApi {
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    let registers = Arc::new(AtomicUsize::new(0));
+    let polls = Arc::new(AtomicUsize::new(0));
+    let release = Arc::new(AtomicBool::new(next_faults.is_empty()));
+    let (addr, _hits) = spawn_mock({
+        let (registers, polls, release) = (registers.clone(), polls.clone(), release.clone());
+        move |_m, path, _h, _b| {
+            let reply = |(status, body): Fault| {
+                Response::builder()
+                    .status(status)
+                    .body(boxed_full(Bytes::from_static(body.as_bytes())))
+                    .unwrap()
+            };
+            if path == "/2020-01-01/extension/register" {
+                let n = registers.fetch_add(1, Ordering::SeqCst);
+                if let Some(fault) = register_faults.get(n) {
+                    return reply(*fault);
+                }
+                return Response::builder()
+                    .status(StatusCode::OK)
+                    .header("lambda-extension-identifier", "ext-test")
+                    .body(boxed_full(Bytes::new()))
+                    .unwrap();
+            }
+            if path == "/2020-01-01/extension/event/next" {
+                let n = polls.fetch_add(1, Ordering::SeqCst);
+                if !release.load(Ordering::SeqCst) {
+                    return reply(next_faults[n % next_faults.len()]);
+                }
+                return ok_body(json!({
+                    "eventType": "SHUTDOWN",
+                    "shutdownReason": "timeout",
+                    "deadlineMs": OffsetDateTime::now_utc().unix_timestamp() * 1000 + 60_000
+                }));
+            }
+            reply((StatusCode::NOT_FOUND, ""))
+        }
+    })
+    .await;
+    FaultyExtApi {
+        addr,
+        registers,
+        polls,
+        release,
+    }
+}
+
+/// 記録しない（passthrough の）agent の env。ノブは既定値が使われる。
+fn passthrough_agent_env(api: &FaultyExtApi) -> HashMap<String, String> {
+    HashMap::from([
+        ("ZANKYO_DISABLED".to_string(), "1".to_string()),
+        ("AWS_LAMBDA_RUNTIME_API".to_string(), api.addr.clone()),
+    ])
+}
+
+#[tokio::test]
+async fn agents_retry_register_until_accepted() {
+    // 一時的な登録失敗で終了すると、Lambda は Extension.Crash として Init を
+    // 失敗させる。登録の上限時間内で再試行して SHUTDOWN まで進むこと
+    let api = spawn_faulty_extensions_api(REGISTER_UNAVAILABLE, NO_FAULTS).await;
+    let (s3_addr, _s3) = spawn_mock(|_m, _p, _h, _b| ok_empty()).await;
+    let (recorder, _spill) = recorder_with_env(&s3_addr, &[("ZANKYO_EXT_RETRY_MS", "1")]);
+    let done = tokio::time::timeout(
+        Duration::from_secs(5),
+        zankyo::extension::run_agent(new_client(), api.addr.clone(), recorder),
+    )
+    .await
+    .expect("recording agent must register and reach SHUTDOWN");
+    assert!(done, "recording agent");
+    assert_eq!(api.registers(), REGISTER_UNAVAILABLE.len() + 1);
+
+    // 記録しない agent も同じ（既定の再試行間隔 500ms で 2 回待つ）
+    let api = spawn_faulty_extensions_api(REGISTER_UNAVAILABLE, NO_FAULTS).await;
+    let code = tokio::time::timeout(
+        Duration::from_secs(5),
+        zankyo::orchestrate::run_agent_with_env(&passthrough_agent_env(&api)),
+    )
+    .await
+    .expect("passthrough agent must register and reach SHUTDOWN");
+    assert_eq!(code, 0, "passthrough agent");
+    assert_eq!(api.registers(), REGISTER_UNAVAILABLE.len() + 1);
+}
+
+#[tokio::test]
+async fn agents_keep_polling_through_failures_until_shutdown() {
+    // event/next の失敗が続いても SHUTDOWN の前には終了しない。応答が返る失敗は
+    // 接続できない回数の上限（ここでは 2）に数えない。上限を大きく超えて
+    // 失敗させても、記録する agent が待ち続けること
+    let api = spawn_faulty_extensions_api(NO_FAULTS, POLL_GLITCHES).await;
+    let (s3_addr, s3_hits) = spawn_mock(|_m, _p, _h, _b| ok_empty()).await;
+    let (recorder, _spill) = recorder_with_env(
+        &s3_addr,
+        &[
+            ("ZANKYO_EXT_RETRY_MS", "1"),
+            ("ZANKYO_EXT_MAX_POLL_FAILURES", "2"),
+        ],
+    );
+    recorder.stage_inflight(&Invocation {
+        request_id: "req-glitch".to_string(),
+        event: json!({"input": 1}),
+        encoding: EventEncoding::Json,
+        invoked_at: OffsetDateTime::now_utc(),
+    });
+    let agent = tokio::spawn(zankyo::extension::run_agent(
+        new_client(),
+        api.addr.clone(),
+        recorder,
+    ));
+    assert!(wait_for(5_000, || api.polls() >= 3 * POLL_GLITCHES.len()).await);
+    assert!(
+        !agent.is_finished(),
+        "recording agent exited before SHUTDOWN"
+    );
+    api.release();
+    let done = tokio::time::timeout(Duration::from_secs(5), agent)
+        .await
+        .expect("recording agent must return after SHUTDOWN")
+        .unwrap();
+    assert!(done, "recording agent");
+    assert!(wait_for(2_000, || !captured(&s3_hits).is_empty()).await);
+    let (_, path, _) = captured(&s3_hits).remove(0);
+    assert!(path.contains("req-glitch.json"));
+
+    // 記録しない agent も同じ（既定の再試行間隔 500ms）
+    let api = spawn_faulty_extensions_api(NO_FAULTS, POLL_GLITCHES).await;
+    let env = passthrough_agent_env(&api);
+    let agent = tokio::spawn(async move { zankyo::orchestrate::run_agent_with_env(&env).await });
+    assert!(wait_for(5_000, || api.polls() >= POLL_GLITCHES.len()).await);
+    assert!(
+        !agent.is_finished(),
+        "passthrough agent exited before SHUTDOWN"
+    );
+    api.release();
+    let code = tokio::time::timeout(Duration::from_secs(5), agent)
+        .await
+        .expect("passthrough agent must return after SHUTDOWN")
+        .unwrap();
+    assert_eq!(code, 0, "passthrough agent");
+}
+
+#[tokio::test]
+async fn agents_exit_promptly_when_lambda_rejects_them() {
+    // 登録の拒否（4xx）は送り直しても通らない。event/next の 500 は、AWS が
+    // 「回復不能。速やかに終了すべき」と定める。どちらも再試行せずに抜け、
+    // agent のプロセスは 1 で終わる（正常終了の 0 と区別する）
+    for (case, register_faults, next_faults, registers, polls) in [
+        ("register rejected", REGISTER_FORBIDDEN, NO_FAULTS, 1, 0),
+        ("container error", NO_FAULTS, POLL_CONTAINER_ERROR, 1, 1),
+    ] {
+        // 記録する agent は既定の再試行間隔（500ms）。再試行すれば 5 秒を超える
+        let api = spawn_faulty_extensions_api(register_faults, next_faults).await;
+        let (s3_addr, _s3) = spawn_mock(|_m, _p, _h, _b| ok_empty()).await;
+        let (recorder, _spill) = recorder_to(&s3_addr);
+        let done = tokio::time::timeout(
+            Duration::from_secs(5),
+            zankyo::extension::run_agent(new_client(), api.addr.clone(), recorder),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("{case}: recording agent must exit promptly"));
+        assert!(!done, "{case}");
+        assert_eq!((api.registers(), api.polls()), (registers, polls), "{case}");
+
+        let api = spawn_faulty_extensions_api(register_faults, next_faults).await;
+        let code = tokio::time::timeout(
+            Duration::from_secs(5),
+            zankyo::orchestrate::run_agent_with_env(&passthrough_agent_env(&api)),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("{case}: passthrough agent must exit promptly"));
+        assert_eq!(code, 1, "{case}");
+        assert_eq!((api.registers(), api.polls()), (registers, polls), "{case}");
+    }
+}
+
+/// 応答ヘッダーだけを送り、ボディを閉じないまま止まる応答ボディ。
+struct StalledBody;
+
+impl hyper::body::Body for StalledBody {
+    type Data = Bytes;
+    type Error = hyper::Error;
+
+    fn poll_frame(
+        self: std::pin::Pin<&mut Self>,
+        _cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Result<hyper::body::Frame<Bytes>, hyper::Error>>> {
+        std::task::Poll::Pending
+    }
+}
+
+/// `status` と応答ヘッダーだけを返し、ボディで止まる応答。`/next` の
+/// 応答にも使えるよう、Runtime API の requestId ヘッダーを付ける。
+fn stalled(status: StatusCode) -> Response<BoxedBody> {
+    Response::builder()
+        .status(status)
+        .header("lambda-runtime-aws-request-id", "req-stalled")
+        .body(StalledBody.boxed())
+        .unwrap()
+}
+
+#[tokio::test]
+async fn register_returns_within_its_deadline_when_error_body_stalls() {
+    // エラー応答のボディが閉じなくても、登録は上限時間の内側で諦める
+    let (api_addr, _api) =
+        spawn_mock(|_m, _p, _h, _b| stalled(StatusCode::SERVICE_UNAVAILABLE)).await;
+    let started = Instant::now();
+    let registered = tokio::time::timeout(
+        Duration::from_secs(5),
+        zankyo::extension::register(
+            &new_client(),
+            &api_addr,
+            Duration::from_millis(300),
+            Duration::from_millis(10),
+        ),
+    )
+    .await
+    .expect("register must return within its deadline");
+    assert!(registered.is_err());
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "{:?}",
+        started.elapsed()
+    );
+
+    // 上限時間に余裕があれば、ボディを待ち切らずに再試行して登録できる
+    let attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let (api_addr, _api) = spawn_mock({
+        let attempts = attempts.clone();
+        move |_m, _p, _h, _b| {
+            if attempts.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+                return stalled(StatusCode::SERVICE_UNAVAILABLE);
+            }
+            Response::builder()
+                .status(StatusCode::OK)
+                .header("lambda-extension-identifier", "ext-test")
+                .body(boxed_full(Bytes::new()))
+                .unwrap()
+        }
+    })
+    .await;
+    let registered = tokio::time::timeout(
+        Duration::from_secs(5),
+        zankyo::extension::register(
+            &new_client(),
+            &api_addr,
+            Duration::from_secs(4),
+            Duration::from_millis(10),
+        ),
+    )
+    .await
+    .expect("register must retry after a stalled error body");
+    assert_eq!(registered.unwrap(), "ext-test");
+    assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn agents_keep_polling_when_event_body_stalls() {
+    // /event/next の応答ボディが閉じなくても、読み取りを打ち切って再試行し、
+    // SHUTDOWN を受け取る。エラー応答と成功応答の両方で確かめる
+    let spawn_api = || async {
+        let polls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let (addr, _hits) = spawn_mock({
+            let polls = polls.clone();
+            move |_m, path, _h, _b| {
+                if path == "/2020-01-01/extension/register" {
+                    return Response::builder()
+                        .status(StatusCode::OK)
+                        .header("lambda-extension-identifier", "ext-test")
+                        .body(boxed_full(Bytes::new()))
+                        .unwrap();
+                }
+                match polls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) {
+                    0 => stalled(StatusCode::FORBIDDEN),
+                    1 => stalled(StatusCode::OK),
+                    _ => ok_body(json!({
+                        "eventType": "SHUTDOWN",
+                        "shutdownReason": "timeout",
+                        "deadlineMs": OffsetDateTime::now_utc().unix_timestamp() * 1000 + 60_000
+                    })),
+                }
+            }
+        })
+        .await;
+        (addr, polls)
+    };
+
+    let (api_addr, polls) = spawn_api().await;
+    let (s3_addr, s3_hits) = spawn_mock(|_m, _p, _h, _b| ok_empty()).await;
+    let (recorder, _spill) = recorder_with_env(&s3_addr, &[("ZANKYO_EXT_RETRY_MS", "1")]);
+    recorder.stage_inflight(&Invocation {
+        request_id: "req-stall".to_string(),
+        event: json!({"input": 1}),
+        encoding: EventEncoding::Json,
+        invoked_at: OffsetDateTime::now_utc(),
+    });
+    let done = tokio::time::timeout(
+        Duration::from_secs(10),
+        zankyo::extension::run_agent(new_client(), api_addr, recorder),
+    )
+    .await
+    .expect("recording agent must retry past stalled bodies and reach SHUTDOWN");
+    assert!(done, "recording agent");
+    assert_eq!(polls.load(std::sync::atomic::Ordering::SeqCst), 3);
+    assert!(wait_for(2_000, || !captured(&s3_hits).is_empty()).await);
+    let (_, path, _) = captured(&s3_hits).remove(0);
+    assert!(path.contains("req-stall.json"));
+
+    // 記録しない agent も同じ（既定の再試行間隔 500ms）
+    let (api_addr, polls) = spawn_api().await;
+    let env = HashMap::from([
+        ("ZANKYO_DISABLED".to_string(), "1".to_string()),
+        ("AWS_LAMBDA_RUNTIME_API".to_string(), api_addr),
+    ]);
+    let code = tokio::time::timeout(
+        Duration::from_secs(10),
+        zankyo::orchestrate::run_agent_with_env(&env),
+    )
+    .await
+    .expect("passthrough agent must retry past stalled bodies and reach SHUTDOWN");
+    assert_eq!(code, 0, "passthrough agent");
+    assert_eq!(polls.load(std::sync::atomic::Ordering::SeqCst), 3);
+}
+
+#[tokio::test]
+async fn stalled_next_body_is_cut_by_forward_timeout() {
+    // 上流の /next が応答ヘッダーだけ返してボディを閉じなくても、proxy は
+    // ZANKYO_FORWARD_TIMEOUT_MS で読み取りを打ち切り、ランタイムへ 502 を返す
+    let (api_addr, _api) = spawn_mock(|_m, _p, _h, _b| stalled(StatusCode::OK)).await;
+    let (s3_addr, _s3) = spawn_mock(|_m, _p, _h, _b| ok_empty()).await;
+    let inflight = Arc::new(InFlight::new());
+    let (recorder, _spill) = recorder_with_env(&s3_addr, &[("ZANKYO_FORWARD_TIMEOUT_MS", "200")]);
+    let proxy = spawn_proxy(&api_addr, inflight.clone(), recorder).await;
+
+    let (status, _) = tokio::time::timeout(
+        Duration::from_secs(5),
+        call(
+            &proxy,
+            Method::GET,
+            "/2018-06-01/runtime/invocation/next",
+            None,
+        ),
+    )
+    .await
+    .expect("/next must not hang on a stalled upstream body");
+    assert_eq!(status, StatusCode::BAD_GATEWAY);
+    assert_eq!(inflight.len(), 0);
 }
 
 #[tokio::test]
@@ -659,18 +1572,22 @@ async fn oversized_body_is_rejected_without_forwarding() {
     let (api_addr, api_hits) = spawn_mock(|_m, _p, _h, _b| ok_empty()).await;
     let (s3_addr, _s3) = spawn_mock(|_m, _p, _h, _b| ok_empty()).await;
     let inflight = Arc::new(InFlight::new());
-    let proxy = spawn_proxy(&api_addr, inflight, recorder_to(&s3_addr)).await;
+    let (recorder, _spill) = recorder_to(&s3_addr);
+    let proxy = spawn_proxy(&api_addr, inflight, recorder).await;
 
-    // MAX_BODY_BYTES (8MiB) を超えるボディは上流へ転送せず 413 を返す
-    let big = Bytes::from(vec![b'x'; 9 * 1024 * 1024]);
-    let (status, _) = call_raw(
-        &proxy,
-        Method::POST,
+    // MAX_BODY_BYTES (8MiB) を超えるボディは上流へ転送せず 413 を返す。
+    // 記録しない経路（/restore/error 等）も、経路判定の前に同じ上限で読む。
+    // 上限を超えた分は読み捨ててから返すので、書き込み中の送り手にも 413 が届く。
+    // 超過分をソケットのバッファより十分大きくして、未読のまま閉じる実装なら
+    // 送り手が必ず接続のリセットを受けるようにしている
+    let big = Bytes::from(vec![b'x'; 32 * 1024 * 1024]);
+    for path in [
         "/2018-06-01/runtime/invocation/req-x/response",
-        big,
-    )
-    .await;
-    assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
+        "/2018-06-01/runtime/restore/error",
+    ] {
+        let (status, _) = call_raw(&proxy, Method::POST, path, big.clone()).await;
+        assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE, "{path}");
+    }
     tokio::time::sleep(Duration::from_millis(200)).await;
     assert!(captured(&api_hits).is_empty());
 }

@@ -73,8 +73,49 @@ mod tests {
     }
 
     #[test]
-    fn exit_code_maps_spawn_failure_to_one() {
+    fn exit_code_maps_wait_error_to_one() {
         let err = std::io::Result::Err(std::io::Error::other("x"));
         assert_eq!(exit_code(err), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn exit_code_maps_signal_to_128_plus_signal() {
+        let status = std::process::Command::new("sh")
+            .args(["-c", "kill -TERM $$"])
+            .status();
+        assert_eq!(exit_code(status), 128 + 15);
+    }
+
+    fn argv(args: &[&str]) -> Vec<OsString> {
+        args.iter().map(OsString::from).collect()
+    }
+
+    #[tokio::test]
+    async fn passthrough_returns_child_exit_code() {
+        assert_eq!(passthrough(&argv(&["sh", "-c", "exit 7"])).await, 7);
+    }
+
+    #[tokio::test]
+    async fn passthrough_maps_unspawnable_command_to_oserr() {
+        assert_eq!(
+            passthrough(&argv(&["/nonexistent/zankyo-runtime"])).await,
+            EX_OSERR
+        );
+        assert_eq!(passthrough(&[]).await, EX_OSERR);
+    }
+
+    #[tokio::test]
+    async fn spawn_via_proxy_points_child_at_proxy_port() {
+        let mut child = spawn_via_proxy(
+            &argv(&[
+                "sh",
+                "-c",
+                r#"test "$AWS_LAMBDA_RUNTIME_API" = 127.0.0.1:4321"#,
+            ]),
+            4321,
+        )
+        .unwrap();
+        assert_eq!(exit_code(child.wait().await), 0);
     }
 }

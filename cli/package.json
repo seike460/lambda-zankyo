@@ -1,9 +1,28 @@
 {
   "name": "lambda-zankyo",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Replay failed synchronous Lambda invocations: fixture, diff, redrive (paired with the zankyo Layer)",
   "type": "module",
   "license": "MIT",
+  "author": "seike460",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/seike460/lambda-zankyo.git",
+    "directory": "cli"
+  },
+  "homepage": "https://github.com/seike460/lambda-zankyo#readme",
+  "bugs": {
+    "url": "https://github.com/seike460/lambda-zankyo/issues"
+  },
+  "keywords": [
+    "aws",
+    "lambda",
+    "serverless",
+    "replay",
+    "fixture",
+    "debugging",
+    "cli"
+  ],
   "bin": {
     "zankyo": "dist/bin.js"
   },
@@ -15,6 +34,7 @@
   },
   "scripts": {
     "build": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\" && tsc -p tsconfig.build.json",
+    "prepack": "pnpm run build",
     "typecheck": "tsc --noEmit",
     "test": "node --test tests/*.test.ts",
     "lint": "biome check ."

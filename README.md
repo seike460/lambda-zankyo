@@ -1,6 +1,6 @@
 # lambda-zankyo（残響）
 
-**sync invoke で失敗した Lambda 呼び出しの「イベント＋エラー応答」を確実に残し、
+**sync invoke で失敗した Lambda 呼び出しの「イベント＋エラー応答」を S3 に記録し、
 ローカル再現・差分リプレイ・本番再実行まで担う Layer＋CLI。**
 
 > **スコープ**: 対象は **sync（RequestResponse）呼び出し** のみ。
@@ -30,10 +30,14 @@ Lambda Service ──Runtime API──▶ zankyo proxy (Rust, Layer) ──▶ �
 
 - Layer 内の**単一 Rust バイナリ**が Runtime API proxy と external extension
   agent を兼務（起動方法でモードが分かれる）。
-- **成功呼び出しは素通り**。失敗判定が必要な経路（`/response`・`/error`・
-  `/init/error`）だけボディを読み、常時コスト・レイテンシを最小化します。
+- **成功呼び出しは記録しません**。S3 への PUT も spill もしません。ボディを解釈するのは
+  `/next`・`/response`・`/error`・`/init/error` だけで、ほかの経路は記録せずに中継します。
+  ランタイムが送るリクエストボディは、経路を問わず `ZANKYO_MAX_BODY_KB` まで読んでから
+  中継します。上限を超えたら中継せず、残りを読み捨ててから 413 を返します。
+  `/next` のイベントは timeout 捕捉のため `/tmp` に置き、呼び出しが完了したら消します
+  （下の「timeout 捕捉」）。
 - 失敗の定義: `/error` 呼出 / `/init/error` / `/response` 内の `errorType`
-  含有 / `SHUTDOWN reason=timeout`（未完呼び出しを timeout 記録化）。
+  含有 / `SHUTDOWN` の時点で応答を返していない呼び出し（reason を問わず timeout として記録）。
 - **fail-open 設計**: zankyo 側の障害（設定ミス・bind 失敗・S3 エラー）で
   関数本体を止めません。記録だけ諦めて passthrough します。
 
@@ -47,14 +51,40 @@ layer は `/opt/extensions/zankyo` を配置し、platform が agent を
 timeout レコードへ変換し S3 へフラッシュします（ベストエフォート。
 shutdown ウィンドウに間に合わなければ spill が残り、次回 init が拾います）。
 
+`SHUTDOWN` の reason（`timeout`・`failure`・`spindown`）は問いません。どの reason でも
+`failureType` は `timeout` で、reason は `errorContext.errorType`（`Timeout`・`Failure`・
+`Spindown`）で見分けます。呼び出し中にランタイムが終了した場合と、init 時に前の実行環境の
+ステージが残っていた場合も timeout として記録し、`errorType` は `Shutdown` です。
+
+記録しない状態（`ZANKYO_DISABLED`・バケット未設定・設定エラー）でも、
+agent は `SHUTDOWN` だけを購読して待機します。登録前や `SHUTDOWN` 前に
+終了した extension は、終了コードに関係なく Lambda が Init 失敗として
+扱うためです。
+
+同じ理由で、agent は Extensions API の一時的な失敗では終了しません。
+登録は `ZANKYO_REGISTER_TIMEOUT_MS` の時間内で再試行します。
+`/event/next` は、`SHUTDOWN` を受けるまで `ZANKYO_EXT_RETRY_MS` の間隔で再試行します。
+記録しない状態では、設定が壊れている場合に備えて、`ZANKYO_REGISTER_TIMEOUT_MS`・
+`ZANKYO_EXT_RETRY_MS`・`ZANKYO_EXT_BODY_KB`・`ZANKYO_EXT_MAX_POLL_FAILURES` を読まず、既定値を使います。
+`SHUTDOWN` の前に終了するのは、次の 3 つの場合だけです。このときの終了コードは 1 です。
+
+- 登録が 4xx で拒否された
+- Lambda が 500 を返した（AWS はこれを回復不能とし、速やかな終了を求めています。
+  [Extensions API リファレンス](https://docs.aws.amazon.com/lambda/latest/dg/runtimes-extensions-api.html)）
+- Runtime API に接続できない状態が `ZANKYO_EXT_MAX_POLL_FAILURES` 回続いた
+
 ## 使い方
 
 ### 1. Layer の導入
 
 - **SAR（推奨）**: Serverless Application Repository から `lambda-zankyo`
-  を 1 クリック導入（`sar/template.yaml` 参照）。
+  を 1 クリック導入（`sar/template.yaml` 参照）。アプリケーション ID は
+  `arn:aws:serverlessrepo:ap-northeast-1:446537410535:applications/lambda-zankyo`
+  です。公開アプリなので、ap-northeast-1 以外のリージョンにもデプロイできます
+  （[AWS ドキュメント](https://docs.aws.amazon.com/serverlessrepo/latest/devguide/serverlessrepo-publishing-applications.html)）。
 - **セルフホスト**: `node scripts/build-layer.mts` で両 arch の zip を作り、
   通常の Lambda Layer として発行します（GitHub Releases にも zip を添付）。
+  v0.1.0 より後のリリースには、zip の `SHA256SUMS` も添付します。
 
 いずれも関数に Layer を付け、環境変数を設定します:
 
@@ -69,15 +99,21 @@ ZANKYO_BUCKET=<記録用バケット名>
 import { Zankyo } from 'zankyo-cdk';
 
 const zankyo = new Zankyo(this, 'Zankyo', {
-  // bucket?, kmsKey?, scrubFields?, layer? (セルフホスト時), arm64?
+  // bucket?, recordRetentionDays?, kmsKey?, scrubFields?,
+  // sarApplicationId?, semanticVersion?, layer? (セルフホスト時), arm64?
 });
 zankyo.attachTo(myFunction);
 // → Layer 追加 + AWS_LAMBDA_EXEC_WRAPPER/ZANKYO_* env 注入
 //   + s3:PutObject（+ kms:Encrypt/GenerateDataKey）権限を role へ
 ```
 
-bucket 未指定なら「パブリックアクセス全ブロック + lifecycle 30 日 +
-enforceSSL」のバケットを自動作成します。
+bucket 未指定なら「パブリックアクセス全ブロック + lifecycle 30 日
+（`recordRetentionDays` で変更）+ enforceSSL」のバケットを自動作成します。
+このバケットは `RemovalPolicy.RETAIN` で、`cdk destroy` でスタックを消しても
+レコードごと残ります。不要になったら、中身を消してからバケットを削除してください。
+layer 未指定なら、上の SAR アプリを参照します。`arm64` は関数のアーキテクチャに
+揃えてください。食い違うと `attachTo` が例外を投げます
+（props の一覧は [construct/README.md](https://github.com/seike460/lambda-zankyo/blob/main/construct/README.md)）。
 
 ### 3. CLI
 
@@ -93,37 +129,69 @@ zankyo redrive <requestId> --confirm             # 本番再投入（既定 dry-
 ```
 
 共通フラグ: `--bucket` / `--region` / `--profile` / `--json`。
-exit code: `0` 成功 / `1` diff差異・関数エラー / `2` 引数ミス / `3` AWS 失敗 / `4` レコード不在。
+
+| exit code | 意味 |
+|---|---|
+| 0 | 成功（diff: 応答一致 / replay・redrive: 関数が成功応答） |
+| 1 | diff: 応答に差異 / replay・redrive: 関数がエラーを返した |
+| 2 | 引数・設定ミス |
+| 3 | AWS API 呼び出しの失敗 |
+| 4 | レコードが見つからない / 形式不正（空・JSON でない・スキーマ不一致・キーと本文の関数名の食い違い） / サイズ超過（`ZANKYO_RECORD_MAX_MB`、既定 32 MiB を超える） / 再現不能（truncated・event 欠落・replay/diff/redrive での非 JSON イベント） |
 
 ## 設定（環境変数）
 
-`ZANKYO_SSM_PARAM` 指定時は SSM Parameter の JSON（同じキー名）が
-env を部分上書きします。複数関数で設定を一元管理するための経路です。
+設定は、既定値・環境変数・SSM Parameter の順に重ねて決めます。後から重ねた値が優先です。
+`ZANKYO_SSM_PARAM` を指定すると、SSM Parameter の JSON（キーは環境変数と同じ名前）を読みます。
+JSON にあるキーだけが、環境変数の値を上書きします。複数関数で設定を一元管理するための経路です。
+このとき関数のロールに `ssm:GetParameter` が要ります。カスタマー管理キーで暗号化した
+SecureString なら、そのキーの `kms:Decrypt` も要ります
+（[AWS ドキュメント](https://docs.aws.amazon.com/kms/latest/developerguide/services-parameter-store.html#parameter-policy-kms-encryption)）。
+CDK construct はこの権限を付けないので、別に付与してください。construct が設定する
+`ZANKYO_BUCKET`・`ZANKYO_KMS_KEY` も、SSM の JSON に同じキーがあれば上書きされます。
+construct が付ける書き込みの権限は construct のバケットとキーの分だけなので、
+SSM で別のバケットやキーを指すなら、その権限も別に付与してください。取得に失敗したときと、値が
+JSON のオブジェクトでないときは、warn を出して env の設定だけで動きます
+（バケットを SSM 側にだけ書いた場合は、記録しません）。
+
+次の 3 つは SSM を読む前に決まるので、SSM の値では変わりません。
+
+- `ZANKYO_SSM_PARAM` と `ZANKYO_SSM_TIMEOUT_MS` は、環境変数でだけ指定できます。
+  SSM の JSON に書くと、warn を出して無視します。
+- 環境変数の `ZANKYO_DISABLED` が真（`true`・`1`・`yes`・`on`）なら、SSM を読まずに
+  記録を止めます。SSM の値で記録を再開することはできません。
+- 環境変数の値が不正なとき（数値の設定に正の整数でない値や範囲を超える値、不正な `ZANKYO_SCRUB_MODE`）は、
+  設定エラーとして、SSM を読まずに記録を止めます。SSM の JSON の不正な値は、
+  そのキーだけ warn を出して無視します。
 
 | env | 既定 | 用途 |
 |---|---|---|
-| `ZANKYO_BUCKET` | （必須※） | 失敗レコードの保存先。未設定なら記録せず passthrough |
+| `ZANKYO_BUCKET` | （必須※） | 失敗レコードの保存先。環境変数にも SSM の JSON にも無ければ、記録せず passthrough |
 | `ZANKYO_KMS_KEY` | SSE-S3 | SSE-KMS のキー ARN |
-| `ZANKYO_SSM_PARAM` | なし | 設定 JSON を保持する SSM Parameter 名 |
+| `ZANKYO_SSM_PARAM` | なし | 設定 JSON を保持する SSM Parameter 名。環境変数でだけ指定できる |
 | `ZANKYO_SCRUB_FIELDS` | 既定 denylist | 追加フィールド名（カンマ区切り） |
 | `ZANKYO_SCRUB_MODE` | `mask` | `mask` / `hash`（HMAC 擬似名化）/ `off` |
 | `ZANKYO_MAX_EVENT_KB` | `256` | イベント保存の上限（超過は先頭のみ + `truncated`） |
-| `ZANKYO_FLUSH_BUDGET_MS` | `1200` | SHUTDOWN フラッシュの予算上限 |
-| `ZANKYO_PUT_TIMEOUT_MS` | `5000` | 通常経路の PutObject 上限時間 |
-| `ZANKYO_SPILL_DIR` | `/tmp/zankyo/<function>` | S3 失敗時・SHUTDOWN 時のローカル退避先（既定は関数名でスコープ） |
+| `ZANKYO_FLUSH_BUDGET_MS` | `1200` | 失敗レコードの PutObject 上限時間（呼び出し中の記録と SHUTDOWN フラッシュ）。失敗時の応答はこの時間まで遅れうる |
+| `ZANKYO_PUT_TIMEOUT_MS` | `5000` | spill 再送の PutObject 上限時間（起動時・定期回収） |
+| `ZANKYO_SPILL_DIR` | `/tmp/zankyo/<function>` | `.inflight` ステージと、PUT 前に先書きする失敗レコード（未送信分は再送まで残る）の置き場（既定は関数名でスコープ）。絶対パスだけを受け付け、それ以外は warn を出して無視する |
 | `ZANKYO_SPILL_MAX_FILES` | `64` | spill 保持数の上限。超過分は古いものから破棄 |
 | `ZANKYO_SPILL_RETRY_MS` | `60000` | spill 再送を試みる間隔（生存中の定期回収） |
 | `ZANKYO_SPILL_MAX_AGE_SECS` | `604800` | spill ファイルの有効期間。超過分は再送せず破棄 |
 | `ZANKYO_MAX_BODY_KB` | `8192` | Runtime API が受け付けるボディ上限（KiB） |
-| `ZANKYO_EXT_BODY_KB` | `1024` | Extensions API イベントボディ上限（KiB） |
-| `ZANKYO_REGISTER_TIMEOUT_MS` | `10000` | extension 登録の上限時間 |
-| `ZANKYO_EXT_RETRY_MS` | `500` | event/next ポーリング失敗時の再試行間隔 |
-| `ZANKYO_EXT_MAX_POLL_FAILURES` | `120` | ポーリング連続失敗の上限（超過でループを抜ける） |
-| `ZANKYO_SSM_TIMEOUT_MS` | `10000` | SSM get_parameter の上限時間 |
-| `ZANKYO_FORWARD_TIMEOUT_MS` | `60000` | `/next` 以外の上流転送の上限時間 |
-| `ZANKYO_DISABLED` | `false` | 緊急停止スイッチ（passthrough） |
+| `ZANKYO_EXT_BODY_KB` | `1024`※2 | Extensions API イベントボディ上限（KiB） |
+| `ZANKYO_REGISTER_TIMEOUT_MS` | `10000`※2 | extension 登録の上限時間（一時的な失敗の再試行を含む） |
+| `ZANKYO_EXT_RETRY_MS` | `500`※2 | Extensions API（登録・event/next）が失敗したときの再試行間隔 |
+| `ZANKYO_EXT_MAX_POLL_FAILURES` | `120`※2 | Runtime API に接続できない状態が続いたときの再試行回数の上限（超過で agent が終了する）。応答が返る失敗は数えない |
+| `ZANKYO_SSM_TIMEOUT_MS` | `2000` | SSM get_parameter の上限時間。Lambda の Init 上限（10 秒）に含まれる。SSM を読む前に使うので、環境変数でだけ指定できる（SSM の JSON に書いても無視する） |
+| `ZANKYO_FORWARD_TIMEOUT_MS` | `60000` | 上流転送の上限時間。`/next` は応答ヘッダーまで無制限に待ち（ロングポーリング）、応答ボディの読み取りにだけ使う |
+| `ZANKYO_DISABLED` | `false` | 緊急停止スイッチ（passthrough）。環境変数の真は SSM を読む前に効き、SSM の値では解除できない |
 
 ※「必須」は記録を有効にする条件です。未設定でも関数は正常に動きます。
+`ZANKYO_SSM_PARAM` を指定して SSM の取得に成功した場合は、SSM の JSON の `ZANKYO_BUCKET` だけでも
+記録します。このとき環境変数の `ZANKYO_BUCKET` は要りません。
+
+※2 記録しない状態（`ZANKYO_DISABLED`・バケット未設定・設定エラー）の agent は、この値を読まず、
+既定値を使います（「timeout 捕捉」の節）。
 
 ## データ仕様
 
@@ -153,11 +221,13 @@ s3://{ZANKYO_BUCKET}/zankyo/{function-name}/{yyyy}/{mm}/{dd}/{requestId}.json
 補助フィールド（該当時のみ付与）:
 
 - `eventIsRawText: true` — 元イベントが JSON でない生テキストの場合。
-  `event` は文字列として保持され、replay/redrive/diff は JSON 再エンコードせず
-  原文のままペイロードに使います。fixture はそのまま書き出します。
+  `event` は文字列として保持され、fixture はそのまま書き出します。
 - `eventIsBase64: true` — 元イベントが UTF-8 でないバイナリの場合。
-  `event` は base64 文字列として保持され、replay/redrive/diff は
-  デコードして元のバイト列を再送します。
+  `event` は base64 文字列として保持され、fixture はそのまま書き出します。
+- 上の 2 つ（非 JSON イベント）は、replay/redrive/diff の対象外です（exit 4）。
+  Lambda の [Invoke API](https://docs.aws.amazon.com/lambda/latest/api/API_Invoke.html)
+  は JSON のペイロードしか受け付けず、JSON でない本文を
+  `InvalidRequestContentException` で拒否するためです。
 - `truncated: true` — イベントが `ZANKYO_MAX_EVENT_KB` を超えた場合。
   先頭のみ保持のため fixture/replay/redrive/diff はすべて対象外
   （部分イベントの replay は誤結果を生むため拒否）。
@@ -167,20 +237,39 @@ s3://{ZANKYO_BUCKET}/zankyo/{function-name}/{yyyy}/{mm}/{dd}/{requestId}.json
 ハイブリッド方式で、消した内容を `scrubReport` に証跡化します。
 
 - **フィールド名 denylist**: `password, secret, token, apiKey, authorization,
-  privateKey, sessionId, ssn, creditCard, cvv, pin`（大文字小文字・
-  セパレータ `_` `-` `.` 空白は不問。`access_token`→`token` のような
-  prefix/suffix 一致も対象）＋ `ZANKYO_SCRUB_FIELDS`。
+  privateKey, sessionId, cookie, cookies, ssn, creditCard, cvv, pin`（大文字小文字・
+  セパレータ `_` `-` `.` 空白は不問。`access_token`→`token` や
+  `Set-Cookie`→`cookie` のような prefix/suffix 一致も対象）＋
+  `ZANKYO_SCRUB_FIELDS`。値が配列なら要素ごとに置き換え、配列の形を保ちます。
+- **文字列化された JSON**（API Gateway・Function URL の `body` 等）も、
+  中のフィールドに denylist を適用します。一致した場合だけ、その文字列を
+  空白なし・キーは辞書順の JSON に書き直します。
 - **パターン検出**: email / クレカ番号（**Luhn 検証付き**）/ JWT /
   AWS アクセスキー / Bearer トークン / 電話番号 / IPv4。
+  対象は文字列値だけです。数値型の値（`"cardNo": 4111111111111111` 等）と
+  オブジェクトのキー名（`{"alice@example.com": …}` 等）は検査しません。
+  該当するフィールド名を `ZANKYO_SCRUB_FIELDS` に足すと、値ごとマスクされます。
+- **自由テキストには denylist が効きません**。`errorContext` の `errorMessage`・
+  `stackTrace` や、エラー応答の中のメッセージ・スタックトレースの文字列には、
+  パターン検出だけが掛かります（`ZANKYO_SCRUB_FIELDS` も効きません）。
+  `throw new Error('invalid: ' + JSON.stringify(event))` のように例外メッセージへ
+  イベントを埋め込むと、`password` などの値が平文のまま S3 に残ります。
+  例外メッセージには、イベントや秘密の値を入れないでください。
 - **mask モード**は形状保持（`j***@e***.com`、`***1234`）で再現性を維持。
 - **hash モード**は HMAC-SHA256 擬似名化（鍵は関数名+バケット由来の
   決定的 seed。暗号化ではなく「同じ値→同じハッシュ」の再現性が目的）。
-- 無効化は `ZANKYO_SCRUB_MODE=off` の明示設定のみ。
+- 無効化は `ZANKYO_SCRUB_MODE=off` の明示設定のみ。off では自由テキストを含め、
+  何も置き換えません。
 
 ## セキュリティ
 
 - レコードは**利用者自身のアカウントの S3** にのみ保存。外部送信ゼロ。
 - 関数に付与するのは `s3:PutObject` のみ（+KMS 時は Encrypt/GenerateDataKey）。
+  書き込み先は `zankyo/{function-name}/` 配下に限るので、バケットを共有する
+  別の関数のレコードは書けません（CDK construct の場合）。
+  `ZANKYO_SSM_PARAM` を使う場合だけ、`ssm:GetParameter` を別に付与します（「設定」参照）。
+- CLI は、キーの関数名と本文の `functionName` が食い違うレコードを
+  replay・diff・redrive に使いません（exit 4）。
 - proxy が listen するのは `127.0.0.1` のみ。
 - 依存は lockfile で固定（`Cargo.lock` / `pnpm-lock.yaml`）。
   CI で `cargo audit` と `pnpm audit` を実行します。
@@ -198,6 +287,10 @@ s3://{ZANKYO_BUCKET}/zankyo/{function-name}/{yyyy}/{mm}/{dd}/{requestId}.json
 - `provided.*` ランタイムは bootstrap が exec wrapper を尊重する場合のみ。
 - SnapStart・RESPONSE_STREAM・API Gateway 29s タイムアウト（Lambda は
   成功しているケース）は正式保証外（SPEC Open Questions）。
+- 記録はベストエフォートです。S3 に届かなかったレコードは `/tmp` に残し、
+  生存中の定期回収と次回 init で再送します。`/tmp` にも残せなかった場合、
+  再送の前に実行環境が破棄された場合、spill の上限（`ZANKYO_SPILL_MAX_FILES`・
+  `ZANKYO_SPILL_MAX_AGE_SECS`）を超えた場合は、そのレコードは失われます。
 - timeout フラッシュはベストエフォート（shutdown ウィンドウ制約あり）。
 
 ## リポジトリ構成
@@ -208,44 +301,65 @@ cli/         # TypeScript CLI (node --test、AWS SDK v3、引数は node:util)
 construct/   # CDK construct (aws-cdk-lib v2、SAR 参照 + bucket/IAM 配線)
 examples/    # デモスタック（handler error / timeout / init error）
 sar/         # SAR 公開用 SAM テンプレート
-scripts/     # build-layer.mts（musl 静的バイナリ → layer zip）
+scripts/     # build-layer.mts（musl 静的バイナリ → layer zip）とそのテスト、check-versions.mts（版の一致）
 SPEC.md      # 仕様書（決定事項・スコープ外・Open Questions）
+RELEASING.md # リリースの手順（SAR・npm・GitHub Release）
 ```
 
 ## 開発
 
 ```bash
 pnpm install            # JS/TS 依存
-pnpm gate               # lint + build + typecheck + test（全パッケージ）
-cargo test --workspace  # Rust ユニットテスト
-cargo fmt --all -- --check && cargo clippy -- -D warnings
+pnpm gate               # lint + 版の一致 + build + typecheck + test（全パッケージ）
+cargo test --locked --workspace   # Rust のユニットテストと統合テスト
+cargo fmt --all -- --check && cargo clippy --locked --workspace --all-targets -- -D warnings
 ```
 
-- TS: strict + `noUncheckedIndexedAccess` + `exactOptionalPropertyTypes`、
-  Biome でフォーマット統一。テストは `node --test`（外部サービス不要）。
+- TS: strict + `noUncheckedIndexedAccess`、Biome でフォーマット統一。
+  `cli/` と `scripts/` は `exactOptionalPropertyTypes` も有効です。`construct/` と
+  `examples/` では無効です。aws-cdk-lib の型がこの設定と合わないためです
+  （例: `s3.Bucket` を `s3.IBucket` に代入できない）。
+  テストは `node --test`（外部サービス不要）。
+  `scripts/*.mts` は Node が型を除去して直接実行します。型は `pnpm typecheck` が
+  `scripts/tsconfig.json` で検査します。`scripts/*.test.mts` も `pnpm test` が実行します。
+  build-layer.mts のテストは、rustc と cargo を偽物に差し替えます。
+  梱包の中身を確かめるため、`zip` と `unzip` は本物を使います。
 - Rust: ロジック（scrub/record/config/inflight）は IO と分離した
   ユニットテスト。proxy/extension 経路はモック Runtime API/S3 への
   統合テスト（`proxy/tests/`）で検証。
+- 版: リリースでは、`cli/package.json`・`construct/package.json`・
+  `proxy/Cargo.toml`（と `Cargo.lock`）・`sar/template.yaml` の `SemanticVersion` を
+  同じ版に上げます。SAR の `SourceCodeUrl` はその版のタグを指し、`CHANGELOG.md` には
+  その版の見出しを置きます。`pnpm check:versions`（`pnpm gate` と CI が実行）で確かめます。
+  construct の既定の SAR 版は、construct のテストが `sar/template.yaml` と突き合わせます。
+  公開までの手順は [RELEASING.md](https://github.com/seike460/lambda-zankyo/blob/main/RELEASING.md) にあります。
 
 ### 保守性の指針
 
-設定は env → SSM overlay → 既定値の順で解決され、動作ノブはすべて
-`ZANKYO_*` 環境変数で外から変えられます（一覧は上の表）。拡張は
+設定は既定値 → env → SSM overlay の順に重ねて解決され（後が優先。例外は「設定」の節）、
+利用者が調整する動作ノブ（上限・タイムアウト・間隔）は `ZANKYO_*` 環境変数で外から変えられます
+（一覧は上の表）。プロトコルや実装の都合で決まる安全のための上限（Extensions API の応答ボディを
+読む 1 秒など）は、コードの定数に固定しています（一覧は ARCHITECTURE.md の「固定の安全上限」）。拡張は
 データの 1 エントリ追加で済みます: scrub パターン・CLI コマンド・
 SSM キー・build arch。spill は atomic 書き込み・上限・定期回収・
-全件回収時の dir 削除までライフサイクルが閉じており、rerun で
+送れたファイルの削除までライフサイクルが閉じており、rerun で
 残滓が増えません。不変条件の全体は ARCHITECTURE.md を参照してください。
 
 ### 再現性（reproducibility）
 
 - 依存は lockfile 固定: `Cargo.lock`（Rust）と `pnpm-lock.yaml`（JS/TS）
   をコミット済み。`pnpm install --frozen-lockfile` / `cargo build --locked`
-  で同一依存が解決されます。
-- ツールチェーンも固定: `rust-toolchain.toml`（Rust 1.98.1）、`.nvmrc`
-  （Node 25。最低要件は engines の `>=24`）、`package.json` の
-  `packageManager`（pnpm 10.13.1）。
+  で同一依存が解決されます。CI のビルド・テストと `scripts/build-layer.mts`
+  も `--locked` を付けます。`Cargo.toml` と lockfile がずれていれば失敗します。
+- ツールチェーンも固定: `rust-toolchain.toml`（Rust 1.98.1。最低要件は
+  `proxy/Cargo.toml` の `rust-version` = 1.94.1 で、CI で検証）、`.nvmrc`
+  （Node 24。engines の下限 `>=24` と同じで、CI は Node 24 と 26 で検証）、
+  `package.json` の `packageManager`（pnpm 10.13.1）。
 - CI の全 GitHub Actions はコミット SHA でピン留めしています
   （`.github/workflows/ci.yml` の `@<sha> # vN` コメント参照）。
+  cross がビルドに使うコンテナは、x86_64 と aarch64 の両方を `Cross.toml` で digest に固定しています。
+  CI は両 arch をこのコンテナでビルドし、リリースの Layer の zip にはタグの commit で CI が作った
+  artifact を使います（`RELEASING.md`）。
 - `scripts/build-layer.mts` は決定的 zip を生成します: エントリの
   mtime を最古（zip 表現の下限 1980-01-01）に揃え、`zip -X` で
   拡張属性を捨て、エントリ順を固定の引数順で渡します。
@@ -256,3 +370,29 @@ SSM キー・build arch。spill は atomic 書き込み・上限・定期回収�
 ## License
 
 MIT
+
+Layer の zip は `share/licenses/zankyo/`（Lambda 上では `/opt/share/licenses/zankyo/`）に、
+この LICENSE と `THIRD_PARTY_LICENSES`・`COPYRIGHT-library.html` を含みます。
+`THIRD_PARTY_LICENSES` は、バイナリに静的リンクされるもののライセンスと著作権表示の原文です。
+対象は、Rust の crate と、Rust の musl ターゲットがリンクするツールチェーンの部品です。
+crate の表示には、crate のサブディレクトリにあるものも含めます。crate が別のプロジェクトから
+取り込んだコード（ring の once_cell や fiat-crypto など）の表示です。
+部品は、Rust 標準ライブラリ（compiler_builtins を含む）・musl libc・
+LLVM の libunwind と crtbegin/crtend です。
+`COPYRIGHT-library.html` は、Rust 標準ライブラリのファイルごとの著作権表示と、
+標準ライブラリが依存する crate のライセンスです。Rust 1.98.1 の rustc に同梱される
+ファイルを、そのまま写しています。
+
+部品の原文は `scripts/licenses/` にあります。写した元の URL と版は、
+`scripts/build-layer.mts` の `TOOLCHAIN_NOTICES` と `RUST_LIBRARY_NOTICE` にあります。
+版は、`rust-toolchain.toml` の Rust 1.98.1 と、その Rust が musl ターゲットに同梱する
+musl 1.2.5・LLVM 22.1.8 です。Rust を上げるときは、部品の原文も更新します。
+次の場合、`scripts/build-layer.mts` は梱包を止めます。
+
+- rustc の版か、rustc の LLVM の版が違う
+- `COPYRIGHT-library.html` の写しが、rustc に同梱されたものと違う
+
+これらの表示は、`cross build` か `cargo build` でビルドしたバイナリに合わせています。
+この 2 つでは、rustc が自分の musl libc と LLVM の部品をリンクします。
+`cargo zigbuild` などは、libc と CRT を別の版に置き換えることがあります。
+そのため、`scripts/build-layer.mts` の `BUILDER` は、この 2 つだけを受け付けます。

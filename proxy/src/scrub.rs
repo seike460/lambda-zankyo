@@ -157,15 +157,41 @@ impl Scrubber {
                 }
             }
             Value::String(s) => {
-                let next = self.scrub_string(s, report);
+                let next = self
+                    .scrub_embedded_json(s, report)
+                    .unwrap_or_else(|| self.scrub_string(s, report));
                 *s = next;
             }
             _ => {}
         }
     }
 
-    /// denylist に一致したフィールド値の置き換え。
+    /// 文字列化された JSON（API Gateway・Function URL の `body` 等）の
+    /// フィールドにも denylist を効かせる。denylist に一致した場合だけ
+    /// 再シリアライズした文字列を返す。一致しなければ None を返し、
+    /// 原文へのパターン置換に任せる（空白やキー順を不要に変えない）。
+    fn scrub_embedded_json(&self, s: &str, report: &mut ScrubReport) -> Option<String> {
+        if !matches!(s.trim_start().as_bytes().first(), Some(b'{' | b'[')) {
+            return None;
+        }
+        let mut inner: Value = serde_json::from_str(s).ok()?;
+        let mut sub = ScrubReport::default();
+        self.scrub(&mut inner, &mut sub);
+        if sub.fields_redacted == 0 {
+            return None;
+        }
+        report.fields_redacted += sub.fields_redacted;
+        report.patterns_applied.extend(sub.patterns_applied);
+        Some(inner.to_string())
+    }
+
+    /// denylist に一致したフィールド値の置き換え。配列は要素ごとに
+    /// 置き換えて形を保つ（`cookies` の文字列配列が文字列に変わると、
+    /// replay でハンドラが元と別の例外で落ちるため）。
     fn redact_node(&self, v: &Value) -> Value {
+        if let Value::Array(items) = v {
+            return Value::Array(items.iter().map(|i| self.redact_node(i)).collect());
+        }
         match self.mode {
             ScrubMode::Off => v.clone(),
             ScrubMode::Hash => Value::String(format!("hmac:{}", self.hmac(v))),
@@ -189,7 +215,11 @@ impl Scrubber {
 
     /// 自由テキスト（errorMessage 等）に対するパターン置換。
     /// denylist 照合はフィールド名を持たないテキストには適用しない。
+    /// `ScrubMode::Off` では `scrub` と同じく何も置き換えない。
     pub fn scrub_text(&self, s: &str, report: &mut ScrubReport) -> String {
+        if self.mode == ScrubMode::Off {
+            return s.to_string();
+        }
         self.scrub_string(s, report)
     }
 
@@ -235,10 +265,9 @@ impl Scrubber {
 }
 
 fn mask_shape(s: &str) -> String {
-    match s.chars().count() {
-        0 => "***".to_string(),
-        1..=4 => "***".to_string(),
-        _ => format!("{}***", s.chars().next().unwrap_or('*')),
+    match s.chars().next() {
+        Some(c) if s.chars().count() > 4 => format!("{c}***"),
+        _ => "***".to_string(),
     }
 }
 
@@ -369,6 +398,84 @@ mod tests {
     }
 
     #[test]
+    fn aws_access_key_keeps_last_four() {
+        let mut v = json!({"k": "AKIAIOSFODNN7EXAMPLE"});
+        let mut r = ScrubReport::default();
+        scrubber().scrub(&mut v, &mut r);
+        assert_eq!(v["k"], "***MPLE");
+        assert!(r.patterns_applied.contains("aws_access_key"));
+    }
+
+    #[test]
+    fn bearer_token_keeps_only_scheme() {
+        let mut v = json!({"note": "Authorization: Bearer abcdefghijk123"});
+        let mut r = ScrubReport::default();
+        scrubber().scrub(&mut v, &mut r);
+        assert_eq!(v["note"], "Authorization: Bearer ***");
+        assert!(r.patterns_applied.contains("bearer_token"));
+    }
+
+    #[test]
+    fn phone_keeps_last_four() {
+        let mut v = json!({"a": "call +81-90-1234-5678", "b": "555-123-4567"});
+        let mut r = ScrubReport::default();
+        scrubber().scrub(&mut v, &mut r);
+        assert_eq!(v["a"], "call ***5678");
+        assert_eq!(v["b"], "***4567");
+        assert!(r.patterns_applied.contains("phone"));
+    }
+
+    #[test]
+    fn ipv4_keeps_last_octet() {
+        let mut v = json!({"src": "from 192.168.10.25", "ver": "999.1.1.1"});
+        let mut r = ScrubReport::default();
+        scrubber().scrub(&mut v, &mut r);
+        assert_eq!(v["src"], "from x.x.x.25");
+        assert_eq!(v["ver"], "999.1.1.1");
+        assert!(r.patterns_applied.contains("ipv4"));
+    }
+
+    #[test]
+    fn cookies_are_denied_and_keep_array_shape() {
+        let mut v = json!({
+            "headers": {"Cookie": "sid=abc123"},
+            "cookies": ["sid=abc123", "theme=dark"],
+            "multiValueHeaders": {"Set-Cookie": ["sid=abc123; HttpOnly"]},
+        });
+        let mut r = ScrubReport::default();
+        scrubber().scrub(&mut v, &mut r);
+        assert_eq!(v["headers"]["Cookie"], "s***");
+        assert_eq!(v["cookies"], json!(["s***", "t***"]));
+        assert_eq!(v["multiValueHeaders"]["Set-Cookie"], json!(["s***"]));
+        assert_eq!(r.fields_redacted, 3);
+    }
+
+    #[test]
+    fn stringified_json_body_is_walked() {
+        // API Gateway プロキシ統合の body は JSON を文字列化した値
+        let mut v = json!({
+            "body": r#"{"username":"alice","password":"hunter2"}"#,
+            "isBase64Encoded": false,
+        });
+        let mut r = ScrubReport::default();
+        scrubber().scrub(&mut v, &mut r);
+        let body: Value = serde_json::from_str(v["body"].as_str().unwrap()).unwrap();
+        assert_eq!(body, json!({"username": "alice", "password": "h***"}));
+        assert_eq!(r.fields_redacted, 1);
+    }
+
+    #[test]
+    fn stringified_json_without_denied_fields_keeps_original_text() {
+        let raw = r#"{ "to": "alice@example.com",  "n": 1 }"#;
+        let mut v = json!({"body": raw, "log": "[INFO] password reset"});
+        let mut r = ScrubReport::default();
+        scrubber().scrub(&mut v, &mut r);
+        assert_eq!(v["body"], r#"{ "to": "a***@e***.com",  "n": 1 }"#);
+        assert_eq!(v["log"], "[INFO] password reset");
+        assert_eq!(r.fields_redacted, 0);
+    }
+
+    #[test]
     fn arrays_and_nested_objects_are_walked() {
         let mut v = json!({"items": [{"password": "x"}, {"password": "y"}]});
         let mut r = ScrubReport::default();
@@ -396,6 +503,16 @@ mod tests {
         s.scrub(&mut v, &mut r);
         assert_eq!(v["password"], "plain");
         assert_eq!(r.fields_redacted, 0);
+    }
+
+    #[test]
+    fn off_mode_leaves_free_text() {
+        // off は errorMessage 等の自由テキストにもパターン置換を掛けない
+        let s = Scrubber::new(ScrubMode::Off, &BTreeSet::new(), "seed");
+        let text = "alice@example.com AKIAIOSFODNN7EXAMPLE Authorization: Bearer abcdefghijk123";
+        let mut r = ScrubReport::default();
+        assert_eq!(s.scrub_text(text, &mut r), text);
+        assert!(r.patterns_applied.is_empty());
     }
 
     #[test]

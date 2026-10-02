@@ -22,30 +22,28 @@ export function buildFixtureEvent(rec: ZankyoRecord): unknown {
 
 export function fixtureJson(rec: ZankyoRecord): string {
   const event = buildFixtureEvent(rec);
-  // 非 JSON イベントはレコードに生テキストで入っている。
+  // 非 JSON イベントはレコードに文字列（生テキストか base64）で入っている。
   // JSON 再エンコードすると原文と異なるペイロードになるため、そのまま書く。
-  if (rec.eventIsRawText && typeof event === 'string') {
-    return `${event}\n`;
-  }
-  if (rec.eventIsBase64 && typeof event === 'string') {
+  if ((rec.eventIsRawText || rec.eventIsBase64) && typeof event === 'string') {
     return `${event}\n`;
   }
   return `${JSON.stringify(event, null, 2)}\n`;
 }
 
 /**
- * replay/redrive/diff で Lambda へ送るペイロード。
- * JSON イベントはエンコード文字列、eventIsRawText の生テキストは原文のまま、
- * eventIsBase64 は元のバイト列へデコードして返す
- * （文字列化すると元イベントと異なる入力になる）。
+ * replay/redrive/diff で Lambda へ送るペイロード（JSON エンコード文字列）。
+ * Invoke API は JSON でない本文を InvalidRequestContentException で拒否する。
+ * 非 JSON イベント（eventIsRawText / eventIsBase64）は、文字列へ包むと
+ * 元イベントと異なる入力になるため、invoke の前に止める。
  */
-export function eventPayload(rec: ZankyoRecord): string | Uint8Array {
+export function eventPayload(rec: ZankyoRecord): string {
   const event = buildFixtureEvent(rec);
-  if (rec.eventIsBase64 && typeof event === 'string') {
-    return Buffer.from(event, 'base64');
+  if (rec.eventIsRawText || rec.eventIsBase64) {
+    throw new CliError(
+      'record holds a non-JSON event; the Lambda Invoke API accepts only JSON payloads',
+      4,
+      'use `zankyo fixture` to export the stored event as-is',
+    );
   }
-  if (rec.eventIsRawText && typeof event === 'string') {
-    return event;
-  }
-  return JSON.stringify(event ?? {});
+  return JSON.stringify(event);
 }

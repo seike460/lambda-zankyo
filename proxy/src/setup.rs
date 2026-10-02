@@ -25,6 +25,8 @@ pub struct RecordPlan {
 /// env 設定 + SSM overlay から起動形態を決める。
 /// 記録を続行できない理由はすべてここで warn として残し、
 /// 呼び出し側は enum の分岐だけを見ればよい。
+/// env の設定エラーと env の `ZANKYO_DISABLED` は、SSM を読む前に
+/// passthrough を決める。SSM の値ではどちらも覆らない（`config.rs` 参照）。
 pub async fn resolve_plan(env_map: &HashMap<String, String>) -> StartupPlan {
     let mut cfg = match Config::from_env_map(env_map) {
         Ok(c) => c,
@@ -37,6 +39,7 @@ pub async fn resolve_plan(env_map: &HashMap<String, String>) -> StartupPlan {
         // Lambda 環境外（ローカル実行）。プロキシ先が無いので passthrough。
         return StartupPlan::Passthrough;
     };
+    // 緊急停止は SSM の到達性に依存させない。SSM の false では解除しない。
     if cfg.disabled {
         info!("ZANKYO_DISABLED is set; running passthrough");
         return StartupPlan::Passthrough;
@@ -70,6 +73,8 @@ pub async fn apply_ssm_overlay(shared: &aws_config::SdkConfig, cfg: &mut Config)
     let Some(param) = cfg.ssm_param.clone() else {
         return;
     };
+    // 取得先と上限時間は取得の前に決まるので、env の値だけを使う
+    // （SSM の JSON は、この 2 つを上書きしない。`ssm_overlay.rs` の `ENV_ONLY_KEYS`）。
     let timeout = std::time::Duration::from_millis(cfg.ssm_timeout_ms);
     match crate::ssm::load_config_json(shared, &param, timeout).await {
         Ok(json) => {

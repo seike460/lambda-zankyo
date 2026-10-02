@@ -19,21 +19,39 @@ pnpm --filter zankyo-examples run deploy
 
 ## 検証の流れ
 
+関数名とバケット名は CloudFormation が生成します。デプロイ後、スタックの出力
+（`ThrowerFunctionName`・`SleeperFunctionName`・`InitErrorFunctionName`・
+`RecordsBucketName`）から読みます。`cdk deploy` の最後にも表示されます。
+
 ```bash
+# 0. スタックの出力から、関数名とバケット名を読む
+stack_output() {
+  aws cloudformation describe-stacks --stack-name ZankyoDemo \
+    --query "Stacks[0].Outputs[?OutputKey=='$1'].OutputValue" --output text
+}
+THROWER=$(stack_output ThrowerFunctionName)
+SLEEPER=$(stack_output SleeperFunctionName)
+export ZANKYO_BUCKET=$(stack_output RecordsBucketName)
+
 # 1. handler error を直接 invoke（RequestResponse = 同期呼び出し）
-aws lambda invoke --function-name ZankyoDemo-ThrowerXXX \
+#    AWS CLI v2 は --payload を base64 と解釈するため、JSON のまま渡す指定を付ける
+aws lambda invoke --function-name "$THROWER" \
+  --cli-binary-format raw-in-base64-out \
   --payload '{"email":"a@b.com","password":"x"}' out.json
 
 # 2. timeout ケース（3s でタイムアウトする関数）
-aws lambda invoke --function-name ZankyoDemo-SleeperXXX --payload '{}' out.json
+aws lambda invoke --function-name "$SLEEPER" \
+  --cli-binary-format raw-in-base64-out --payload '{}' out.json
 
-# 3. レコードが S3 にあることを確認
-export ZANKYO_BUCKET=<デプロイで作られたバケット>
+# 3. レコードが S3 にあることを確認（ZANKYO_BUCKET は手順 0 で設定済み）
 zankyo list --since 1h
 
-# 4. fixture → sam local で再現
-zankyo fixture --last --out event.json
-sam local invoke -e event.json
+# 4. fixture → sam local で再現（Docker が必要）
+zankyo fixture --last --function "$THROWER" --out event.json
+pnpm --filter zankyo-examples run synth
+echo '{"Parameters":{"AWS_LAMBDA_EXEC_WRAPPER":""}}' > env.json
+sam local invoke -t examples/cdk.out/ZankyoDemo.template.json Thrower \
+  -e event.json --env-vars env.json
 
 # 5. 関数を修正して新バージョン → 差分比較
 zankyo diff <requestId> --alias old --alias new
@@ -44,8 +62,29 @@ zankyo redrive <requestId> --confirm
 
 ## 注意
 
+- 手順 5・6 の `<requestId>` には、手順 3 の `zankyo list` が表示する `REQUEST_ID` を入れる。
+  手順 5 の `old`・`new` には、修正前と修正後の版に付けたエイリアスを指定する。
 - `InitError` はデプロイ直後の初回起動でしか init error を起こさない。
   実行環境が再利用されると再度 init error にならない点に注意
   （新しい実行環境の確保は、関数設定の軽微な変更→保存で誘発できる）。
-- timeout の SHUTDOWN フラッシュはベストエフォート。
-  取りこぼした場合は `/tmp/zankyo/` spill または頻度計測の対象。
+- 手順 4 の `--last` は全関数で最新のレコードを選ぶ。手順 2 の timeout レコードを
+  避けるため、`--function` で Thrower に絞る。
+- 手順 4 の `sam local invoke` は、関数を construct ID（`Thrower`）で指定する。
+  sam local は SAR の Layer を取得しないため、`AWS_LAMBDA_EXEC_WRAPPER` が
+  存在しない `/opt/zankyo-wrapper` を指したままになり、ランタイムが起動しない。
+  `env.json` はこの変数を空にして wrapper を外す。
+- sam はテンプレートの SAR アプリ（`AWS::Serverless::Application`）を解決するため、
+  Serverless Application Repository の API を呼ぶ。デプロイと同じ AWS 認証情報と
+  リージョンの設定で実行する。
+- デモのハンドラは `handlers/` のファイルで持つ。sam local は inline code
+  （`Code.fromInline`）の関数を実行しない。
+- 手順 1 の `password` は、レコードの `event` の中で denylist によりマスクされる。
+  例外メッセージには denylist が効かないため（README「PII scrub」）、デモの例外メッセージには
+  イベントを入れていない。
+- `cdk destroy` しても、レコード用のバケットは残る（`RemovalPolicy.RETAIN`）。
+  不要なら、中のレコードを消してからバケットを削除する。
+- timeout の SHUTDOWN フラッシュはベストエフォート。shutdown ウィンドウ内に
+  PutObject が終わらないと、レコードは spill（既定 `/tmp/zankyo/<関数名>`）に残る。
+  timeout 後の reset は `/tmp` を消さないため、同じ実行環境が次の呼び出しで
+  init し直すと、起動時の回収が S3 へ再送する。実行環境がそのまま破棄されると、
+  そのレコードは届かない。
