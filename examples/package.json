@@ -16,7 +16,7 @@
     "zankyo-cdk": "workspace:*"
   },
   "devDependencies": {
-    "@types/node": "26.6.2",
+    "@types/node": "26.6.3",
     "aws-cdk": "2.1142.0",
     "typescript": "7.0.2"
   }
